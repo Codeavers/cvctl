@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
+	"strings"
 )
 
 const (
@@ -31,9 +33,20 @@ type Issue struct {
 	Hint    string `json:"hint"`
 }
 
-// IssuesError reports lint findings; Fail emits them under "issues".
+// SortIssues orders issues by code, service, message so output is deterministic.
+func SortIssues(is []Issue) {
+	slices.SortStableFunc(is, func(a, b Issue) int {
+		return strings.Compare(a.Code+"\x00"+a.Service+"\x00"+a.Message, b.Code+"\x00"+b.Service+"\x00"+b.Message)
+	})
+}
+
+const defaultIssuesHint = "fix the listed issues and re-run lint"
+
+// IssuesError reports lint findings; Fail emits them under "issues". Hint
+// overrides the default lint hint for callers where re-running lint is not the fix.
 type IssuesError struct {
 	Issues []Issue
+	Hint   string
 }
 
 func (e *IssuesError) Error() string {
@@ -91,7 +104,11 @@ func (p *Printer) Fail(err error) int {
 	case errors.As(err, &oe):
 	case errors.As(err, &ie):
 		issues = ie.Issues
-		oe = &Error{Code: "E_LINT_FAILED", Message: fmt.Sprintf("%d issue(s) found", len(ie.Issues)), Hint: "fix the listed issues and re-run lint"}
+		hint := ie.Hint
+		if hint == "" {
+			hint = defaultIssuesHint
+		}
+		oe = &Error{Code: "E_LINT_FAILED", Message: fmt.Sprintf("%d issue(s) found", len(ie.Issues)), Hint: hint}
 	case code == ExitUsage:
 		oe = &Error{Code: "E_CLI_USAGE", Message: err.Error(), Hint: "run with --help to see valid usage"}
 	default:

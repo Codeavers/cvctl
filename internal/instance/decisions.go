@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -271,12 +272,44 @@ func contains(list []string, v string) bool {
 	return false
 }
 
+var (
+	dnsLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+	digestRe   = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	// identRe limits user and db names: they end up inside shell
+	// healthchecks (postgres uses CMD-SHELL with user and db).
+	identRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+)
+
+// validHostname accepts lowercase RFC 1123 hostnames. Domains are embedded in
+// a Traefik Host(`...`) rule, so anything else could inject rule syntax.
+func validHostname(h string) bool {
+	if len(h) == 0 || len(h) > 253 {
+		return false
+	}
+	for _, l := range strings.Split(h, ".") {
+		if len(l) > 63 || !dnsLabelRe.MatchString(l) {
+			return false
+		}
+	}
+	return true
+}
+
 // Check reports every gap or invalid value; issues are sorted so output is
 // deterministic.
 func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue {
 	var is []output.Issue
 	add := func(code, svc, msg, hint string) {
 		is = append(is, output.Issue{Code: code, Service: svc, Message: msg, Hint: hint})
+	}
+	switch {
+	case d.Instance == "":
+		add("E_DECISION_MISSING", "", "instance is not set", "set CVCTL_INSTANCE to <project>-<env>")
+	case !dnsLabelRe.MatchString(d.Instance):
+		add("E_DECISION_INVALID", "", fmt.Sprintf("instance %q is not a DNS label", d.Instance),
+			"use lowercase letters, digits and hyphens, e.g. myproj-dev")
+	case (d.Env == "dev" || d.Env == "prod") && !strings.HasSuffix(d.Instance, "-"+d.Env):
+		add("E_DECISION_INVALID", "", fmt.Sprintf("instance %q does not end with -%s", d.Instance, d.Env),
+			"name the instance <project>-"+d.Env)
 	}
 	switch d.Env {
 	case "":
@@ -293,11 +326,20 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 		add("E_DECISION_INVALID", "", fmt.Sprintf("strategy %q is not valid", d.Strategy), "use recreate or blue-green")
 	}
 	for _, a := range p.Apps {
-		if a.ExposePort != 0 && d.Domains[a.Name] == "" {
-			add("E_DECISION_MISSING", a.Name, "exposed app has no domain", "set CVCTL_DOMAIN_"+contract.Normalize(a.Name))
+		n := contract.Normalize(a.Name)
+		if a.ExposePort != 0 {
+			if dom := d.Domains[a.Name]; dom == "" {
+				add("E_DECISION_MISSING", a.Name, "exposed app has no domain", "set CVCTL_DOMAIN_"+n)
+			} else if !validHostname(dom) {
+				add("E_DECISION_INVALID", a.Name, fmt.Sprintf("domain %q is not a valid hostname", dom),
+					"set CVCTL_DOMAIN_"+n+" to lowercase labels of letters, digits and hyphens separated by dots")
+			}
 		}
-		if d.Digests[a.Name] == "" {
-			add("E_DECISION_MISSING", a.Name, "app has no image digest", "set CVCTL_DIGEST_"+contract.Normalize(a.Name))
+		if dg := d.Digests[a.Name]; dg == "" {
+			add("E_DECISION_MISSING", a.Name, "app has no image digest", "set CVCTL_DIGEST_"+n)
+		} else if !digestRe.MatchString(dg) {
+			add("E_DECISION_INVALID", a.Name, fmt.Sprintf("digest %q is not sha256:<64 hex>", dg),
+				"set CVCTL_DIGEST_"+n+" to the lowercase sha256 image digest")
 		}
 	}
 	for _, ds := range p.Data {
@@ -317,6 +359,12 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 			} {
 				if f.val == "" && kindUses(kind, f.ph) {
 					add("E_DECISION_MISSING", ds.Name, "local service credential "+strings.ToLower(f.name)+" is not set", "set "+pre+f.name)
+				}
+			}
+			for _, f := range []struct{ name, val string }{{"USER", s.Creds.User}, {"DB", s.Creds.DB}} {
+				if f.val != "" && !identRe.MatchString(f.val) {
+					add("E_DECISION_INVALID", ds.Name, fmt.Sprintf("%s must match [A-Za-z0-9_]+", strings.ToLower(f.name)),
+						"set "+pre+f.name+" to letters, digits and underscores only")
 				}
 			}
 			if s.Version != "" && len(kind.Versions) > 0 && !contains(kind.Versions, s.Version) {
@@ -339,15 +387,6 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 			add("E_DECISION_INVALID", ds.Name, fmt.Sprintf("mode %q is not valid", s.Mode), "use local or external")
 		}
 	}
-	sort.SliceStable(is, func(i, j int) bool {
-		a, b := is[i], is[j]
-		if a.Code != b.Code {
-			return a.Code < b.Code
-		}
-		if a.Service != b.Service {
-			return a.Service < b.Service
-		}
-		return a.Message < b.Message
-	})
+	output.SortIssues(is)
 	return is
 }

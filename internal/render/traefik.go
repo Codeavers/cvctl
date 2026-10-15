@@ -11,6 +11,9 @@ import (
 // none is exposed. Traefik has no Docker socket access, so these files are
 // the only source of routes.
 func Traefik(p *contract.Project, d *instance.Decisions, o Options) ([]byte, error) {
+	if d.Instance == "" {
+		return nil, missing("instance")
+	}
 	routers := map[string]any{}
 	services := map[string]any{}
 	for _, a := range p.Apps {

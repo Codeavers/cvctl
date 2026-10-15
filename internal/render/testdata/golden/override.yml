@@ -9,7 +9,7 @@ services:
   api:
     env_file:
       - /srv/inst/proj-dev/app.env
-    image: ghcr.io/org/project-api@sha256:abc
+    image: ghcr.io/org/project-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     networks:
       app: {}
       data: {}

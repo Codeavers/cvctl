@@ -38,7 +38,7 @@ func setup(t *testing.T) (*contract.Project, *instance.Decisions, kinds.Catalog)
 			"media":   {Mode: "external", External: map[string]string{"endpoint": "https://s3", "bucket": "b", "access_key": "ak", "secret_key": "sk", "region": "r"}},
 		},
 		Domains: map[string]string{"api": "api.example.com"},
-		Digests: map[string]string{"api": "sha256:abc"},
+		Digests: map[string]string{"api": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 	}
 	return p, d, cat
 }
@@ -253,5 +253,16 @@ func TestUnsafeUserOrDB(t *testing.T) {
 		if !ok || e.Code != "E_DECISION_INVALID" || !strings.Contains(e.Hint, want) {
 			t.Fatalf("%s: %v", field, err)
 		}
+	}
+}
+
+func TestEmptyInstanceRefused(t *testing.T) {
+	p, d, cat := setup(t)
+	d.Instance = ""
+	if _, err := Override(p, d, cat, Options{InstanceDir: "/x", Edge: "edge"}); err == nil {
+		t.Fatal("Override accepted empty instance")
+	}
+	if _, err := Traefik(p, d, Options{Edge: "edge"}); err == nil {
+		t.Fatal("Traefik accepted empty instance")
 	}
 }

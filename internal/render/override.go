@@ -76,6 +76,9 @@ func hasProjectMemoryLimit(p *contract.Project, name string) bool {
 }
 
 func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o Options) ([]byte, error) {
+	if d.Instance == "" {
+		return nil, missing("instance")
+	}
 	services := map[string]any{}
 	volumes := map[string]any{}
 

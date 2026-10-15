@@ -58,3 +58,26 @@ func TestPrinterFailHuman(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+func TestSortIssues(t *testing.T) {
+	is := []Issue{{Code: "B", Service: "a", Message: "x"}, {Code: "A", Service: "z", Message: "x"}, {Code: "A", Service: "a", Message: "y"}, {Code: "A", Service: "a", Message: "x"}}
+	SortIssues(is)
+	var got []string
+	for _, i := range is {
+		got = append(got, i.Code+i.Service+i.Message)
+	}
+	if want := []string{"Aax", "Aay", "Azx", "Bax"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestIssuesErrorHint(t *testing.T) {
+	for hint, want := range map[string]string{"": "re-run lint", "fix cvctl.env": "hint: fix cvctl.env"} {
+		var out, errb bytes.Buffer
+		p := &Printer{Out: &out, Err: &errb}
+		p.Fail(&IssuesError{Issues: []Issue{{Code: "X"}}, Hint: hint})
+		if !strings.Contains(errb.String(), want) {
+			t.Fatalf("hint %q: got %q", hint, errb.String())
+		}
+	}
+}

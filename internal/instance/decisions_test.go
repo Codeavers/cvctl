@@ -35,7 +35,7 @@ func full() *Decisions {
 			"media":   {Mode: "external", External: map[string]string{"endpoint": "https://s3", "bucket": "b", "access_key": "ak", "secret_key": "sk", "region": "r"}},
 		},
 		Domains: map[string]string{"api": "api.example.com"},
-		Digests: map[string]string{"api": "sha256:abc"},
+		Digests: map[string]string{"api": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 	}
 }
 
@@ -127,6 +127,7 @@ func TestCheckMissing(t *testing.T) {
 	p, cat := load(t)
 	is := Check(&Decisions{}, p, cat)
 	want := []string{
+		"E_DECISION_MISSING:", // instance
 		"E_DECISION_MISSING:", // env
 		"E_DECISION_MISSING:", // strategy
 		"E_DECISION_MISSING:api",
@@ -219,5 +220,84 @@ func TestCheckRedisOnlyPassword(t *testing.T) {
 	is := Check(d, p, cat)
 	if len(is) != 1 || !strings.Contains(is[0].Hint, "_PASSWORD") {
 		t.Fatalf("got %v", is)
+	}
+}
+
+func issueMsgs(is []output.Issue, code string) []output.Issue {
+	var out []output.Issue
+	for _, i := range is {
+		if i.Code == code {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+func TestCheckInstance(t *testing.T) {
+	p, cat := load(t)
+	for _, tc := range []struct{ name, inst string }{
+		{"not a label", "Proj_dev"},
+		{"wrong env suffix", "proj-prod"},
+		{"no suffix", "proj"},
+		{"leading hyphen", "-dev"},
+	} {
+		d := full()
+		d.Instance = tc.inst
+		is := Check(d, p, cat)
+		if len(is) != 1 || is[0].Code != "E_DECISION_INVALID" || is[0].Hint == "" {
+			t.Fatalf("%s: got %v", tc.name, is)
+		}
+	}
+	d := full()
+	d.Instance = ""
+	is := Check(d, p, cat)
+	if len(is) != 1 || is[0].Code != "E_DECISION_MISSING" || !strings.Contains(is[0].Hint, "CVCTL_INSTANCE") {
+		t.Fatalf("empty: got %v", is)
+	}
+}
+
+func TestCheckCredCharset(t *testing.T) {
+	p, cat := load(t)
+	d := full()
+	s := d.Services["main-db"]
+	s.Creds.User = "u;drop"
+	s.Creds.DB = "d b"
+	d.Services["main-db"] = s
+	is := issueMsgs(Check(d, p, cat), "E_DECISION_INVALID")
+	if len(is) != 2 {
+		t.Fatalf("got %v", is)
+	}
+	joined := is[0].Hint + is[1].Hint
+	if !strings.Contains(joined, "CVCTL_SVC_MAIN_DB_USER") || !strings.Contains(joined, "CVCTL_SVC_MAIN_DB_DB") {
+		t.Fatalf("hints: %v", is)
+	}
+}
+
+func TestCheckDomain(t *testing.T) {
+	p, cat := load(t)
+	for _, bad := range []string{"a.com`) || Host(`b", "-a.com", "a-.com", "A.com", "a..com", "a b.com", strings.Repeat("a", 254)} {
+		d := full()
+		d.Domains["api"] = bad
+		is := Check(d, p, cat)
+		if len(is) != 1 || is[0].Code != "E_DECISION_INVALID" || is[0].Service != "api" {
+			t.Fatalf("%q: got %v", bad, is)
+		}
+	}
+	d := full()
+	d.Domains["api"] = "api-1.example.com"
+	if is := Check(d, p, cat); len(is) != 0 {
+		t.Fatalf("got %v", is)
+	}
+}
+
+func TestCheckDigest(t *testing.T) {
+	p, cat := load(t)
+	for _, bad := range []string{"sha256:abc", "sha256:" + strings.Repeat("A", 64), "md5:" + strings.Repeat("a", 64), "latest"} {
+		d := full()
+		d.Digests["api"] = bad
+		is := Check(d, p, cat)
+		if len(is) != 1 || is[0].Code != "E_DECISION_INVALID" || is[0].Service != "api" {
+			t.Fatalf("%q: got %v", bad, is)
+		}
 	}
 }
