@@ -4,6 +4,7 @@ go 1.25
 
 require (
 	github.com/compose-spec/compose-go/v2 v2.16.1
+	github.com/joho/godotenv v1.5.1
 	github.com/spf13/cobra v1.10.2
 	gopkg.in/yaml.v3 v3.0.1
 )
