@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/codeavers/cvctl/internal/output"
@@ -206,11 +207,15 @@ func TestLoadOK(t *testing.T) {
 
 func TestLoadInvalid(t *testing.T) {
 	for name, body := range map[string]string{
-		"magic":      "vars:\n  A: {source: magic}\n",
-		"no service": "vars:\n  A: {source: service}\n",
-		"no value":   "vars:\n  A: {source: fixed}\n",
-		"bad value":  "vars:\n  A: {source: fixed, value: [1]}\n",
-		"bad yaml":   "vars: [",
+		"magic":          "vars:\n  A: {source: magic}\n",
+		"no service":     "vars:\n  A: {source: service}\n",
+		"no value":       "vars:\n  A: {source: fixed}\n",
+		"bad value":      "vars:\n  A: {source: fixed, value: [1]}\n",
+		"bad yaml":       "vars: [",
+		"typo secret":    "vars:\n  A: {source: prompt, secert: true}\n",
+		"typo length":    "vars:\n  A: {source: random, lenght: 4}\n",
+		"typo default":   "vars:\n  A: {source: prompt, defualt: x}\n",
+		"top-level typo": "varz:\n  A: {source: random}\n",
 	} {
 		_, err := Load(write(t, body))
 		if c := code(t, err); c != "E_ENVSPEC_INVALID" {
@@ -220,5 +225,21 @@ func TestLoadInvalid(t *testing.T) {
 	_, err := Load(filepath.Join(t.TempDir(), "missing.yml"))
 	if c := code(t, err); c != "E_ENVSPEC_INVALID" {
 		t.Fatal(c)
+	}
+}
+
+func TestLoadErrorNamesVar(t *testing.T) {
+	_, err := Load(write(t, "vars:\n  Z: {source: random}\n  B_VAR: {source: fixed, value: [1]}\n  A_VAR: {source: prompt, secert: true}\n"))
+	var e *output.Error
+	if !errors.As(err, &e) || !strings.Contains(e.Message, "A_VAR") || !strings.Contains(e.Message, "secert") {
+		t.Fatalf("got %v", err)
+	}
+	_, err = Load(write(t, "vars:\n  B_VAR: {source: fixed, value: [1]}\n"))
+	if !errors.As(err, &e) || !strings.Contains(e.Message, "B_VAR") {
+		t.Fatalf("got %v", err)
+	}
+	_, err = Load(write(t, "vars:\n  Y: {source: magic}\n  X: {source: service}\n"))
+	if !errors.As(err, &e) || !strings.Contains(e.Message, "var X") {
+		t.Fatalf("validation not in sorted order: %v", err)
 	}
 }

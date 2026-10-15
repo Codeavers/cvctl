@@ -1,8 +1,12 @@
 package envspec
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"sort"
 
 	"gopkg.in/yaml.v3"
 
@@ -24,12 +28,23 @@ type Spec struct {
 	Vars map[string]Var `yaml:"vars"`
 }
 
+var knownVarKeys = map[string]bool{"source": true, "service": true, "length": true, "value": true, "default": true, "secret": true}
+
 func invalid(msg, hint string) error {
 	return &output.Error{Code: "E_ENVSPEC_INVALID", Message: msg, Hint: hint}
 }
 
 // UnmarshalYAML decodes Value separately because it is either a scalar or an env->string map.
 func (v *Var) UnmarshalYAML(n *yaml.Node) error {
+	// Node.Decode ignores the caller's KnownFields, so unknown keys (typos such
+	// as "secert") are rejected here.
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if k := n.Content[i].Value; !knownVarKeys[k] {
+				return fmt.Errorf("unknown key %q (valid keys: source, service, length, value, default, secret)", k)
+			}
+		}
+	}
 	type plain Var
 	aux := struct {
 		plain `yaml:",inline"`
@@ -65,11 +80,32 @@ func Load(path string) (*Spec, error) {
 	if err != nil {
 		return nil, invalid(fmt.Sprintf("cannot read env spec %s: %v", path, err), "check the path to env.spec.yml")
 	}
-	var s Spec
-	if err := yaml.Unmarshal(data, &s); err != nil {
-		return nil, invalid(fmt.Sprintf("cannot parse env spec %s: %v", path, err), "fix the YAML syntax; values must be strings or env->string maps")
+	// Vars are decoded one by one so errors name the offending var, in sorted
+	// order so the same file always reports the same first error.
+	var raw struct {
+		Vars map[string]yaml.Node `yaml:"vars"`
 	}
-	for name, v := range s.Vars {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&raw); err != nil && !errors.Is(err, io.EOF) {
+		return nil, invalid(fmt.Sprintf("cannot parse env spec %s: %v", path, err), "fix the YAML syntax; the only top-level key is vars")
+	}
+	names := make([]string, 0, len(raw.Vars))
+	for n := range raw.Vars {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	s := Spec{Vars: make(map[string]Var, len(raw.Vars))}
+	for _, name := range names {
+		node := raw.Vars[name]
+		var v Var
+		if err := node.Decode(&v); err != nil {
+			return nil, invalid(fmt.Sprintf("var %s: %v", name, err), "fix the var definition; values must be strings or env->string maps")
+		}
+		s.Vars[name] = v
+	}
+	for _, name := range names {
+		v := s.Vars[name]
 		switch v.Source {
 		case "service":
 			if v.Service == "" {
