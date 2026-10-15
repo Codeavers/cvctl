@@ -21,6 +21,9 @@ var embedded embed.FS
 
 var backups = []string{"wal-g", "volume", "none"}
 
+// ValidBackup reports whether b is an accepted backup strategy.
+func ValidBackup(b string) bool { return slices.Contains(backups, b) }
+
 type Kind struct {
 	Name           string            `yaml:"name"`
 	Image          string            `yaml:"image"`

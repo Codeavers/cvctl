@@ -4,7 +4,7 @@ x-cvctl:
     http: ""
     timeout: 30s
   verify:
-    service: api
+    service: db
     sql: select 1
   hooks:
     pre-deploy:

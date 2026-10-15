@@ -53,6 +53,18 @@ func randomString(r io.Reader, n int) (string, error) {
 
 var tplRef = regexp.MustCompile(`\{([a-z]+):([^{}]*)\}`)
 
+// TemplateRef is one {kind:name} reference inside a template value.
+type TemplateRef struct{ Kind, Name string }
+
+// TemplateRefs lists the references in a template value, in order.
+func TemplateRefs(raw string) []TemplateRef {
+	var out []TemplateRef
+	for _, m := range tplRef.FindAllStringSubmatch(raw, -1) {
+		out = append(out, TemplateRef{Kind: m[1], Name: m[2]})
+	}
+	return out
+}
+
 func tplErr(name, msg string) error {
 	return &output.Error{Code: "E_ENVSPEC_TEMPLATE_REF", Message: fmt.Sprintf("var %s: %s", name, msg), Hint: "references are {domain:<service>} and {var:<NAME>}; referenced vars must resolve and not form a cycle"}
 }
