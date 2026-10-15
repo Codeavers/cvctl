@@ -48,6 +48,7 @@ type Config struct {
 	Registries     string
 	RegistryUser   string
 	vals           map[string]string
+	extra          map[string]string // host.env entries cvctl does not know; kept verbatim on Save
 }
 
 var dnsLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -107,7 +108,7 @@ func invalid(key string, err error) error {
 	}
 }
 
-func newConfig() *Config { return &Config{vals: map[string]string{}} }
+func newConfig() *Config { return &Config{vals: map[string]string{}, extra: map[string]string{}} }
 
 // Get returns the raw value of key (without the CVCTL_ prefix), "" if unset.
 func (c *Config) Get(key string) string { return c.vals[key] }
@@ -217,11 +218,18 @@ func Load(fsys sys.FS, dir string) (*Config, *Secrets, error) {
 		if perr != nil {
 			return nil, nil, readErr(envPath, perr)
 		}
+		known := map[string]bool{}
 		for _, k := range knownKeys {
+			known[envPrefix+k] = true
 			if v, ok := m[envPrefix+k]; ok {
 				if err := cfg.Set(k, v); err != nil {
 					return nil, nil, err
 				}
+			}
+		}
+		for k, v := range m {
+			if !known[k] {
+				cfg.extra[k] = v
 			}
 		}
 	}
@@ -239,7 +247,9 @@ func Load(fsys sys.FS, dir string) (*Config, *Secrets, error) {
 	return cfg, sec, nil
 }
 
-var deployOwner = sys.Owner{User: "root", Group: "deploy"}
+// owner is root:root because the deploy group may not exist yet when init
+// first saves; the accounts step later sets root:deploy.
+var owner = sys.Owner{User: "root", Group: "root"}
 
 func writeErr(p string, err error) error {
 	return &output.Error{
@@ -249,34 +259,41 @@ func writeErr(p string, err error) error {
 	}
 }
 
-// Save writes host.env and one file per set secret. A missing dir is created
-// root:root 0700 (init tightens it to root:deploy 0750 once the group exists);
-// secrets are never written to host.env.
+// Save writes host.env and one file per set secret, everything root:root
+// (dir 0700 when created, secrets dir 0750, files 0640). Unknown host.env
+// entries read by Load are preserved; secrets cleared with Set(name, "") have
+// their file removed; secrets are never written to host.env.
 func Save(fsys sys.FS, dir string, cfg *Config, sec *Secrets) error {
 	if _, err := fsys.Stat(dir); err != nil {
-		if err := fsys.MkdirAll(dir, 0o700, sys.Owner{User: "root", Group: "root"}); err != nil {
+		if err := fsys.MkdirAll(dir, 0o700, owner); err != nil {
 			return writeErr(dir, err)
 		}
 	}
 	values := map[string]string{}
+	for k, v := range cfg.extra {
+		values[k] = v
+	}
 	for k, v := range cfg.vals {
 		values[envPrefix+k] = v
 	}
 	envPath := path.Join(dir, "host.env")
-	if err := fsys.WriteFile(envPath, instance.FormatEnv(values), 0o640, deployOwner); err != nil {
+	if err := fsys.WriteFile(envPath, instance.FormatEnv(values), 0o640, owner); err != nil {
 		return writeErr(envPath, err)
 	}
 	sdir := path.Join(dir, "secrets")
-	if err := fsys.MkdirAll(sdir, 0o750, deployOwner); err != nil {
+	if err := fsys.MkdirAll(sdir, 0o750, owner); err != nil {
 		return writeErr(sdir, err)
 	}
 	for _, n := range SecretNames {
 		v, ok := sec.Get(n)
+		p := path.Join(sdir, n)
 		if !ok {
+			if err := fsys.Remove(p); err != nil {
+				return writeErr(p, err)
+			}
 			continue
 		}
-		p := path.Join(sdir, n)
-		if err := fsys.WriteFile(p, []byte(v), 0o640, deployOwner); err != nil {
+		if err := fsys.WriteFile(p, []byte(v), 0o640, owner); err != nil {
 			return writeErr(p, err)
 		}
 	}

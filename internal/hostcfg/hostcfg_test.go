@@ -40,13 +40,13 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	files := fs.Files()
-	if fi := files["/etc/cvctl/host.env"]; fi.Mode != 0o640 || fi.User != "root" || fi.Group != "deploy" {
+	if fi := files["/etc/cvctl/host.env"]; fi.Mode != 0o640 || fi.User != "root" || fi.Group != "root" {
 		t.Fatalf("host.env info %+v", fi)
 	}
 	if fi := files["/etc/cvctl/secrets"]; fi.Mode != 0o750 || !fi.IsDir {
 		t.Fatalf("secrets dir info %+v", fi)
 	}
-	if fi := files["/etc/cvctl/secrets/telegram_token"]; fi.Mode != 0o640 || fi.Group != "deploy" {
+	if fi := files["/etc/cvctl/secrets/telegram_token"]; fi.Mode != 0o640 || fi.Group != "root" {
 		t.Fatalf("secret info %+v", fi)
 	}
 	if _, ok := files["/etc/cvctl/secrets/s3_secret_key"]; ok {
@@ -194,5 +194,40 @@ func TestResolveValidatesAnswer(t *testing.T) {
 func TestNewHuhPrompter(t *testing.T) {
 	if hostcfg.NewHuhPrompter(strings.NewReader(""), &strings.Builder{}) == nil {
 		t.Fatal("nil prompter")
+	}
+}
+
+func TestSavePreservesUnknownKeys(t *testing.T) {
+	fs := systest.NewFS()
+	in := "CVCTL_FUTURE_KEY=x\nCVCTL_HOST_NAME=box\nOTHER=y\n"
+	if err := fs.WriteFile("/etc/cvctl/host.env", []byte(in), 0o640, sys.Owner{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hostcfg.Save(fs, "/etc/cvctl", cfg, sec); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := fs.ReadFile("/etc/cvctl/host.env")
+	if string(b) != "CVCTL_FUTURE_KEY=x\nCVCTL_HOST_NAME=box\nOTHER=y\n" {
+		t.Fatalf("host.env = %q", b)
+	}
+}
+
+func TestSaveRemovesClearedSecret(t *testing.T) {
+	fs := systest.NewFS()
+	cfg, sec := fullCfg(t)
+	sec.Set("registry_token", "rt")
+	if err := hostcfg.Save(fs, "/etc/cvctl", cfg, sec); err != nil {
+		t.Fatal(err)
+	}
+	sec.Set("registry_token", "")
+	if err := hostcfg.Save(fs, "/etc/cvctl", cfg, sec); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fs.Files()["/etc/cvctl/secrets/registry_token"]; ok {
+		t.Fatal("cleared secret file still present")
 	}
 }
