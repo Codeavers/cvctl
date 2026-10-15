@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"fmt"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -103,6 +105,9 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 			services[ds.Name] = map[string]any{"profiles": []string{"cvctl-disabled"}}
 			continue
 		}
+		if err := validateCreds(ds.Name, sd.Creds); err != nil {
+			return nil, err
+		}
 		k := cat[ds.Kind]
 		version := sd.Version
 		if version == "" {
@@ -145,7 +150,54 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 	if len(volumes) > 0 {
 		doc["volumes"] = volumes
 	}
-	return marshal(doc)
+	return marshalEscaped(doc)
+}
+
+var safeIdent = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+
+// validateCreds guards the values that end up inside a shell healthcheck
+// (postgres uses CMD-SHELL with user and db). Passwords are not restricted:
+// they are never interpolated into a shell command line by a kind.
+func validateCreds(name string, c kinds.Credentials) error {
+	for _, f := range []struct{ field, val string }{{"USER", c.User}, {"DB", c.DB}} {
+		if f.val != "" && !safeIdent.MatchString(f.val) {
+			key := "CVCTL_SVC_" + contract.Normalize(name) + "_" + f.field
+			return &output.Error{
+				Code:    "E_DECISION_INVALID",
+				Message: fmt.Sprintf("%s of service %s must match [A-Za-z0-9_]+", strings.ToLower(f.field), name),
+				Hint:    "set " + key + " to letters, digits and underscores only",
+			}
+		}
+	}
+	return nil
+}
+
+// marshalEscaped doubles every "$" in string values: docker compose
+// interpolates the override at deploy time, unlike env_file contents.
+func marshalEscaped(v any) ([]byte, error) {
+	var n yaml.Node
+	if err := n.Encode(v); err != nil {
+		return nil, err
+	}
+	escapeValues(&n)
+	return marshal(&n)
+}
+
+func escapeValues(n *yaml.Node) {
+	switch n.Kind {
+	case yaml.MappingNode:
+		for i := 1; i < len(n.Content); i += 2 {
+			escapeValues(n.Content[i])
+		}
+	case yaml.ScalarNode:
+		if n.Tag == "!!str" {
+			n.Value = strings.ReplaceAll(n.Value, "$", "$$")
+		}
+	default:
+		for _, c := range n.Content {
+			escapeValues(c)
+		}
+	}
 }
 
 func substituteAll(k kinds.Kind, in []string, c kinds.Credentials) []string {

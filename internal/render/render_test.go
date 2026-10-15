@@ -10,6 +10,7 @@ import (
 
 	"github.com/compose-spec/compose-go/v2/loader"
 	"github.com/compose-spec/compose-go/v2/types"
+	"gopkg.in/yaml.v3"
 
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/instance"
@@ -177,9 +178,80 @@ func TestOverrideIsValidCompose(t *testing.T) {
 
 func TestProjectMemoryLimitKept(t *testing.T) {
 	p, d, cat := setup(t)
-	if !hasProjectMemoryLimit(p, "api") || hasProjectMemoryLimit(p, "main-db") {
-		t.Fatal("memory limit detection wrong")
+	svc := p.Compose.Services["main-db"]
+	svc.Deploy = &types.DeployConfig{Resources: types.Resources{Limits: &types.Resource{MemoryBytes: 1 << 30}}}
+	p.Compose.Services["main-db"] = svc
+	out, err := Override(p, d, cat, Options{InstanceDir: "/x", Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	_ = d
-	_ = cat
+	var doc struct {
+		Services map[string]map[string]any `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := doc.Services["main-db"]["deploy"]; ok {
+		t.Fatal("main-db must not get a deploy block")
+	}
+	if _, ok := doc.Services["cache"]["deploy"]; !ok || !strings.Contains(string(out), "memory: 512m") {
+		t.Fatal("cache must still get 512m")
+	}
+}
+
+func TestDollarEscaping(t *testing.T) {
+	p, d, cat := setup(t)
+	pw := "ab$cd$$e"
+	sd := d.Services["main-db"]
+	sd.Creds.Password = pw
+	d.Services["main-db"] = sd
+	sd = d.Services["cache"]
+	sd.Creds.Password = pw
+	d.Services["cache"] = sd
+	out, err := Override(p, d, cat, Options{InstanceDir: "/x", Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(out), "ab$$cd$$$$e"); n < 3 {
+		t.Fatalf("want escaped password in environment, command and healthcheck, got %d\n%s", n, out)
+	}
+	cp, err := loader.LoadWithContext(context.Background(), types.ConfigDetails{
+		WorkingDir: "testdata/valid",
+		ConfigFiles: []types.ConfigFile{
+			{Filename: "compose.yml", Content: p.RawCompose},
+			{Filename: "compose.cvctl.yml", Content: out},
+		},
+		Environment: types.Mapping{},
+	}, func(o *loader.Options) {
+		o.SkipConsistencyCheck = true
+		o.SkipResolveEnvironment = true
+		o.SetProjectName("cvctl-lint", true)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cp.Services["main-db"].Environment["POSTGRES_PASSWORD"]; got == nil || *got != pw {
+		t.Fatalf("interpolated password = %v, want %q", got, pw)
+	}
+	if cmd := cp.Services["cache"].Command; cmd[2] != pw {
+		t.Fatalf("interpolated command = %v", cmd)
+	}
+}
+
+func TestUnsafeUserOrDB(t *testing.T) {
+	for field, want := range map[string]string{"user": "CVCTL_SVC_MAIN_DB_USER", "db": "CVCTL_SVC_MAIN_DB_DB"} {
+		p, d, cat := setup(t)
+		sd := d.Services["main-db"]
+		if field == "user" {
+			sd.Creds.User = "u; rm -rf /"
+		} else {
+			sd.Creds.DB = "d$(x)"
+		}
+		d.Services["main-db"] = sd
+		_, err := Override(p, d, cat, Options{InstanceDir: "/x", Edge: "edge"})
+		e, ok := err.(*output.Error)
+		if !ok || e.Code != "E_DECISION_INVALID" || !strings.Contains(e.Hint, want) {
+			t.Fatalf("%s: %v", field, err)
+		}
+	}
 }
