@@ -215,3 +215,15 @@ func TestCommandsHaveExamples(t *testing.T) {
 		}
 	}
 }
+
+func TestDemoWorkerRole(t *testing.T) {
+	b, err := os.ReadFile("../../examples/demo/compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := strings.Index(string(b), "  worker:")
+	j := strings.Index(string(b), "  main-db:")
+	if !strings.Contains(string(b)[i:j], "cvctl.role: worker") {
+		t.Fatal("demo worker must use cvctl.role: worker")
+	}
+}

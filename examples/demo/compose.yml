@@ -26,7 +26,7 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
     labels:
-      cvctl.role: app
+      cvctl.role: worker
     deploy: { resources: { limits: { memory: 128m } } }
   main-db:
     labels: { cvctl.kind: postgres, cvctl.version: "16", cvctl.env: DATABASE }

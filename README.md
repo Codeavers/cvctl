@@ -24,22 +24,22 @@ The directory holds `cvctl.env` (the instance decisions) and `infra/` (a checkou
 of the project's infra, containing `compose.yml` and `env.spec.yml`).
 
 ```
-cvctl render --instance-dir /srv/instances/demo-dev [--edge edge|behind-proxy]
+cvctl render --instance-dir /srv/deploy/demo-dev [--edge edge|behind-proxy]
 ```
 
 It writes, atomically and with mode `0640`:
 
-- `compose.cvctl.yml`: override file wiring data services, limits and Traefik labels;
+- `compose.cvctl.yml`: override file wiring data services, limits, networks and the route aliases (routes themselves come from the Traefik file provider, see `traefik.yml`);
 - `traefik.yml`: routes, only when some service is exposed;
 - `app.env`: resolved variables from `env.spec.yml`, sorted. Existing values
-  (including ones set with `cvctl set-env`) and generated secrets are preserved,
+  (including ones set with `cvctl set-env`, coming in a later release) and generated secrets are preserved,
   so re-running is idempotent.
 
 Variables of source `prompt` without a default are not an error: they are
-reported as `missing` together with a hint, and the render still succeeds.
+reported as `missing` together with a hint, and the render still succeeds. `cvctl set-env` is coming in a later release; until then set the value in `app.env` by hand.
 
 ```
-$ cvctl render --instance-dir /srv/instances/demo-dev --json
+$ cvctl render --instance-dir /srv/deploy/demo-dev --json
 {"ok":true,"data":{"files":[...],"generated":["JWT_SECRET"],"hint":"cvctl set-env demo-dev SMTP_PASSWORD","instance":"demo-dev","missing":["SMTP_PASSWORD"]}}
 ```
 
