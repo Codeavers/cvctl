@@ -217,9 +217,9 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 	return nil
 }
 
-// WriteEnvFile writes values as a dotenv file (mode 0640, sorted keys, values
-// quoted so godotenv reads them back unchanged).
-func WriteEnvFile(path string, values map[string]string) error {
+// FormatEnv renders values as dotenv text (sorted keys, values quoted so
+// godotenv reads them back unchanged).
+func FormatEnv(values map[string]string) []byte {
 	keys := make([]string, 0, len(values))
 	for k := range values {
 		keys = append(keys, k)
@@ -229,7 +229,12 @@ func WriteEnvFile(path string, values map[string]string) error {
 	for _, k := range keys {
 		b.WriteString(k + "=" + quote(values[k]) + "\n")
 	}
-	return WriteFileAtomic(path, []byte(b.String()), 0o640)
+	return []byte(b.String())
+}
+
+// WriteEnvFile writes values as a dotenv file (mode 0640).
+func WriteEnvFile(path string, values map[string]string) error {
+	return WriteFileAtomic(path, FormatEnv(values), 0o640)
 }
 
 func Write(path string, d *Decisions) error {
