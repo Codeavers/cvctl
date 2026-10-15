@@ -226,6 +226,33 @@ func Write(path string, d *Decisions) error {
 	return nil
 }
 
+// kindUses reports whether any template of the kind references placeholder;
+// only referenced credential fields are required for a local service.
+func kindUses(k kinds.Kind, placeholder string) bool {
+	has := func(v string) bool { return strings.Contains(v, placeholder) }
+	for _, v := range k.ContainerEnv {
+		if has(v) {
+			return true
+		}
+	}
+	for _, v := range k.Env {
+		if has(v) {
+			return true
+		}
+	}
+	for _, v := range k.Command {
+		if has(v) {
+			return true
+		}
+	}
+	for _, v := range k.Health {
+		if has(v) {
+			return true
+		}
+	}
+	return false
+}
+
 func contains(list []string, v string) bool {
 	for _, x := range list {
 		if x == v {
@@ -274,8 +301,14 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 		kind := cat[ds.Kind]
 		switch s.Mode {
 		case "local":
-			if s.Creds == (kinds.Credentials{}) {
-				add("E_DECISION_MISSING", ds.Name, "local service has no credentials", "set "+pre+"USER, _PASSWORD and _DB")
+			for _, f := range []struct{ name, ph, val string }{
+				{"USER", "{user}", s.Creds.User},
+				{"PASSWORD", "{password}", s.Creds.Password},
+				{"DB", "{db}", s.Creds.DB},
+			} {
+				if f.val == "" && kindUses(kind, f.ph) {
+					add("E_DECISION_MISSING", ds.Name, "local service credential "+strings.ToLower(f.name)+" is not set", "set "+pre+f.name)
+				}
 			}
 			if s.Version != "" && len(kind.Versions) > 0 && !contains(kind.Versions, s.Version) {
 				add("E_DECISION_INVALID", ds.Name, fmt.Sprintf("version %q is not available for kind %s", s.Version, ds.Kind),

@@ -152,7 +152,7 @@ func TestCheckLocalNoCredsAndExternalFields(t *testing.T) {
 	d.Services["main-db"] = ServiceDecision{Mode: "local", Version: "16"}
 	d.Services["media"] = ServiceDecision{Mode: "external", External: map[string]string{"endpoint": "e"}}
 	got := codes(Check(d, p, cat))
-	want := []string{"E_DECISION_MISSING:main-db", "E_DECISION_MISSING:media", "E_DECISION_MISSING:media", "E_DECISION_MISSING:media", "E_DECISION_MISSING:media"}
+	want := []string{"E_DECISION_MISSING:main-db", "E_DECISION_MISSING:main-db", "E_DECISION_MISSING:main-db", "E_DECISION_MISSING:media", "E_DECISION_MISSING:media", "E_DECISION_MISSING:media", "E_DECISION_MISSING:media"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v", got)
 	}
@@ -195,5 +195,29 @@ func TestWriteQuoting(t *testing.T) {
 	b, _ := os.ReadFile(path)
 	if !strings.Contains(string(b), `CVCTL_INSTANCE="a b"`) {
 		t.Fatalf("%s", b)
+	}
+}
+
+func TestCheckPartialCreds(t *testing.T) {
+	p, cat := load(t)
+	d := full()
+	d.Services["main-db"] = ServiceDecision{Mode: "local", Version: "16", Creds: kinds.Credentials{User: "u"}}
+	is := Check(d, p, cat)
+	if len(is) != 2 || is[0].Service != "main-db" || !strings.Contains(is[0].Hint, "_DB") || !strings.Contains(is[1].Hint, "_PASSWORD") {
+		t.Fatalf("got %v", is)
+	}
+}
+
+func TestCheckRedisOnlyPassword(t *testing.T) {
+	p, cat := load(t)
+	d := full()
+	d.Services["cache"] = ServiceDecision{Mode: "local", Version: "7", Creds: kinds.Credentials{Password: "x"}}
+	if is := Check(d, p, cat); len(is) != 0 {
+		t.Fatalf("got %v", is)
+	}
+	d.Services["cache"] = ServiceDecision{Mode: "local", Version: "7"}
+	is := Check(d, p, cat)
+	if len(is) != 1 || !strings.Contains(is[0].Hint, "_PASSWORD") {
+		t.Fatalf("got %v", is)
 	}
 }
