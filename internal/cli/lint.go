@@ -6,8 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -21,7 +19,9 @@ func newLintCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "lint [dir]",
 		Short: "Validate compose.yml and env.spec.yml against the cvctl contract",
-		Args:  cobra.MaximumNArgs(1),
+		Example: `  cvctl lint
+  cvctl lint ./infra --json`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir := "."
 			if len(args) == 1 {
@@ -53,9 +53,7 @@ func newLintCmd() *cobra.Command {
 				extra = append(extra, output.Issue{Code: oe.Code, Message: oe.Message, Hint: oe.Hint})
 			}
 			issues := append(contract.Validate(p, cat, spec), extra...)
-			slices.SortFunc(issues, func(a, b output.Issue) int {
-				return strings.Compare(a.Code+"\x00"+a.Service+"\x00"+a.Message, b.Code+"\x00"+b.Service+"\x00"+b.Message)
-			})
+			output.SortIssues(issues)
 			if len(issues) > 0 {
 				return &output.IssuesError{Issues: issues}
 			}

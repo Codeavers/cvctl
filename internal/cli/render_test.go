@@ -169,3 +169,49 @@ func TestLintDemo(t *testing.T) {
 		t.Fatalf("code %d: %s", code, out)
 	}
 }
+
+func TestRenderRelativeInstanceDirGivesAbsoluteEnvFile(t *testing.T) {
+	inst := copyDemo(t, demoDecisions)
+	wd, _ := os.Getwd()
+	if err := os.Chdir(filepath.Dir(inst)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(wd) })
+	if code, out, errs := run(t, "render", "--instance-dir", filepath.Base(inst)); code != 0 {
+		t.Fatalf("code %d: %s %s", code, out, errs)
+	}
+	b, err := os.ReadFile(filepath.Join(inst, "compose.cvctl.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// t.TempDir may traverse a symlink (macOS /var); compare on the base only.
+	for _, line := range strings.Split(string(b), "\n") {
+		if l := strings.TrimSpace(line); strings.HasSuffix(l, "app.env") && strings.HasPrefix(l, "- ") {
+			if !filepath.IsAbs(strings.TrimPrefix(l, "- ")) {
+				t.Fatalf("env_file not absolute: %s", l)
+			}
+		}
+	}
+	if !strings.Contains(string(b), "/app.env") {
+		t.Fatalf("no env_file in:\n%s", b)
+	}
+}
+
+func TestRenderFailureHintIsNotRerunLint(t *testing.T) {
+	inst := copyDemo(t, strings.ReplaceAll(demoDecisions, "CVCTL_SVC_MAIN_DB_MODE=local\n", ""))
+	_, _, errs := run(t, "render", "--instance-dir", inst)
+	if strings.Contains(errs, "re-run lint") || !strings.Contains(errs, "cvctl.env") {
+		t.Fatalf("hint: %s", errs)
+	}
+}
+
+func TestCommandsHaveExamples(t *testing.T) {
+	for _, c := range NewRoot("x").Commands() {
+		if c.Name() == "help" || c.Name() == "completion" {
+			continue
+		}
+		if c.Example == "" {
+			t.Errorf("%s has no Example", c.Name())
+		}
+	}
+}

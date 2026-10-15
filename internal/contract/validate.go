@@ -2,7 +2,6 @@ package contract
 
 import (
 	"fmt"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -112,8 +111,6 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 		}
 	}
 
-	slices.SortFunc(out, func(a, b output.Issue) int {
-		return strings.Compare(a.Code+"\x00"+a.Service+"\x00"+a.Message, b.Code+"\x00"+b.Service+"\x00"+b.Message)
-	})
+	output.SortIssues(out)
 	return out
 }

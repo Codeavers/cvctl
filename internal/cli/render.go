@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
@@ -20,11 +19,15 @@ import (
 	"github.com/codeavers/cvctl/kinds"
 )
 
+const renderIssuesHint = "fix cvctl.env (or the infra checkout) as each issue's hint says, then re-run render"
+
 func newRenderCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "render",
 		Short: "Render compose.cvctl.yml, traefik.yml and app.env for one instance (offline)",
-		Args:  cobra.NoArgs,
+		Example: `  cvctl render --instance-dir /srv/deploy/demo-dev
+  cvctl render --instance-dir /srv/deploy/demo-dev --edge behind-proxy --json`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			dir, _ := cmd.Flags().GetString("instance-dir")
 			edge, _ := cmd.Flags().GetString("edge")
@@ -75,6 +78,12 @@ func (r renderResult) data() map[string]any {
 }
 
 func renderInstance(dir, edge string) (renderResult, error) {
+	// env_file entries in the override must be absolute: compose resolves
+	// relative paths against its own project directory, not the cwd.
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return renderResult{}, err
+	}
 	cat, err := kinds.Load()
 	if err != nil {
 		return renderResult{}, err
@@ -104,7 +113,7 @@ func renderInstance(dir, edge string) (renderResult, error) {
 
 	specPath := filepath.Join(infra, "env.spec.yml")
 	if _, statErr := os.Stat(specPath); statErr != nil {
-		return renderResult{}, &output.IssuesError{Issues: []output.Issue{{
+		return renderResult{}, &output.IssuesError{Hint: renderIssuesHint, Issues: []output.Issue{{
 			Code:    "E_CONTRACT_NO_ENVSPEC",
 			Message: "env.spec.yml not found",
 			Hint:    "create env.spec.yml next to compose.yml declaring every variable the compose file references",
@@ -117,10 +126,8 @@ func renderInstance(dir, edge string) (renderResult, error) {
 
 	issues := append(contract.Validate(p, cat, spec), instance.Check(d, p, cat)...)
 	if len(issues) > 0 {
-		slices.SortFunc(issues, func(a, b output.Issue) int {
-			return strings.Compare(a.Code+"\x00"+a.Service+"\x00"+a.Message, b.Code+"\x00"+b.Service+"\x00"+b.Message)
-		})
-		return renderResult{}, &output.IssuesError{Issues: issues}
+		output.SortIssues(issues)
+		return renderResult{}, &output.IssuesError{Issues: issues, Hint: renderIssuesHint}
 	}
 
 	svcVars, err := render.ServiceVars(p, d, cat)
