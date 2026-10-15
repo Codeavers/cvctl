@@ -177,26 +177,16 @@ func quote(v string) string {
 
 func writeErr(path string, err error) error {
 	return &output.Error{
-		Code:    "E_DECISION_WRITE",
+		Code:    "E_FILE_WRITE",
 		Message: fmt.Sprintf("cannot write %s: %v", path, err),
 		Hint:    "check permissions and free space of the instance directory",
 	}
 }
 
-// Write is atomic (temp file in the same dir + rename) so a crash never
-// leaves a half-written decisions file.
-func Write(path string, d *Decisions) error {
-	m := d.entries()
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, k := range keys {
-		b.WriteString(k + "=" + quote(m[k]) + "\n")
-	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".cvctl.env.*")
+// WriteFileAtomic writes via a temp file in the same dir + rename, so a crash
+// never leaves a half-written file.
+func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
 		return writeErr(path, err)
 	}
@@ -206,10 +196,10 @@ func Write(path string, d *Decisions) error {
 		os.Remove(tmp)
 		return writeErr(path, err)
 	}
-	if _, err := f.WriteString(b.String()); err != nil {
+	if _, err := f.Write(data); err != nil {
 		return fail(err)
 	}
-	if err := f.Chmod(0o640); err != nil {
+	if err := f.Chmod(mode); err != nil {
 		return fail(err)
 	}
 	if err := f.Sync(); err != nil {
@@ -224,6 +214,25 @@ func Write(path string, d *Decisions) error {
 		return writeErr(path, err)
 	}
 	return nil
+}
+
+// WriteEnvFile writes values as a dotenv file (mode 0640, sorted keys, values
+// quoted so godotenv reads them back unchanged).
+func WriteEnvFile(path string, values map[string]string) error {
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k + "=" + quote(values[k]) + "\n")
+	}
+	return WriteFileAtomic(path, []byte(b.String()), 0o640)
+}
+
+func Write(path string, d *Decisions) error {
+	return WriteEnvFile(path, d.entries())
 }
 
 // kindUses reports whether any template of the kind references placeholder;

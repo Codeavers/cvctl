@@ -1,0 +1,171 @@
+package cli
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+const demoDecisions = `CVCTL_INSTANCE=demo-dev
+CVCTL_ENV=dev
+CVCTL_STRATEGY=recreate
+CVCTL_DOMAIN_API=api.example.com
+CVCTL_DIGEST_API=sha256:aaa
+CVCTL_DIGEST_WORKER=sha256:bbb
+CVCTL_SVC_MAIN_DB_MODE=local
+CVCTL_SVC_MAIN_DB_VERSION=16
+CVCTL_SVC_MAIN_DB_USER=demo
+CVCTL_SVC_MAIN_DB_PASSWORD=dbpass
+CVCTL_SVC_MAIN_DB_DB=demo
+CVCTL_SVC_CACHE_MODE=local
+CVCTL_SVC_CACHE_PASSWORD=redispass
+CVCTL_SVC_MEDIA_MODE=local
+CVCTL_SVC_MEDIA_USER=media
+CVCTL_SVC_MEDIA_PASSWORD=mediapass
+CVCTL_SVC_MEDIA_DB=uploads
+`
+
+func copyDemo(t *testing.T, decisions string) string {
+	t.Helper()
+	inst := t.TempDir()
+	infra := filepath.Join(inst, "infra")
+	if err := os.MkdirAll(infra, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"compose.yml", "env.spec.yml"} {
+		b, err := os.ReadFile(filepath.Join("..", "..", "examples", "demo", f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(infra, f), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(inst, "cvctl.env"), []byte(decisions), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	return inst
+}
+
+type renderData struct {
+	OK   bool `json:"ok"`
+	Data struct {
+		Instance  string   `json:"instance"`
+		Missing   []string `json:"missing"`
+		Generated []string `json:"generated"`
+		Files     []string `json:"files"`
+		Hint      string   `json:"hint"`
+	} `json:"data"`
+	Issues []struct {
+		Code string `json:"code"`
+	} `json:"issues"`
+}
+
+func TestRenderDemo(t *testing.T) {
+	inst := copyDemo(t, demoDecisions)
+	code, out, errs := run(t, "render", "--instance-dir", inst, "--json")
+	if code != 0 {
+		t.Fatalf("code %d: %s %s", code, out, errs)
+	}
+	var r renderData
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"compose.cvctl.yml", "traefik.yml", "app.env"} {
+		st, err := os.Stat(filepath.Join(inst, f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm() != 0o640 {
+			t.Errorf("%s mode %v", f, st.Mode().Perm())
+		}
+	}
+	env, _ := os.ReadFile(filepath.Join(inst, "app.env"))
+	if !strings.Contains(string(env), "DATABASE_URL=postgres://demo:dbpass@main-db:5432/demo") {
+		t.Fatalf("app.env:\n%s", env)
+	}
+	if len(r.Data.Missing) != 1 || r.Data.Missing[0] != "SMTP_PASSWORD" {
+		t.Fatalf("missing %v", r.Data.Missing)
+	}
+	if r.Data.Hint != "cvctl set-env demo-dev SMTP_PASSWORD" || r.Data.Instance != "demo-dev" {
+		t.Fatalf("data %+v", r.Data)
+	}
+	if len(r.Data.Generated) != 1 || r.Data.Generated[0] != "JWT_SECRET" || len(r.Data.Files) != 3 {
+		t.Fatalf("data %+v", r.Data)
+	}
+}
+
+func TestRenderIdempotent(t *testing.T) {
+	inst := copyDemo(t, demoDecisions)
+	read := func() map[string]string {
+		m := map[string]string{}
+		for _, f := range []string{"compose.cvctl.yml", "traefik.yml", "app.env"} {
+			b, err := os.ReadFile(filepath.Join(inst, f))
+			if err != nil {
+				t.Fatal(err)
+			}
+			m[f] = string(b)
+		}
+		return m
+	}
+	if code, out, _ := run(t, "render", "--instance-dir", inst, "--json"); code != 0 {
+		t.Fatalf("code %d: %s", code, out)
+	}
+	first := read()
+	code, out, _ := run(t, "render", "--instance-dir", inst, "--json")
+	if code != 0 {
+		t.Fatalf("code %d: %s", code, out)
+	}
+	var r renderData
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Data.Generated) != 0 || !strings.Contains(out, `"generated":[]`) {
+		t.Fatalf("second run generated: %s", out)
+	}
+	second := read()
+	for f, v := range first {
+		if second[f] != v {
+			t.Errorf("%s differs between runs", f)
+		}
+	}
+}
+
+func TestRenderIncompleteDecisions(t *testing.T) {
+	inst := copyDemo(t, strings.ReplaceAll(demoDecisions, "CVCTL_SVC_MAIN_DB_MODE=local\n", ""))
+	code, out, _ := run(t, "render", "--instance-dir", inst, "--json")
+	if code != 1 || !strings.Contains(out, "E_DECISION_MISSING") {
+		t.Fatalf("code %d: %s", code, out)
+	}
+	if _, err := os.Stat(filepath.Join(inst, "app.env")); err == nil {
+		t.Fatal("nothing must be written on failure")
+	}
+}
+
+func TestRenderUsage(t *testing.T) {
+	if code, _, _ := run(t, "render"); code != 2 {
+		t.Fatalf("missing --instance-dir: code %d", code)
+	}
+	if code, _, _ := run(t, "render", "--instance-dir", t.TempDir(), "--edge", "bogus"); code != 2 {
+		t.Fatalf("bad --edge: code %d", code)
+	}
+}
+
+func TestRenderKeepsExistingAppEnv(t *testing.T) {
+	inst := copyDemo(t, demoDecisions)
+	if err := os.WriteFile(filepath.Join(inst, "app.env"), []byte("SMTP_PASSWORD='p$ss \"x\"'\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := run(t, "render", "--instance-dir", inst, "--json")
+	if code != 0 || !strings.Contains(out, `"missing":[]`) {
+		t.Fatalf("code %d: %s", code, out)
+	}
+}
+
+func TestLintDemo(t *testing.T) {
+	if code, out, _ := run(t, "lint", "../../examples/demo"); code != 0 {
+		t.Fatalf("code %d: %s", code, out)
+	}
+}
