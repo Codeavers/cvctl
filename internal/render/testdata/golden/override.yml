@@ -1,0 +1,68 @@
+networks:
+  app: {}
+  data:
+    internal: true
+  edge:
+    external: true
+    name: cvctl-edge
+services:
+  api:
+    env_file:
+      - /srv/inst/proj-dev/app.env
+    image: ghcr.io/org/project-api@sha256:abc
+    networks:
+      app: {}
+      data: {}
+      edge:
+        aliases:
+          - proj-dev-api
+    restart: unless-stopped
+  cache:
+    command:
+      - redis-server
+      - --requirepass
+      - rp
+      - --appendonly
+      - "yes"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - -a
+        - rp
+        - ping
+    image: redis:7-alpine
+    networks:
+      - data
+    restart: unless-stopped
+    volumes:
+      - cache-data:/data
+  main-db:
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    environment:
+      POSTGRES_DB: d
+      POSTGRES_PASSWORD: p
+      POSTGRES_USER: u
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U u -d d
+    image: ghcr.io/codeavers/cvctl-postgres:16
+    networks:
+      - data
+    restart: unless-stopped
+    volumes:
+      - main-db-data:/var/lib/postgresql/data
+  media:
+    profiles:
+      - cvctl-disabled
+volumes:
+  cache-data: {}
+  main-db-data: {}
