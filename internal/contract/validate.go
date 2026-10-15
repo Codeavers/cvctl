@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/codeavers/cvctl/internal/envspec"
@@ -54,6 +55,12 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 				add("E_CONTRACT_NO_MEMORY_LIMIT", name, "app service has no memory limit",
 					"set deploy.resources.limits.memory, e.g. 256M")
 			}
+			if v, ok := svc.Labels[LabelExpose]; ok {
+				if n, err := strconv.Atoi(v); err != nil || n < 1 || n > 65535 {
+					add("E_CONTRACT_EXPOSE_INVALID", name, fmt.Sprintf("%s %q is not a port number", LabelExpose, v),
+						fmt.Sprintf("set %s to the container port, e.g. \"3000\"", LabelExpose))
+				}
+			}
 			for dep := range svc.DependsOn {
 				if isData[dep] {
 					add("E_CONTRACT_DEPENDS_ON_DATA", name, fmt.Sprintf("depends_on targets data service %s", dep),
@@ -83,8 +90,8 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 		}
 	}
 
-	if !isApp[p.X.Health.Service] {
-		add("E_CONTRACT_NO_HEALTH", "", "x-cvctl.health is missing or names a service that is not an app service",
+	if !isApp[p.X.Health.Service] || p.X.Health.HTTP == "" {
+		add("E_CONTRACT_NO_HEALTH", "", "x-cvctl.health is missing, empty http, or names a service that is not an app service",
 			"set x-cvctl.health.service to an app service and health.http to its health path")
 	}
 	for _, hooks := range [][]Hook{p.X.Hooks.PreDeploy, p.X.Hooks.PostDeploy} {

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/compose-spec/compose-go/v2/loader"
@@ -24,6 +23,7 @@ const (
 	LabelRole     = "cvctl.role"
 	LabelKind     = "cvctl.kind"
 	LabelVersion  = "cvctl.version"
+	LabelExpose   = "cvctl.expose"
 	LabelEnv      = "cvctl.env"
 	LabelBackup   = "cvctl.backup"
 	LabelExternal = "cvctl.external"
@@ -92,8 +92,8 @@ type rawExt struct {
 		SQL     string `yaml:"sql"`
 	} `yaml:"verify"`
 	Hooks struct {
-		PreDeploy  []rawHook `yaml:"pre_deploy"`
-		PostDeploy []rawHook `yaml:"post_deploy"`
+		PreDeploy  []rawHook `yaml:"pre-deploy"`
+		PostDeploy []rawHook `yaml:"post-deploy"`
 	} `yaml:"hooks"`
 }
 
@@ -170,7 +170,7 @@ func Load(dir string, cat kinds.Catalog) (*Project, error) {
 				Kind:            kind,
 				Version:         svc.Labels[LabelVersion],
 				EnvPrefix:       svc.Labels[LabelEnv],
-				ExternalAllowed: svc.Labels[LabelExternal] == "true",
+				ExternalAllowed: svc.Labels[LabelExternal] == "allowed",
 			}
 			if k, ok := cat[kind]; ok {
 				if d.Version == "" {
@@ -186,9 +186,8 @@ func Load(dir string, cat kinds.Catalog) (*Project, error) {
 		}
 		if role := svc.Labels[LabelRole]; role != "" {
 			a := AppService{Name: n, Role: role, Image: svc.Image}
-			if len(svc.Expose) > 0 {
-				a.ExposePort, _ = strconv.Atoi(strings.SplitN(svc.Expose[0], "/", 2)[0])
-			}
+			// A non-integer label leaves ExposePort 0; Validate reports it.
+			a.ExposePort, _ = strconv.Atoi(svc.Labels[LabelExpose])
 			p.Apps = append(p.Apps, a)
 		}
 	}

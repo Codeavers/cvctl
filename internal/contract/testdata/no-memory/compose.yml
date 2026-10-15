@@ -7,7 +7,7 @@ x-cvctl:
     service: api
     sql: select 1
   hooks:
-    pre_deploy:
+    pre-deploy:
       - service: api
         run: migrate
 services:

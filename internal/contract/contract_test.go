@@ -24,6 +24,8 @@ func TestValidateFixtures(t *testing.T) {
 		"unknown-kind":   "E_CONTRACT_UNKNOWN_KIND",
 		"bad-version":    "E_CONTRACT_KIND_VERSION",
 		"collision":      "E_CONTRACT_NAME_COLLISION",
+		"empty-http":     "E_CONTRACT_NO_HEALTH",
+		"bad-expose":     "E_CONTRACT_EXPOSE_INVALID",
 		"depends-data":   "E_CONTRACT_DEPENDS_ON_DATA",
 	}
 	for name, want := range cases {
@@ -63,14 +65,21 @@ func TestLoadValid(t *testing.T) {
 	if len(p.Apps) != 1 || p.Apps[0].Name != "api" || p.Apps[0].Role != "app" || p.Apps[0].ExposePort != 3000 {
 		t.Fatalf("apps: %+v", p.Apps)
 	}
-	if len(p.Data) != 1 {
+	if len(p.Data) != 3 {
 		t.Fatalf("data: %+v", p.Data)
 	}
-	d := p.Data[0]
-	if d.Kind != "postgres" || d.Version != "16" || d.EnvPrefix != "DB" || d.Backup != "wal-g" {
+	byName := map[string]DataService{}
+	for _, d := range p.Data {
+		byName[d.Name] = d
+	}
+	if !byName["cache"].ExternalAllowed || !byName["media"].ExternalAllowed || byName["main-db"].ExternalAllowed {
+		t.Fatalf("external: %+v", p.Data)
+	}
+	d := byName["main-db"]
+	if d.Kind != "postgres" || d.Version != "16" || d.EnvPrefix != "DATABASE" || d.Backup != "wal-g" {
 		t.Fatalf("data: %+v", d)
 	}
-	if p.X.Health.HTTP != "/health" || p.X.Health.Timeout.Seconds() != 30 || p.X.Verify == nil || len(p.X.Hooks.PreDeploy) != 1 {
+	if p.X.Health.HTTP != "/health" || p.X.Health.Timeout.Seconds() != 90 || p.X.Verify == nil || len(p.X.Hooks.PreDeploy) != 1 || len(p.X.Hooks.PostDeploy) != 1 || p.X.Hooks.PostDeploy[0].Run != "node dist/warmup.js" {
 		t.Fatalf("ext: %+v", p.X)
 	}
 }

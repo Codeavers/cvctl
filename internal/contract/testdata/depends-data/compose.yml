@@ -7,15 +7,15 @@ x-cvctl:
     service: api
     sql: select 1
   hooks:
-    pre_deploy:
+    pre-deploy:
       - service: api
         run: migrate
 services:
   api:
     image: ghcr.io/x/api:1
-    expose: ["3000"]
     labels:
       cvctl.role: app
+      cvctl.expose: "3000"
     environment:
       DATABASE_URL: ${DB_URL}
       JWT: $JWT

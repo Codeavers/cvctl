@@ -1,31 +1,22 @@
 x-cvctl:
-  health:
-    service: api
-    http: /health
-    timeout: 30s
-  verify:
-    service: api
-    sql: select 1
+  health: { service: api, http: /health, timeout: 90s }
+  verify: { service: main-db, sql: "select count(*) from users" }
   hooks:
-    pre_deploy:
-      - service: api
-        run: migrate
+    pre-deploy:  [{ service: api, run: "node dist/migrate.js" }]
+    post-deploy: [{ service: api, run: "node dist/warmup.js" }]
+
 services:
   api:
-    image: ghcr.io/x/api:1
-    expose: ["3000"]
+    image: ghcr.io/org/project-api
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
     labels:
       cvctl.role: app
-    environment:
-      DATABASE_URL: ${DB_URL}
-      JWT: $JWT
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-  db:
-    labels:
-      cvctl.kind: postgres
-      cvctl.version: "16"
-      cvctl.env: DB
-
+      cvctl.expose: "3000"
+    deploy: { resources: { limits: { memory: 512m } } }
+  main-db:
+    labels: { cvctl.kind: postgres, cvctl.version: "16", cvctl.env: DATABASE }
+  cache:
+    labels: { cvctl.kind: redis, cvctl.env: REDIS, cvctl.external: allowed }
+  media:
+    labels: { cvctl.kind: s3, cvctl.env: S3, cvctl.external: allowed }
