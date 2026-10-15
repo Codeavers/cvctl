@@ -147,12 +147,25 @@ func TestTemplateChainAndErrors(t *testing.T) {
 
 func TestTemplateRefMissingPrompt(t *testing.T) {
 	s := &Spec{Vars: map[string]Var{
-		"P": {Source: "prompt"},
-		"T": {Source: "template", Value: "x{var:P}"},
+		"P":  {Source: "prompt"},
+		"T":  {Source: "template", Value: "x{var:P}"},
+		"T2": {Source: "template", Value: "y{var:T}"},
+		"OK": {Source: "fixed", Value: "ok"},
 	}}
-	_, err := Resolve(s, Input{})
-	if c := code(t, err); c != "E_ENVSPEC_TEMPLATE_REF" {
-		t.Fatal(c)
+	res, err := Resolve(s, Input{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(res.Missing, []string{"P"}) {
+		t.Fatalf("missing %v", res.Missing)
+	}
+	for _, k := range []string{"P", "T", "T2"} {
+		if _, ok := res.Values[k]; ok {
+			t.Fatalf("%s should be absent", k)
+		}
+	}
+	if res.Values["OK"] != "ok" {
+		t.Fatalf("%v", res.Values)
 	}
 }
 

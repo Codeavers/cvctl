@@ -128,6 +128,13 @@ func Resolve(s *Spec, in Input) (Result, error) {
 
 	// Templates are resolved lazily so they can reference each other; state detects cycles.
 	state := map[string]int{} // 1 = in progress, 2 = done
+	// A template that depends on an unresolved prompt var is skipped, not failed: the root
+	// prompt var is already in Missing and the caller blocks on it.
+	missingSet := map[string]bool{}
+	for _, m := range missing {
+		missingSet[m] = true
+	}
+	skipped := map[string]bool{}
 	var resolveTpl func(name string) error
 	resolveTpl = func(name string) error {
 		switch state[name] {
@@ -142,6 +149,7 @@ func Resolve(s *Spec, in Input) (Result, error) {
 			return invalid(fmt.Sprintf("var %s: template value must be a string", name), "set value to a string")
 		}
 		var rerr error
+		blocked := false
 		out := tplRef.ReplaceAllStringFunc(raw, func(m string) string {
 			if rerr != nil {
 				return m
@@ -162,6 +170,10 @@ func Resolve(s *Spec, in Input) (Result, error) {
 						return m
 					}
 				}
+				if missingSet[sub[2]] || skipped[sub[2]] {
+					blocked = true
+					return m
+				}
 				val, ok := values[sub[2]]
 				if !ok {
 					rerr = tplErr(name, fmt.Sprintf("unknown or unresolved var %q", sub[2]))
@@ -174,6 +186,11 @@ func Resolve(s *Spec, in Input) (Result, error) {
 		})
 		if rerr != nil {
 			return rerr
+		}
+		if blocked {
+			skipped[name] = true
+			state[name] = 2
+			return nil
 		}
 		values[name] = out
 		state[name] = 2
