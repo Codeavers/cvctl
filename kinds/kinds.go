@@ -6,6 +6,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -79,6 +80,27 @@ func validate(k Kind) error {
 	}
 	if !strings.Contains(k.Image, "{version}") {
 		return invalid(k.Name, "image must contain {version}")
+	}
+	// Env keys and External fields describe the same variables for local and
+	// external mode; a mismatch would make a var exist in only one mode.
+	envKeys, extKeys := map[string]bool{}, map[string]bool{}
+	for key := range k.Env {
+		envKeys[strings.ToUpper(key)] = true
+	}
+	for _, f := range k.External {
+		extKeys[strings.ToUpper(f)] = true
+	}
+	if !maps.Equal(envKeys, extKeys) {
+		return invalid(k.Name, "env keys and external fields must name the same variables")
+	}
+	// A password inside a CMD-SHELL line is parsed by a shell, so it would need
+	// quoting; kinds with shell health checks must not put it there.
+	if len(k.Health) > 0 && k.Health[0] == "CMD-SHELL" {
+		for _, e := range append(slices.Clone(k.Health), k.Command...) {
+			if strings.Contains(e, "{password}") {
+				return invalid(k.Name, "{password} must not appear in command or health when health uses CMD-SHELL")
+			}
+		}
 	}
 	return nil
 }

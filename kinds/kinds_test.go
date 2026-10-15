@@ -124,3 +124,38 @@ func TestSubstitute(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+func TestLoadRejectsEnvExternalMismatch(t *testing.T) {
+	base := "name: a\nimage: x:{version}\nversions: [\"1\"]\ndefault_version: \"1\"\nbackup: none\n"
+	for name, extra := range map[string]string{
+		"env without external": "env: {URL: \"u\"}\n",
+		"external without env": "external: [url]\n",
+		"different names":      "env: {URL: \"u\"}\nexternal: [endpoint]\n",
+	} {
+		_, err := LoadFS(fstest.MapFS{"a.yml": {Data: []byte(base + extra)}})
+		if got := code(t, err); got != "E_KIND_INVALID" {
+			t.Errorf("%s: code = %s", name, got)
+		}
+	}
+	ok := base + "env: {Access_Key: \"u\"}\nexternal: [access_key]\n"
+	if _, err := LoadFS(fstest.MapFS{"a.yml": {Data: []byte(ok)}}); err != nil {
+		t.Errorf("matching sets rejected: %v", err)
+	}
+}
+
+func TestLoadRejectsPasswordInShellHealth(t *testing.T) {
+	base := "name: a\nimage: x:{version}\nversions: [\"1\"]\ndefault_version: \"1\"\nbackup: none\n"
+	for name, extra := range map[string]string{
+		"health":  "health: [CMD-SHELL, \"ping {password}\"]\n",
+		"command": "command: [serve, \"{password}\"]\nhealth: [CMD-SHELL, ping]\n",
+	} {
+		_, err := LoadFS(fstest.MapFS{"a.yml": {Data: []byte(base + extra)}})
+		if got := code(t, err); got != "E_KIND_INVALID" {
+			t.Errorf("%s: code = %s", name, got)
+		}
+	}
+	ok := base + "command: [serve, \"{password}\"]\nhealth: [CMD, ping, \"{password}\"]\n"
+	if _, err := LoadFS(fstest.MapFS{"a.yml": {Data: []byte(ok)}}); err != nil {
+		t.Errorf("CMD form rejected: %v", err)
+	}
+}
