@@ -1,0 +1,12 @@
+name: redis
+image: redis:{version}-alpine
+versions: ["7"]
+default_version: "7"
+port: 6379
+volume_path: /data
+command: ["redis-server", "--requirepass", "{password}", "--appendonly", "yes"]
+env:
+  URL: "redis://:{password}@{host}:{port}/0"
+backup: none
+external: [url]
+health: ["CMD", "redis-cli", "-a", "{password}", "ping"]

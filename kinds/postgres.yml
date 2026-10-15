@@ -1,0 +1,16 @@
+name: postgres
+image: ghcr.io/codeavers/cvctl-postgres:{version}
+versions: ["15", "16", "17"]
+default_version: "16"
+port: 5432
+volume_path: /var/lib/postgresql/data
+container_env:
+  POSTGRES_USER: "{user}"
+  POSTGRES_PASSWORD: "{password}"
+  POSTGRES_DB: "{db}"
+env:
+  URL: "postgres://{user}:{password}@{host}:{port}/{db}"
+backup: wal-g
+external: [url]
+health: ["CMD-SHELL", "pg_isready -U {user} -d {db}"]
+restore_check: "select count(*) from information_schema.tables where table_schema='public'"
