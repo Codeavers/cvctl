@@ -1,0 +1,19 @@
+services:
+  api:
+    image: ghcr.io/x/api:1
+    expose: ["3000"]
+    labels:
+      cvctl.role: app
+    environment:
+      DATABASE_URL: ${DB_URL}
+      JWT: $JWT
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+  db:
+    labels:
+      cvctl.kind: postgres
+      cvctl.version: "16"
+      cvctl.env: DB
+

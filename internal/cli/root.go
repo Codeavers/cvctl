@@ -24,6 +24,7 @@ func NewRoot(version string) *cobra.Command {
 		return &output.UsageError{Err: err}
 	})
 	root.AddCommand(newVersionCmd(version))
+	root.AddCommand(newLintCmd())
 	return root
 }
 
