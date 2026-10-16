@@ -28,6 +28,7 @@ func NewRoot(version string) *cobra.Command {
 	root.AddCommand(newRenderCmd())
 	root.AddCommand(newInitCmd())
 	root.AddCommand(newNotifyCmd())
+	root.AddCommand(newProjectCmd())
 	return root
 }
 

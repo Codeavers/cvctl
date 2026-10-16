@@ -121,7 +121,7 @@ func Read(path string, p *contract.Project) (*Decisions, error) {
 	return d, nil
 }
 
-func (d *Decisions) entries() map[string]string {
+func (d *Decisions) Entries() map[string]string {
 	m := map[string]string{}
 	set := func(k, v string) {
 		if v != "" {
@@ -238,7 +238,7 @@ func WriteEnvFile(path string, values map[string]string) error {
 }
 
 func Write(path string, d *Decisions) error {
-	return WriteEnvFile(path, d.entries())
+	return WriteEnvFile(path, d.Entries())
 }
 
 // kindUses reports whether any template of the kind references placeholder;
