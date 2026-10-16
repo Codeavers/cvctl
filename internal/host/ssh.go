@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/codeavers/cvctl/internal/hostcfg"
@@ -18,7 +19,7 @@ const (
 	sshDropInPath    = "/etc/ssh/sshd_config.d/00-cvctl.conf"
 	sshDropInContent = "PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\nPubkeyAuthentication yes\n"
 	sshPendingMsg    = "ssh hardened; confirm from a NEW session within 5 minutes: sudo cvctl init confirm-ssh"
-	sshConfirmPrompt = "Open a NEW ssh session to this server now. If it works, answer yes. If you answer no or do nothing for 5 minutes, the change is reverted."
+	sshConfirmPrompt = "Open a NEW session to this server now, log in and run sudo -v before answering yes. If you answer no or do nothing for 5 minutes, the change is reverted."
 	sshRevertNotice  = " (the change will be reverted automatically within 5 minutes)"
 )
 
@@ -29,6 +30,37 @@ func (SSHStep) Name() string { return "ssh" }
 func (SSHStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	if e.Cfg == nil || !e.Cfg.SSHManage {
 		return Plan{Skip: "SSH_MANAGE=false"}, nil
+	}
+
+	if e.Cfg.AdminUser == "root" {
+		return Plan{}, &output.Error{
+			Code:    "E_SSH_ADMIN_ROOT",
+			Message: "admin user cannot be root when SSH is managed",
+			Hint:    "set CVCTL_ADMIN_USER to a non-root sudo user",
+		}
+	}
+
+	idRes, err := e.Run.Run(ctx, sys.Cmd{
+		Name: "id",
+		Args: []string{"-nG", e.Cfg.AdminUser},
+	})
+	if err != nil {
+		return Plan{}, err
+	}
+	if idRes.ExitCode != 0 {
+		return Plan{}, &output.Error{
+			Code:    "E_SSH_ADMIN_NO_SUDO",
+			Message: fmt.Sprintf("admin user %s is not in group sudo or admin", e.Cfg.AdminUser),
+			Hint:    fmt.Sprintf("usermod -aG sudo %s", e.Cfg.AdminUser),
+		}
+	}
+	groups := strings.Fields(string(idRes.Stdout))
+	if !slices.Contains(groups, "sudo") && !slices.Contains(groups, "admin") {
+		return Plan{}, &output.Error{
+			Code:    "E_SSH_ADMIN_NO_SUDO",
+			Message: fmt.Sprintf("admin user %s is not in group sudo or admin", e.Cfg.AdminUser),
+			Hint:    fmt.Sprintf("usermod -aG sudo %s", e.Cfg.AdminUser),
+		}
 	}
 
 	activeRes, err := e.Run.Run(ctx, sys.Cmd{

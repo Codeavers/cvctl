@@ -24,6 +24,10 @@ func newSSHTestEnv(adminUser string, manage bool, interactive bool) (*Env, *syst
 		AdminUser: adminUser,
 		SSHManage: manage,
 	}
+	r.On("id -nG "+adminUser, sys.Result{
+		Stdout:   []byte(adminUser + " sudo\n"),
+		ExitCode: 0,
+	})
 	return &Env{
 		Run:         r,
 		FS:          fs,
@@ -31,6 +35,77 @@ func newSSHTestEnv(adminUser string, manage bool, interactive bool) (*Env, *syst
 		Interactive: interactive,
 		EUID:        0,
 	}, r, fs
+}
+
+func TestSSHAdminRootRefused(t *testing.T) {
+	env, _, _ := newSSHTestEnv("root", true, false)
+	step := SSHStep{}
+	_, err := step.Check(context.Background(), env)
+	if err == nil {
+		t.Fatal("expected error when admin user is root, got nil")
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) {
+		t.Fatalf("want output.Error, got %v", err)
+	}
+	if oe.Code != "E_SSH_ADMIN_ROOT" {
+		t.Errorf("got code %q, want E_SSH_ADMIN_ROOT", oe.Code)
+	}
+	if oe.Hint != "set CVCTL_ADMIN_USER to a non-root sudo user" {
+		t.Errorf("got hint %q", oe.Hint)
+	}
+}
+
+func TestSSHAdminNoSudoRefused(t *testing.T) {
+	env, runner, _ := newSSHTestEnv("andres", true, false)
+	runner.On("id -nG andres", sys.Result{
+		Stdout:   []byte("andres users\n"),
+		ExitCode: 0,
+	})
+	step := SSHStep{}
+	_, err := step.Check(context.Background(), env)
+	if err == nil {
+		t.Fatal("expected error when admin user is not in sudo or admin, got nil")
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) {
+		t.Fatalf("want output.Error, got %v", err)
+	}
+	if oe.Code != "E_SSH_ADMIN_NO_SUDO" {
+		t.Errorf("got code %q, want E_SSH_ADMIN_NO_SUDO", oe.Code)
+	}
+	if oe.Hint != "usermod -aG sudo andres" {
+		t.Errorf("got hint %q, want usermod -aG sudo andres", oe.Hint)
+	}
+}
+
+func TestSSHAdminWithAdminGroupAccepted(t *testing.T) {
+	env, runner, _ := newSSHTestEnv("andres", true, false)
+	runner.On("id -nG andres", sys.Result{
+		Stdout:   []byte("andres admin\n"),
+		ExitCode: 0,
+	})
+	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+		Stdout:   []byte("passwordauthentication yes\npermitrootlogin yes\n"),
+		ExitCode: 0,
+	})
+	step := SSHStep{}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected Check error: %v", err)
+	}
+	if len(plan.Changes) == 0 {
+		t.Fatal("expected changes, got none")
+	}
+}
+
+func TestSSHConfirmPromptWording(t *testing.T) {
+	if !strings.Contains(sshConfirmPrompt, "sudo -v") {
+		t.Errorf("expected sshConfirmPrompt to mention sudo -v, got %q", sshConfirmPrompt)
+	}
+	if !strings.Contains(sshConfirmPrompt, "NEW session") {
+		t.Errorf("expected sshConfirmPrompt to mention NEW session, got %q", sshConfirmPrompt)
+	}
 }
 
 func seedAdminWithKey(r *systest.Runner, fs *systest.FS, adminUser, home, gid, group, keyLine string) {
