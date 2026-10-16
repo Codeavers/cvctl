@@ -72,6 +72,7 @@ func DefaultSteps() []Step {
 		FirewallStep{},
 		UnattendedStep{},
 		TraefikStep{},
+		StorageStep{},
 	}
 }
 
