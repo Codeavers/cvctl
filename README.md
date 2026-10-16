@@ -2,12 +2,31 @@
 
 Pull-based deploy agent and CLI for Docker Compose on a single VPS.
 
-Status: plan 1 (core). Two offline commands exist today: `lint` and `render`.
+Status: plan 2 (host preparation). Commands available: `init`, `lint`, and `render`.
 The deploy agent arrives in later plans.
 
 Every command accepts `--json` and then prints exactly one JSON document.
 Exit codes: `0` ok, `1` validation or business error, `2` usage error.
 Every error and issue carries a stable `E_<AREA>_<CAUSE>` code and a `hint`.
+
+## init
+
+Prepares an Ubuntu 24.04 VPS from scratch or adopts an existing server to the desired
+state idempotently: packages, docker daemon, accounts (`deployer` user), SSH hardening
+with auto-revert timer, fail2ban, firewall (UFW), unattended security upgrades, Traefik v3
+reverse proxy (file provider only, no Docker socket), backup storage (local MinIO or S3),
+and notifications.
+
+```
+sudo cvctl init
+sudo cvctl init --dry-run
+sudo cvctl init --adopt
+sudo cvctl init --non-interactive --json
+```
+
+See [docs/host-init.md](docs/host-init.md) for full step documentation, file permissions table,
+SSH try/confirm recovery flow, and non-interactive configuration.
+
 
 ## lint
 
