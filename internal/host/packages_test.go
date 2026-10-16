@@ -192,6 +192,7 @@ func TestPackagesInstallsOnlyMissing(t *testing.T) {
 	runner.On("dpkg-query -W -f=${Status} unattended-upgrades", sys.Result{Stdout: []byte("install ok installed\n"), ExitCode: 0})
 	runner.On("dpkg-query -W -f=${Status} curl", sys.Result{Stdout: []byte("install ok installed\n"), ExitCode: 0})
 
+	runner.On("apt-get update", sys.Result{ExitCode: 0})
 	runner.On("apt-get install -y fail2ban ufw", sys.Result{ExitCode: 0})
 
 	step := PackagesStep{}
@@ -213,16 +214,20 @@ func TestPackagesInstallsOnlyMissing(t *testing.T) {
 	}
 
 	applyCalls := runner.Calls[callsBeforeApply:]
-	if len(applyCalls) != 1 {
-		t.Fatalf("expected 1 apply call, got %d: %v", len(applyCalls), applyCalls)
+	if len(applyCalls) != 2 {
+		t.Fatalf("expected 2 apply calls, got %d: %v", len(applyCalls), applyCalls)
 	}
 
-	cmd := applyCalls[0]
-	if cmd.String() != "apt-get install -y fail2ban ufw" {
-		t.Fatalf("got %q, want 'apt-get install -y fail2ban ufw'", cmd.String())
+	if applyCalls[0].String() != "apt-get update" {
+		t.Fatalf("got %q, want 'apt-get update'", applyCalls[0].String())
 	}
-	if !slices.Contains(cmd.Env, "DEBIAN_FRONTEND=noninteractive") {
-		t.Fatalf("expected DEBIAN_FRONTEND=noninteractive in %v", cmd.Env)
+	if applyCalls[1].String() != "apt-get install -y fail2ban ufw" {
+		t.Fatalf("got %q, want 'apt-get install -y fail2ban ufw'", applyCalls[1].String())
+	}
+	for _, cmd := range applyCalls {
+		if !slices.Contains(cmd.Env, "DEBIAN_FRONTEND=noninteractive") {
+			t.Fatalf("expected DEBIAN_FRONTEND=noninteractive in %v", cmd.Env)
+		}
 	}
 }
 
@@ -263,6 +268,7 @@ func TestPackagesInstallBaseBeforeDockerRepo(t *testing.T) {
 	runner.On("dpkg-query -W -f=${Status} unattended-upgrades", sys.Result{Stdout: []byte("install ok installed\n"), ExitCode: 0})
 	runner.On("dpkg-query -W -f=${Status} curl", sys.Result{ExitCode: 1, Stderr: []byte("not installed")})
 
+	runner.On("apt-get update", sys.Result{ExitCode: 0})
 	runner.On("apt-get install -y curl", sys.Result{ExitCode: 0})
 	runner.On("install -m 0755 -d /etc/apt/keyrings", sys.Result{ExitCode: 0})
 	runner.On("curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc", sys.Result{ExitCode: 0})
@@ -283,8 +289,11 @@ func TestPackagesInstallBaseBeforeDockerRepo(t *testing.T) {
 	}
 
 	applyCalls := runner.Calls[callsBeforeApply:]
-	var curlInstallIdx, curlDownloadIdx = -1, -1
+	var updateIdx, curlInstallIdx, curlDownloadIdx = -1, -1, -1
 	for i, c := range applyCalls {
+		if c.String() == "apt-get update" && updateIdx == -1 {
+			updateIdx = i
+		}
 		if c.String() == "apt-get install -y curl" {
 			curlInstallIdx = i
 		}
@@ -293,8 +302,14 @@ func TestPackagesInstallBaseBeforeDockerRepo(t *testing.T) {
 		}
 	}
 
+	if updateIdx == -1 {
+		t.Fatal("apt-get update was not called before package install")
+	}
 	if curlInstallIdx == -1 {
 		t.Fatal("apt-get install -y curl was not called")
+	}
+	if updateIdx >= curlInstallIdx {
+		t.Fatalf("expected apt-get update (index %d) before apt-get install -y curl (index %d)", updateIdx, curlInstallIdx)
 	}
 	if curlDownloadIdx == -1 {
 		t.Fatal("curl download was not called")
@@ -313,6 +328,7 @@ func TestPackagesAptFailureReturnsCodedError(t *testing.T) {
 	runner.On("dpkg-query -W -f=${Status} unattended-upgrades", sys.Result{Stdout: []byte("install ok installed\n"), ExitCode: 0})
 	runner.On("dpkg-query -W -f=${Status} curl", sys.Result{Stdout: []byte("install ok installed\n"), ExitCode: 0})
 
+	runner.On("apt-get update", sys.Result{ExitCode: 0})
 	runner.On("apt-get install -y fail2ban", sys.Result{ExitCode: 100, Stderr: []byte("E: Unable to locate package fail2ban\n")})
 
 	step := PackagesStep{}

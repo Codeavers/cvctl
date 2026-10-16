@@ -132,6 +132,13 @@ func (PackagesStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 
 	// Base packages must be installed before adding the Docker repo because Docker repo setup requires curl.
 	if len(missingPkgs) > 0 {
+		if err := runAptCmd(ctx, e, sys.Cmd{
+			Name: "apt-get",
+			Args: []string{"update"},
+			Env:  []string{"DEBIAN_FRONTEND=noninteractive"},
+		}); err != nil {
+			return "", err
+		}
 		args := append([]string{"install", "-y"}, missingPkgs...)
 		if err := runAptCmd(ctx, e, sys.Cmd{
 			Name: "apt-get",
