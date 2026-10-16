@@ -13,9 +13,11 @@ import (
 )
 
 type Runner struct {
-	Calls    []sys.Cmd
-	exact    map[string]sys.Result
-	prefixes map[string]sys.Result
+	Calls       []sys.Cmd
+	exact       map[string]sys.Result
+	prefixes    map[string]sys.Result
+	errors      map[string]error
+	errPrefixes map[string]error
 }
 
 func (r *Runner) On(cmd string, res sys.Result) {
@@ -32,11 +34,37 @@ func (r *Runner) OnPrefix(prefix string, res sys.Result) {
 	r.prefixes[prefix] = res
 }
 
+func (r *Runner) OnError(cmd string, err error) {
+	if r.errors == nil {
+		r.errors = map[string]error{}
+	}
+	r.errors[cmd] = err
+}
+
+func (r *Runner) OnErrorPrefix(prefix string, err error) {
+	if r.errPrefixes == nil {
+		r.errPrefixes = map[string]error{}
+	}
+	r.errPrefixes[prefix] = err
+}
+
 // Run matches exact registrations first, then the longest registered prefix;
 // anything else exits 127 like a shell would.
 func (r *Runner) Run(_ context.Context, c sys.Cmd) (sys.Result, error) {
 	r.Calls = append(r.Calls, c)
 	key := c.String()
+	if err, ok := r.errors[key]; ok {
+		return sys.Result{}, err
+	}
+	bestErr, foundErr := "", false
+	for p := range r.errPrefixes {
+		if strings.HasPrefix(key, p) && (!foundErr || len(p) > len(bestErr)) {
+			bestErr, foundErr = p, true
+		}
+	}
+	if foundErr {
+		return sys.Result{}, r.errPrefixes[bestErr]
+	}
 	if res, ok := r.exact[key]; ok {
 		return res, nil
 	}

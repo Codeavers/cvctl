@@ -120,10 +120,7 @@ func (TraefikStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		Name: "docker",
 		Args: []string{"network", "inspect", EdgeNetwork},
 	})
-	if err != nil {
-		return Plan{}, err
-	}
-	if netRes.ExitCode != 0 {
+	if err != nil || netRes.ExitCode != 0 {
 		changes = append(changes, "create network "+EdgeNetwork)
 	}
 
@@ -131,10 +128,7 @@ func (TraefikStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		Name: "docker",
 		Args: []string{"compose", "-p", traefikProject, "-f", traefikComposePath, "ps", "--format", "json"},
 	})
-	if err != nil {
-		return Plan{}, err
-	}
-	if psRes.ExitCode != 0 || !isTraefikRunningWithImage(psRes.Stdout, traefikImage) {
+	if err != nil || psRes.ExitCode != 0 || !isTraefikRunningWithImage(psRes.Stdout, traefikImage) {
 		changes = append(changes, "start traefik")
 	}
 

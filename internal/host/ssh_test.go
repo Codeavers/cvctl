@@ -822,3 +822,17 @@ func TestSSHInvalidInteractivePubKeyRejected(t *testing.T) {
 		})
 	}
 }
+
+func TestSSHCheckWithSSHDMissingReturnsChangesNoError(t *testing.T) {
+	env, runner, _ := newSSHTestEnv("andres", true, false)
+	runner.OnErrorPrefix("sshd", errors.New("exec: \"sshd\": executable file not found in $PATH"))
+
+	step := SSHStep{}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected Check error: %v", err)
+	}
+	if !slices.Contains(plan.Changes, "enforce effective sshd config") {
+		t.Fatalf("expected 'enforce effective sshd config' in changes, got %v", plan.Changes)
+	}
+}

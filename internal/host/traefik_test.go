@@ -753,3 +753,29 @@ func TestTraefikBehindProxyItem7Requirements(t *testing.T) {
 		t.Fatalf("expected no sourceCriterion in edge mode, got %+v", edgeRL.RateLimit.SourceCriterion)
 	}
 }
+
+func TestTraefikCheckWithDockerMissingReturnsChangesNoError(t *testing.T) {
+	r := &systest.Runner{}
+	fs := systest.NewFS()
+	cfg := &hostcfg.Config{
+		EdgeMode:  "behind-proxy",
+		ProxyPort: 8081,
+	}
+	env := &Env{Run: r, FS: fs, Cfg: cfg, EUID: 0}
+	r.OnErrorPrefix("docker", errors.New("exec: \"docker\": executable file not found in $PATH"))
+
+	step := TraefikStep{}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("expected no error from Check when docker is missing, got %v", err)
+	}
+	if len(plan.Changes) == 0 {
+		t.Fatal("expected changes, got none")
+	}
+	if !slices.Contains(plan.Changes, "create network cvctl-edge") {
+		t.Fatalf("expected 'create network cvctl-edge' in changes, got %v", plan.Changes)
+	}
+	if !slices.Contains(plan.Changes, "start traefik") {
+		t.Fatalf("expected 'start traefik' in changes, got %v", plan.Changes)
+	}
+}

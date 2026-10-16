@@ -217,3 +217,17 @@ func TestFail2banCommandFailure(t *testing.T) {
 		t.Fatalf("expected command in hint, got %q", oe.Hint)
 	}
 }
+
+func TestFail2banCheckWithSystemctlMissingReturnsChangesNoError(t *testing.T) {
+	env, runner, _ := newFail2banTestEnv()
+	runner.OnErrorPrefix("systemctl", errors.New("exec: \"systemctl\": executable file not found in $PATH"))
+
+	step := Fail2banStep{}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected Check error: %v", err)
+	}
+	if !slices.Contains(plan.Changes, "enable fail2ban") {
+		t.Fatalf("expected 'enable fail2ban' in changes, got %v", plan.Changes)
+	}
+}

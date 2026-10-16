@@ -53,20 +53,20 @@ func (Fail2banStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		changes = append(changes, fmt.Sprintf("configure %s (port=%s)", fail2banJailPath, portStr))
 	}
 
-	enabledRes, err := e.Run.Run(ctx, sys.Cmd{Name: "systemctl", Args: []string{"is-enabled", "fail2ban"}})
-	if err != nil {
-		return Plan{}, err
-	}
-	activeRes, err := e.Run.Run(ctx, sys.Cmd{Name: "systemctl", Args: []string{"is-active", "fail2ban"}})
-	if err != nil {
-		return Plan{}, err
-	}
+	enabledRes, errEnabled := e.Run.Run(ctx, sys.Cmd{Name: "systemctl", Args: []string{"is-enabled", "fail2ban"}})
+	activeRes, errActive := e.Run.Run(ctx, sys.Cmd{Name: "systemctl", Args: []string{"is-active", "fail2ban"}})
 
-	enabledOut := strings.TrimSpace(string(enabledRes.Stdout))
-	enabled := enabledRes.ExitCode == 0 && (enabledOut == "" || enabledOut == "enabled")
+	enabledOut := ""
+	if errEnabled == nil {
+		enabledOut = strings.TrimSpace(string(enabledRes.Stdout))
+	}
+	enabled := errEnabled == nil && enabledRes.ExitCode == 0 && (enabledOut == "" || enabledOut == "enabled")
 
-	activeOut := strings.TrimSpace(string(activeRes.Stdout))
-	active := activeRes.ExitCode == 0 && (activeOut == "" || activeOut == "active")
+	activeOut := ""
+	if errActive == nil {
+		activeOut = strings.TrimSpace(string(activeRes.Stdout))
+	}
+	active := errActive == nil && activeRes.ExitCode == 0 && (activeOut == "" || activeOut == "active")
 
 	if !enabled || !active {
 		changes = append(changes, "enable fail2ban")

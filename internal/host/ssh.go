@@ -67,10 +67,7 @@ func (SSHStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		Name: "systemctl",
 		Args: []string{"is-active", "cvctl-ssh-revert.timer"},
 	})
-	if err != nil {
-		return Plan{}, err
-	}
-	if strings.TrimSpace(string(activeRes.Stdout)) == "active" {
+	if err == nil && strings.TrimSpace(string(activeRes.Stdout)) == "active" {
 		return Plan{Pending: sshPendingMsg}, nil
 	}
 
@@ -98,12 +95,13 @@ func (SSHStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		Name: "sshd",
 		Args: []string{"-T", "-C", connSpec},
 	})
-	if err != nil {
-		return Plan{}, err
-	}
-	eff := parseSSHDEffective(res.Stdout)
-	if res.ExitCode != 0 || eff["passwordauthentication"] != "no" || eff["permitrootlogin"] != "no" {
+	if err != nil || res.ExitCode != 0 {
 		changes = append(changes, "enforce effective sshd config")
+	} else {
+		eff := parseSSHDEffective(res.Stdout)
+		if eff["passwordauthentication"] != "no" || eff["permitrootlogin"] != "no" {
+			changes = append(changes, "enforce effective sshd config")
+		}
 	}
 
 	return Plan{Changes: changes}, nil

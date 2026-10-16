@@ -46,7 +46,11 @@ func (FirewallStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	}
 	sshdRes, err := e.Run.Run(ctx, sshdCmd)
 	if err != nil {
-		return Plan{}, err
+		return Plan{}, &output.Error{
+			Code:    "E_FIREWALL_FAILED",
+			Message: "cannot determine the ssh port; refusing to enable the firewall",
+			Hint:    "check `sshd -T` output, or set CVCTL_FIREWALL_MANAGE=false",
+		}
 	}
 	sshPorts := parseSSHPorts(sshdRes.Stdout)
 	if sshdRes.ExitCode != 0 || len(sshPorts) == 0 {
@@ -57,17 +61,21 @@ func (FirewallStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		}
 	}
 
+	rules := desiredFirewallRules(sshPorts, e.Cfg.EdgeMode)
+
 	c := sys.Cmd{Name: "ufw", Args: []string{"status", "verbose"}}
 	res, err := e.Run.Run(ctx, c)
+	var active, denyIncoming, allowOutgoing bool
+	var presentRules map[string]bool
 	if err != nil {
-		return Plan{}, err
+		// ufw cannot start (e.g. not installed yet on a fresh host); treat as inactive and needs all rules.
+		presentRules = make(map[string]bool)
+	} else {
+		if res.ExitCode != 0 {
+			return Plan{}, firewallCmdFailed(c, res)
+		}
+		active, denyIncoming, allowOutgoing, presentRules = parseUfwStatus(res.Stdout, rules)
 	}
-	if res.ExitCode != 0 {
-		return Plan{}, firewallCmdFailed(c, res)
-	}
-
-	rules := desiredFirewallRules(sshPorts, e.Cfg.EdgeMode)
-	active, denyIncoming, allowOutgoing, presentRules := parseUfwStatus(res.Stdout, rules)
 
 	var changes []string
 	if !denyIncoming {

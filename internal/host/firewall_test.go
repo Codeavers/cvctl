@@ -440,6 +440,41 @@ func TestFirewallSSHDTFailureRefusesWithoutUfwCalls(t *testing.T) {
 	}
 }
 
+func TestFirewallCheckWithUfwMissingReturnsChangesNoError(t *testing.T) {
+	env, runner, _ := newFirewallTestEnv(true, "behind-proxy")
+	runner.OnError("ufw status verbose", errors.New("exec: \"ufw\": executable file not found in $PATH"))
+
+	step := FirewallStep{}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected Check error: %v", err)
+	}
+	wantChanges := []string{
+		"ufw default deny incoming",
+		"ufw default allow outgoing",
+		"ufw allow 22/tcp",
+		"ufw --force enable",
+	}
+	if !slices.Equal(plan.Changes, wantChanges) {
+		t.Fatalf("changes mismatch: got %v, want %v", plan.Changes, wantChanges)
+	}
+}
+
+func TestFirewallCheckWithSSHDTErrorRefuses(t *testing.T) {
+	env, runner, _ := newFirewallTestEnv(true, "edge")
+	runner.OnError("sshd -T -C user=root,host=localhost,addr=127.0.0.1", errors.New("exec: \"sshd\": executable file not found in $PATH"))
+
+	step := FirewallStep{}
+	_, err := step.Check(context.Background(), env)
+	if err == nil {
+		t.Fatal("expected E_FIREWALL_FAILED, got nil")
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_FIREWALL_FAILED" {
+		t.Fatalf("want E_FIREWALL_FAILED, got %v", err)
+	}
+}
+
 func TestFirewallUfwStatusParserTable(t *testing.T) {
 	activeHeader := `Status: active
 Logging: on (low)
