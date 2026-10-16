@@ -315,14 +315,33 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 		return Result{}, err
 	}
 
+	pausedAutoResume := false
 	if st.Status == state.StatusPaused && !opts.Force {
-		if st.PausedWantHash == "" || want.Hash() == st.PausedWantHash {
+		if st.PausedWantHash == "" || want.Hash() == st.PausedWantHash || (st.FailedHash != "" && want.Hash() == st.FailedHash) {
 			return Result{
 				Status: state.StatusPaused,
 				ID:     deployID,
 				Detail: st.PausedReason,
 			}, nil
 		}
+		pausedAutoResume = true
+	}
+	if st.FailedHash != "" && want.Hash() == st.FailedHash && !opts.Force {
+		return Result{
+			Status: state.StatusFailed,
+			ID:     deployID,
+			Detail: "desired state previously failed",
+		}, nil
+	}
+	if st.Current != nil && want.Hash() == st.Current.Hash() && !opts.Force {
+		return Result{
+			Status: state.StatusOK,
+			ID:     deployID,
+			Detail: "already at desired state",
+		}, nil
+	}
+
+	if pausedAutoResume {
 		// Auto-resume on new desired state
 		st.Status = state.StatusOK
 		st.PausedReason = ""
@@ -343,20 +362,6 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 		}); err != nil {
 			return Result{}, err
 		}
-	}
-	if st.FailedHash != "" && want.Hash() == st.FailedHash && !opts.Force {
-		return Result{
-			Status: state.StatusFailed,
-			ID:     deployID,
-			Detail: "desired state previously failed",
-		}, nil
-	}
-	if st.Current != nil && want.Hash() == st.Current.Hash() && !opts.Force {
-		return Result{
-			Status: state.StatusOK,
-			ID:     deployID,
-			Detail: "already at desired state",
-		}, nil
 	}
 
 	// Step 2: Checkout want.InfraCommit, load contract, spec, decisions, Validate + Check

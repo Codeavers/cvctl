@@ -1495,3 +1495,114 @@ func TestDevNoRestorePoint(t *testing.T) {
 		t.Fatalf("restore point created in dev environment: %v", rig.restore.calls)
 	}
 }
+
+func TestDeployFailThenRollbackPausedSkipsRetry(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	initialCommit := "0000000000000000000000000000000000000000"
+	initialDesired := state.Desired{
+		InfraCommit: initialCommit,
+		Digests: map[string]string{
+			"api": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		},
+	}
+	st := &state.State{
+		Instance: "demo-dev",
+		Status:   state.StatusOK,
+		Current:  &initialDesired,
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	// 1. Deploy Y fails (pre-deploy hook fails)
+	wantY := state.Desired{
+		InfraCommit: "1111111111111111111111111111111111111111",
+		Digests: map[string]string{
+			"api": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		},
+	}
+	rig.compose.failHook["api:node dist/migrate.js"] = struct {
+		res sys.Result
+		err error
+	}{
+		res: sys.Result{ExitCode: 1, Stderr: []byte("migration syntax error")},
+		err: fmt.Errorf("exit status 1"),
+	}
+
+	resY, err := rig.deployer.Deploy(context.Background(), "demo-dev", wantY, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy Y error: %v", err)
+	}
+	if resY.Status != state.StatusFailed {
+		t.Fatalf("expected deploy Y status FAILED, got %v", resY.Status)
+	}
+
+	stAfterY, _ := rig.store.Load("demo-dev")
+	if stAfterY.FailedHash != wantY.Hash() {
+		t.Fatalf("expected FailedHash %q, got %q", wantY.Hash(), stAfterY.FailedHash)
+	}
+
+	// 2. Operator runs Rollback
+	rbRes, err := rig.deployer.Rollback(context.Background(), "demo-dev", &initialDesired, "cli:admin")
+	if err != nil {
+		t.Fatalf("Rollback error: %v", err)
+	}
+	if rbRes.Status != state.StatusPaused {
+		t.Fatalf("expected Rollback status PAUSED, got %v", rbRes.Status)
+	}
+
+	stAfterRb, _ := rig.store.Load("demo-dev")
+	if stAfterRb.FailedHash != wantY.Hash() {
+		t.Fatalf("expected FailedHash NOT to be cleared, got %q", stAfterRb.FailedHash)
+	}
+	if stAfterRb.PausedWantHash != wantY.Hash() {
+		t.Fatalf("expected PausedWantHash to be failed hash %q, got %q", wantY.Hash(), stAfterRb.PausedWantHash)
+	}
+
+	// 3. Next Deploy(want=Y) stays PAUSED and runs no compose calls
+	rig.compose.mu.Lock()
+	rig.compose.calls = nil
+	rig.compose.mu.Unlock()
+
+	resRetryY, err := rig.deployer.Deploy(context.Background(), "demo-dev", wantY, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy retry Y error: %v", err)
+	}
+	if resRetryY.Status != state.StatusPaused {
+		t.Fatalf("expected retry Y to stay PAUSED, got %v", resRetryY.Status)
+	}
+	if len(rig.compose.calls) > 0 {
+		t.Fatalf("expected no compose calls when retry Y is skipped, got %v", rig.compose.calls)
+	}
+
+	stAfterRetryY, _ := rig.store.Load("demo-dev")
+	if stAfterRetryY.Status != state.StatusPaused {
+		t.Fatalf("expected status to stay PAUSED, got %v", stAfterRetryY.Status)
+	}
+
+	// 4. A new want Z auto-resumes
+	wantZ := state.Desired{
+		InfraCommit: "2222222222222222222222222222222222222222",
+		Digests: map[string]string{
+			"api": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+		},
+	}
+	delete(rig.compose.failHook, "api:node dist/migrate.js")
+
+	resZ, err := rig.deployer.Deploy(context.Background(), "demo-dev", wantZ, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy Z error: %v", err)
+	}
+	if resZ.Status != state.StatusOK {
+		t.Fatalf("expected want Z to auto-resume with StatusOK, got %v", resZ.Status)
+	}
+
+	stAfterZ, _ := rig.store.Load("demo-dev")
+	if stAfterZ.Status != state.StatusOK {
+		t.Fatalf("expected final status StatusOK, got %v", stAfterZ.Status)
+	}
+	if stAfterZ.Current == nil || stAfterZ.Current.Hash() != wantZ.Hash() {
+		t.Fatalf("expected Current hash to be wantZ, got %+v", stAfterZ.Current)
+	}
+}
+

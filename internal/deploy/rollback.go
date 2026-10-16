@@ -197,18 +197,17 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 	}
 
 	pausedReason := fmt.Sprintf("manual rollback; resume with cvctl resume %s", inst)
-	var rolledBackFromHash string
-	if st.Current != nil {
-		rolledBackFromHash = st.Current.Hash()
+	pausedWantHash := st.FailedHash
+	if pausedWantHash == "" && st.Current != nil {
+		pausedWantHash = st.Current.Hash()
 	}
 
 	st.Previous = st.Current
 	st.Current = target
 	st.Status = state.StatusPaused
 	st.PausedReason = pausedReason
-	st.PausedWantHash = rolledBackFromHash
+	st.PausedWantHash = pausedWantHash
 	st.RollbackFailed = false
-	st.FailedHash = ""
 	st.UpdatedAt = now
 	if err := d.Store.Save(st); err != nil {
 		return Result{}, err
