@@ -23,7 +23,6 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 
 	instDir := filepath.Join(d.deployRoot(), inst)
 	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
-	d.ensureDiskFile(cvctlEnvPath)
 
 	d0, err := instance.Read(cvctlEnvPath, &contract.Project{})
 	if err != nil {
@@ -34,7 +33,6 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 		infraPath = "."
 	}
 	infraDir := filepath.Join(instDir, "infra", infraPath)
-	d.ensureDiskFile(filepath.Join(infraDir, "compose.yml"))
 
 	cat, err := d.catalog()
 	if err != nil {
@@ -61,11 +59,12 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 	}
 
 	finalOverridePath := filepath.Join(instDir, "compose.cvctl.yml")
+	finalAppEnvPath := filepath.Join(instDir, "app.env")
 	finalRoutePath := filepath.Join(d.traefikDir(), inst+".yml")
 	renderOpts := render.Options{
 		InstanceDir: instDir,
 		Edge:        d.edge(),
-		AppEnvPath:  filepath.Join(instDir, "app.env"),
+		AppEnvPath:  finalAppEnvPath,
 	}
 
 	overrideBytes, err := render.Override(p, dec, cat, renderOpts)
@@ -78,11 +77,8 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 	}
 
 	fsys := d.fs()
-	if err := fsys.WriteFile(finalOverridePath, overrideBytes, 0o640, deployOwner); err != nil {
-		return err
-	}
+	// Promote order: app.env -> route -> override
 	if len(appEnv) > 0 {
-		finalAppEnvPath := filepath.Join(instDir, "app.env")
 		if err := fsys.WriteFile(finalAppEnvPath, instance.FormatEnv(appEnv), 0o640, deployOwner); err != nil {
 			return err
 		}
@@ -94,15 +90,23 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 	} else {
 		_ = fsys.Remove(finalRoutePath)
 	}
-
-	finalCompose := d.getCompose(finalOverridePath)
-	if finalCompose != nil {
-		if err := finalCompose.Up(ctx); err != nil {
-			return err
-		}
+	if err := fsys.WriteFile(finalOverridePath, overrideBytes, 0o640, deployOwner); err != nil {
+		return err
 	}
 
-	if err := d.checkHealth(ctx, inst, finalOverridePath); err != nil {
+	finalCompose := d.Compose(finalOverridePath, finalAppEnvPath)
+	if finalCompose == nil {
+		return &output.Error{
+			Code:    "E_DEPLOY_MISCONFIGURED",
+			Message: "deployer misconfigured: Compose returned nil",
+			Hint:    "ensure Compose factory returns a valid ComposeAPI",
+		}
+	}
+	if err := finalCompose.Up(ctx); err != nil {
+		return err
+	}
+
+	if err := d.Health(ctx, inst, finalOverridePath, finalAppEnvPath); err != nil {
 		return err
 	}
 
@@ -115,7 +119,15 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 		actor = "agent"
 	}
 	now := d.clock()
-	deployID := fmt.Sprintf("deploy-%d", now.Unix())
+	deployID := fmt.Sprintf("deploy-%d", now.UnixNano())
+
+	if d.Compose == nil || d.Health == nil {
+		return Result{}, &output.Error{
+			Code:    "E_DEPLOY_MISCONFIGURED",
+			Message: "deployer misconfigured: Compose and Health are required",
+			Hint:    "configure Compose and Health before running rollback",
+		}
+	}
 
 	unlock, err := d.Store.Lock(inst)
 	if err != nil {
@@ -152,43 +164,57 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 		st.Status = state.StatusFailed
 		st.RollbackFailed = true
 		st.UpdatedAt = now
-		_ = d.Store.Save(st)
+		if err := d.Store.Save(st); err != nil {
+			return Result{}, err
+		}
 
-		_ = d.Store.Append(inst, state.Event{
+		redactedSwapErr := redact(swapErr.Error(), existingEnv)
+
+		if err := d.Store.Append(inst, state.Event{
 			ID:     deployID,
 			At:     now,
 			Kind:   "rollback",
 			From:   st.Current,
 			To:     target,
-			Result: string(state.StatusFailed),
-			Detail: swapErr.Error(),
+			Result: "rollback_failed",
+			Detail: redactedSwapErr,
 			Actor:  actor,
-		})
+		}); err != nil {
+			return Result{}, err
+		}
 		_ = d.notifier().Send(ctx, notify.Message{
 			Host:  d.hostName(),
 			Level: "error",
-			Title: fmt.Sprintf("%s deploy FAILED", inst),
-			Text:  fmt.Sprintf("manual rollback failed: %v", swapErr),
+			Title: fmt.Sprintf("%s ROLLBACK FAILED", inst),
+			Text:  fmt.Sprintf("manual rollback failed: %s", redactedSwapErr),
 		})
 
 		return Result{
 			Status: state.StatusFailed,
 			ID:     deployID,
-			Detail: swapErr.Error(),
+			Detail: redactedSwapErr,
 		}, nil
 	}
 
 	pausedReason := fmt.Sprintf("manual rollback; resume with cvctl resume %s", inst)
+	var rolledBackFromHash string
+	if st.Current != nil {
+		rolledBackFromHash = st.Current.Hash()
+	}
+
 	st.Previous = st.Current
 	st.Current = target
 	st.Status = state.StatusPaused
 	st.PausedReason = pausedReason
+	st.PausedWantHash = rolledBackFromHash
 	st.RollbackFailed = false
 	st.FailedHash = ""
 	st.UpdatedAt = now
-	_ = d.Store.Save(st)
+	if err := d.Store.Save(st); err != nil {
+		return Result{}, err
+	}
 
-	_ = d.Store.Append(inst, state.Event{
+	if err := d.Store.Append(inst, state.Event{
 		ID:     deployID,
 		At:     now,
 		Kind:   "rollback",
@@ -197,7 +223,9 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 		Result: string(state.StatusPaused),
 		Detail: pausedReason,
 		Actor:  actor,
-	})
+	}); err != nil {
+		return Result{}, err
+	}
 	_ = d.notifier().Send(ctx, notify.Message{
 		Host:  d.hostName(),
 		Level: "info",

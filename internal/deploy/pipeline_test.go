@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,11 +13,136 @@ import (
 
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/notify"
+	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/internal/sys/systest"
 	"github.com/codeavers/cvctl/kinds"
 )
+
+type composeCall struct {
+	op       string
+	override string
+	envFile  string
+	service  string
+	script   string
+	services []string
+}
+
+type fakeCompose struct {
+	mu          sync.Mutex
+	calls       []string
+	invocations []composeCall
+	failConfig  error
+	failPull    error
+	failUpData  error
+	failHook    map[string]struct {
+		res sys.Result
+		err error
+	}
+	failUp      error
+	failLogs    error
+	hookOutputs map[string]sys.Result
+	upCount     int
+}
+
+type boundCompose struct {
+	fake     *fakeCompose
+	override string
+	envFile  string
+}
+
+func (b *boundCompose) Config(_ context.Context) error {
+	b.fake.mu.Lock()
+	defer b.fake.mu.Unlock()
+	b.fake.calls = append(b.fake.calls, "config")
+	b.fake.invocations = append(b.fake.invocations, composeCall{op: "config", override: b.override, envFile: b.envFile})
+	return b.fake.failConfig
+}
+
+func (b *boundCompose) Pull(_ context.Context, services ...string) error {
+	b.fake.mu.Lock()
+	defer b.fake.mu.Unlock()
+	b.fake.calls = append(b.fake.calls, "pull:"+strings.Join(services, ","))
+	b.fake.invocations = append(b.fake.invocations, composeCall{op: "pull", override: b.override, envFile: b.envFile, services: services})
+	return b.fake.failPull
+}
+
+func (b *boundCompose) UpData(_ context.Context, services []string) error {
+	b.fake.mu.Lock()
+	defer b.fake.mu.Unlock()
+	b.fake.calls = append(b.fake.calls, "updata:"+strings.Join(services, ","))
+	b.fake.invocations = append(b.fake.invocations, composeCall{op: "updata", override: b.override, envFile: b.envFile, services: services})
+	return b.fake.failUpData
+}
+
+func (b *boundCompose) RunHook(_ context.Context, service, script string) (sys.Result, error) {
+	b.fake.mu.Lock()
+	defer b.fake.mu.Unlock()
+	key := service + ":" + script
+	b.fake.calls = append(b.fake.calls, "runhook:"+key)
+	b.fake.invocations = append(b.fake.invocations, composeCall{op: "runhook", override: b.override, envFile: b.envFile, service: service, script: script})
+	if f, ok := b.fake.failHook[key]; ok {
+		return f.res, f.err
+	}
+	if out, ok := b.fake.hookOutputs[key]; ok {
+		return out, nil
+	}
+	return sys.Result{ExitCode: 0, Stdout: []byte("hook ok")}, nil
+}
+
+func (b *boundCompose) Up(_ context.Context) error {
+	b.fake.mu.Lock()
+	defer b.fake.mu.Unlock()
+	b.fake.upCount++
+	b.fake.calls = append(b.fake.calls, "up")
+	b.fake.calls = append(b.fake.calls, "up:--remove-orphans")
+	b.fake.invocations = append(b.fake.invocations, composeCall{op: "up", override: b.override, envFile: b.envFile})
+	return b.fake.failUp
+}
+
+func (b *boundCompose) Logs(_ context.Context, service string, tail int) (string, error) {
+	b.fake.mu.Lock()
+	defer b.fake.mu.Unlock()
+	b.fake.calls = append(b.fake.calls, fmt.Sprintf("logs:%s:%d", service, tail))
+	b.fake.invocations = append(b.fake.invocations, composeCall{op: "logs", override: b.override, envFile: b.envFile, service: service})
+	if b.fake.failLogs != nil {
+		return "", b.fake.failLogs
+	}
+	return "service container logs here", nil
+}
+
+type pullCheckingCompose struct {
+	*boundCompose
+	onPull func()
+}
+
+func (p *pullCheckingCompose) Pull(ctx context.Context, services ...string) error {
+	if p.onPull != nil {
+		p.onPull()
+	}
+	return p.boundCompose.Pull(ctx, services...)
+}
+
+type errorFS struct {
+	sys.FS
+	failReadFile  map[string]error
+	failWriteFile map[string]error
+}
+
+func (e *errorFS) ReadFile(path string) ([]byte, error) {
+	if err, ok := e.failReadFile[path]; ok {
+		return nil, err
+	}
+	return e.FS.ReadFile(path)
+}
+
+func (e *errorFS) WriteFile(path string, data []byte, mode os.FileMode, o sys.Owner) error {
+	if err, ok := e.failWriteFile[path]; ok {
+		return err
+	}
+	return e.FS.WriteFile(path, data, mode, o)
+}
 
 type testRig struct {
 	deployer *Deployer
@@ -25,7 +151,7 @@ type testRig struct {
 	notifier *fakeNotifier
 	restore  *fakeRestore
 	store    *state.Store
-	fs       *systest.FS
+	fs       sys.FS
 	tempDir  string
 	instDir  string
 	infraDir string
@@ -48,75 +174,6 @@ func (r *fakeDeployRepo) Checkout(_ context.Context, commit string) error {
 	return nil
 }
 
-type fakeCompose struct {
-	mu         sync.Mutex
-	calls      []string
-	failConfig error
-	failPull   error
-	failUpData error
-	failHook   map[string]struct {
-		res sys.Result
-		err error
-	}
-	failUp      error
-	failLogs    error
-	hookOutputs map[string]sys.Result
-	upCount     int
-}
-
-func (c *fakeCompose) Config(_ context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.calls = append(c.calls, "config")
-	return c.failConfig
-}
-
-func (c *fakeCompose) Pull(_ context.Context, services ...string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.calls = append(c.calls, "pull:"+strings.Join(services, ","))
-	return c.failPull
-}
-
-func (c *fakeCompose) UpData(_ context.Context, services []string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.calls = append(c.calls, "updata:"+strings.Join(services, ","))
-	return c.failUpData
-}
-
-func (c *fakeCompose) RunHook(_ context.Context, service, script string) (sys.Result, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	key := service + ":" + script
-	c.calls = append(c.calls, "runhook:"+key)
-	if f, ok := c.failHook[key]; ok {
-		return f.res, f.err
-	}
-	if out, ok := c.hookOutputs[key]; ok {
-		return out, nil
-	}
-	return sys.Result{ExitCode: 0, Stdout: []byte("hook ok")}, nil
-}
-
-func (c *fakeCompose) Up(_ context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.upCount++
-	c.calls = append(c.calls, "up")
-	return c.failUp
-}
-
-func (c *fakeCompose) Logs(_ context.Context, service string, tail int) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.calls = append(c.calls, fmt.Sprintf("logs:%s:%d", service, tail))
-	if c.failLogs != nil {
-		return "", c.failLogs
-	}
-	return "service container logs here", nil
-}
-
 type fakeNotifier struct {
 	mu       sync.Mutex
 	messages []notify.Message
@@ -132,13 +189,14 @@ func (n *fakeNotifier) Send(_ context.Context, m notify.Message) error {
 type fakeRestore struct {
 	mu    sync.Mutex
 	calls []string
+	fail  error
 }
 
 func (r *fakeRestore) Create(_ context.Context, inst, id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, inst+":"+id)
-	return nil
+	return r.fail
 }
 
 const sampleComposeYAML = `x-cvctl:
@@ -211,13 +269,13 @@ func setupTestRig(t *testing.T, envName, instName string) *testRig {
 		t.Fatalf("write cvctl.env: %v", err)
 	}
 
-	fakeFs := systest.NewFS()
+	osFS := sys.NewOSFS()
 	fl := systest.NewFakeLocker()
 	oldLockFile := sys.LockFile
 	t.Cleanup(func() { sys.LockFile = oldLockFile })
 	sys.LockFile = fl.LockFile
 
-	store := state.NewStore(fakeFs, stateDir)
+	store := state.NewStore(osFS, stateDir)
 	repo := &fakeDeployRepo{failAt: make(map[string]error)}
 	comp := &fakeCompose{
 		failHook: make(map[string]struct {
@@ -238,10 +296,10 @@ func setupTestRig(t *testing.T, envName, instName string) *testRig {
 	deployer := &Deployer{
 		DeployRoot: deployRoot,
 		TraefikDir: traefikDir,
-		FS:         fakeFs,
+		FS:         osFS,
 		Store:      store,
-		Compose: func(override string) ComposeAPI {
-			return comp
+		Compose: func(override, envFile string) ComposeAPI {
+			return &boundCompose{fake: comp, override: override, envFile: envFile}
 		},
 		Repo:    repo,
 		Notify:  notifier,
@@ -254,7 +312,7 @@ func setupTestRig(t *testing.T, envName, instName string) *testRig {
 		Clock: func() time.Time {
 			return fixedNow
 		},
-		Health: func(ctx context.Context, inst, override string) error {
+		Health: func(ctx context.Context, inst, override, envFile string) error {
 			return nil
 		},
 	}
@@ -266,7 +324,7 @@ func setupTestRig(t *testing.T, envName, instName string) *testRig {
 		notifier: notifier,
 		restore:  restore,
 		store:    store,
-		fs:       fakeFs,
+		fs:       osFS,
 		tempDir:  tempDir,
 		instDir:  instDir,
 		infraDir: infraDir,
@@ -288,7 +346,7 @@ func TestDeployHappyPath(t *testing.T) {
 	want := defaultDesired()
 
 	healthCalled := false
-	rig.deployer.Health = func(ctx context.Context, inst, override string) error {
+	rig.deployer.Health = func(ctx context.Context, inst, override, envFile string) error {
 		healthCalled = true
 		return nil
 	}
@@ -365,6 +423,86 @@ func TestDeployHappyPath(t *testing.T) {
 	}
 }
 
+func TestFirstDeployNoAppEnv(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	want := defaultDesired()
+
+	finalAppEnvPath := filepath.Join(rig.instDir, "app.env")
+	_ = rig.fs.Remove(finalAppEnvPath)
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy returned unexpected error: %v", err)
+	}
+	if res.Status != state.StatusOK {
+		t.Fatalf("expected StatusOK, got %v (detail: %s)", res.Status, res.Detail)
+	}
+
+	stagingAppEnv := filepath.Join(rig.instDir, ".staging", "app.env")
+	stagingOverride := filepath.Join(rig.instDir, ".staging", "compose.cvctl.yml")
+
+	foundConfig := false
+	foundPreHook := false
+	for _, inv := range rig.compose.invocations {
+		if inv.op == "config" {
+			foundConfig = true
+			if inv.envFile != stagingAppEnv {
+				t.Fatalf("expected config envFile %s, got %s", stagingAppEnv, inv.envFile)
+			}
+			if inv.override != stagingOverride {
+				t.Fatalf("expected config override %s, got %s", stagingOverride, inv.override)
+			}
+		}
+		if inv.op == "runhook" && inv.script == "node dist/migrate.js" {
+			foundPreHook = true
+			if inv.envFile != stagingAppEnv {
+				t.Fatalf("expected pre-deploy hook envFile %s, got %s", stagingAppEnv, inv.envFile)
+			}
+		}
+	}
+	if !foundConfig {
+		t.Fatalf("expected config invocation, found none")
+	}
+	if !foundPreHook {
+		t.Fatalf("expected pre-deploy hook invocation, found none")
+	}
+
+	if _, err := rig.fs.Stat(finalAppEnvPath); err != nil {
+		t.Fatalf("final app.env does not exist after promote: %v", err)
+	}
+}
+
+func TestAppEnvReadErrorOtherThanNotExist(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	want := defaultDesired()
+
+	finalAppEnvPath := filepath.Join(rig.instDir, "app.env")
+	efs := &errorFS{
+		FS: rig.fs,
+		failReadFile: map[string]error{
+			finalAppEnvPath: errors.New("permission denied"),
+		},
+	}
+	rig.deployer.FS = efs
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err == nil {
+		t.Fatalf("expected error from Deploy, got nil (res: %+v)", res)
+	}
+	oe, ok := err.(*output.Error)
+	if !ok || oe.Code != "E_APPENV_READ" {
+		t.Fatalf("expected E_APPENV_READ, got %v", err)
+	}
+
+	st, err := rig.store.Load("demo-dev")
+	if err != nil {
+		t.Fatalf("store.Load: %v", err)
+	}
+	if st.FailedHash != "" {
+		t.Fatalf("expected FailedHash to be empty, got %q", st.FailedHash)
+	}
+}
+
 func TestPreDeployFailsNothingTouched(t *testing.T) {
 	rig := setupTestRig(t, "dev", "demo-dev")
 	want := defaultDesired()
@@ -385,12 +523,10 @@ func TestPreDeployFailsNothingTouched(t *testing.T) {
 		t.Fatalf("expected StatusFailed, got %v", res.Status)
 	}
 
-	// Assert no Up called
 	if rig.compose.upCount > 0 {
 		t.Fatalf("Up was called %d times; expected 0 because pre-deploy failed", rig.compose.upCount)
 	}
 
-	// Assert no final override promoted in FS
 	finalOverride := filepath.Join(rig.instDir, "compose.cvctl.yml")
 	if _, err := rig.fs.Stat(finalOverride); err == nil {
 		t.Fatalf("final override %s was promoted; expected nothing touched", finalOverride)
@@ -483,7 +619,7 @@ func TestHealthFailsRollsBack(t *testing.T) {
 	want := defaultDesired()
 
 	healthCount := 0
-	rig.deployer.Health = func(ctx context.Context, inst, override string) error {
+	rig.deployer.Health = func(ctx context.Context, inst, override, envFile string) error {
 		healthCount++
 		if healthCount == 1 {
 			return fmt.Errorf("health timeout on :3000/health")
@@ -499,12 +635,10 @@ func TestHealthFailsRollsBack(t *testing.T) {
 		t.Fatalf("expected deploy status FAILED after health failure, got %v", res.Status)
 	}
 
-	// Assert Up ran twice: once for new deploy, once for rollback
 	if rig.compose.upCount != 2 {
 		t.Fatalf("expected compose.Up to run 2 times (deploy + rollback), got %d", rig.compose.upCount)
 	}
 
-	// Assert checkout of oldCommit occurred
 	foundOldCheckout := false
 	for _, c := range rig.repo.checkouts {
 		if c == oldCommit {
@@ -516,7 +650,6 @@ func TestHealthFailsRollsBack(t *testing.T) {
 		t.Fatalf("rollback did not checkout previous commit %s: checkouts = %v", oldCommit, rig.repo.checkouts)
 	}
 
-	// State keeps previous Current
 	stAfter, err := rig.store.Load("demo-dev")
 	if err != nil {
 		t.Fatalf("store.Load: %v", err)
@@ -552,8 +685,7 @@ func TestRollbackFailsMarksRollbackFailed(t *testing.T) {
 
 	want := defaultDesired()
 
-	// Health fails on both first deploy and rollback
-	rig.deployer.Health = func(ctx context.Context, inst, override string) error {
+	rig.deployer.Health = func(ctx context.Context, inst, override, envFile string) error {
 		return fmt.Errorf("persistent health failure")
 	}
 
@@ -577,7 +709,6 @@ func TestRollbackFailsMarksRollbackFailed(t *testing.T) {
 func TestBlockedOnMissingPrompt(t *testing.T) {
 	rig := setupTestRig(t, "dev", "demo-dev")
 
-	// Update env.spec.yml with missing prompt var
 	specWithPrompt := `vars:
   DATABASE_URL: { source: service, service: main-db }
   API_SECRET:   { source: prompt, secret: true }
@@ -598,7 +729,6 @@ func TestBlockedOnMissingPrompt(t *testing.T) {
 		t.Fatalf("expected Missing [API_SECRET], got %v", res.Missing)
 	}
 
-	// No pull called
 	for _, c := range rig.compose.calls {
 		if strings.HasPrefix(c, "pull") {
 			t.Fatalf("pull was called while blocked: %v", c)
@@ -616,7 +746,6 @@ func TestBlockedOnMissingPrompt(t *testing.T) {
 		t.Fatalf("expected FailedHash to be empty on blocked, got %q", st.FailedHash)
 	}
 
-	// Notification warn
 	var warnMsg *notify.Message
 	for _, m := range rig.notifier.messages {
 		if m.Level == "warn" {
@@ -629,6 +758,287 @@ func TestBlockedOnMissingPrompt(t *testing.T) {
 	}
 	if !strings.Contains(warnMsg.Text, "cvctl set-env demo-dev API_SECRET") {
 		t.Fatalf("expected warn text to contain cvctl set-env command, got %q", warnMsg.Text)
+	}
+}
+
+func TestCheckoutGuardRestoresOnBlocked(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	oldCommit := "0000000000000000000000000000000000000000"
+	st := &state.State{
+		Instance: "demo-dev",
+		Status:   state.StatusOK,
+		Current: &state.Desired{
+			InfraCommit: oldCommit,
+		},
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	specWithPrompt := `vars:
+  DATABASE_URL: { source: service, service: main-db }
+  MISSING_PROMPT: { source: prompt }
+`
+	if err := os.WriteFile(filepath.Join(rig.infraDir, "env.spec.yml"), []byte(specWithPrompt), 0o644); err != nil {
+		t.Fatalf("write env.spec.yml: %v", err)
+	}
+
+	want := defaultDesired()
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusBlocked {
+		t.Fatalf("expected StatusBlocked, got %v", res.Status)
+	}
+
+	if len(rig.repo.checkouts) < 2 {
+		t.Fatalf("expected at least 2 checkouts, got %v", rig.repo.checkouts)
+	}
+	lastCheckout := rig.repo.checkouts[len(rig.repo.checkouts)-1]
+	if lastCheckout != oldCommit {
+		t.Fatalf("expected checkout to be restored to %s, got %s (checkouts: %v)", oldCommit, lastCheckout, rig.repo.checkouts)
+	}
+}
+
+func TestCheckoutGuardRestoresOnErrorAfterCheckout(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	oldCommit := "0000000000000000000000000000000000000000"
+	st := &state.State{
+		Instance: "demo-dev",
+		Status:   state.StatusOK,
+		Current: &state.Desired{
+			InfraCommit: oldCommit,
+		},
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(rig.infraDir, "env.spec.yml"), []byte("invalid: yaml: ["), 0o644); err != nil {
+		t.Fatalf("write env.spec.yml: %v", err)
+	}
+
+	want := defaultDesired()
+	res, _ := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if res.Status != state.StatusFailed {
+		t.Fatalf("expected StatusFailed, got %v", res.Status)
+	}
+
+	if len(rig.repo.checkouts) < 2 {
+		t.Fatalf("expected at least 2 checkouts, got %v", rig.repo.checkouts)
+	}
+	lastCheckout := rig.repo.checkouts[len(rig.repo.checkouts)-1]
+	if lastCheckout != oldCommit {
+		t.Fatalf("expected checkout to be restored to %s, got %s", oldCommit, lastCheckout)
+	}
+}
+
+func TestCheckoutGuardAppendsError(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	oldCommit := "0000000000000000000000000000000000000000"
+	st := &state.State{
+		Instance: "demo-dev",
+		Status:   state.StatusOK,
+		Current: &state.Desired{
+			InfraCommit: oldCommit,
+		},
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	rig.repo.failAt[oldCommit] = errors.New("cannot restore old commit")
+
+	specWithPrompt := `vars:
+  DATABASE_URL: { source: service, service: main-db }
+  MISSING_PROMPT: { source: prompt }
+`
+	if err := os.WriteFile(filepath.Join(rig.infraDir, "env.spec.yml"), []byte(specWithPrompt), 0o644); err != nil {
+		t.Fatalf("write env.spec.yml: %v", err)
+	}
+
+	want := defaultDesired()
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if !strings.Contains(res.Detail, "restore checkout failed: cannot restore old commit") {
+		t.Fatalf("expected Detail to include checkout restore failure, got %q", res.Detail)
+	}
+}
+
+func TestTransientErrorsDoNotSetFailedHash(t *testing.T) {
+	t.Run("PullFailure", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		want := defaultDesired()
+		rig.compose.failPull = errors.New("pull network timeout")
+
+		res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+		if err != nil {
+			t.Fatalf("Deploy error: %v", err)
+		}
+		if res.Status != state.StatusFailed {
+			t.Fatalf("expected StatusFailed, got %v", res.Status)
+		}
+		if !strings.HasSuffix(res.Detail, "will retry next cycle") {
+			t.Fatalf("expected Detail to end with 'will retry next cycle', got %q", res.Detail)
+		}
+		st, _ := rig.store.Load("demo-dev")
+		if st.FailedHash != "" {
+			t.Fatalf("expected FailedHash to NOT be set, got %q", st.FailedHash)
+		}
+	})
+
+	t.Run("UpDataFailure", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		want := defaultDesired()
+		rig.compose.failUpData = errors.New("data service failed to start")
+
+		res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+		if err != nil {
+			t.Fatalf("Deploy error: %v", err)
+		}
+		if res.Status != state.StatusFailed {
+			t.Fatalf("expected StatusFailed, got %v", res.Status)
+		}
+		if !strings.HasSuffix(res.Detail, "will retry next cycle") {
+			t.Fatalf("expected Detail to end with 'will retry next cycle', got %q", res.Detail)
+		}
+		st, _ := rig.store.Load("demo-dev")
+		if st.FailedHash != "" {
+			t.Fatalf("expected FailedHash to NOT be set, got %q", st.FailedHash)
+		}
+	})
+
+	t.Run("RestorePointFailureProd", func(t *testing.T) {
+		rig := setupTestRig(t, "prod", "demo-prod")
+		want := defaultDesired()
+		rig.restore.fail = errors.New("wal-g snapshot failure")
+
+		res, err := rig.deployer.Deploy(context.Background(), "demo-prod", want, Options{Actor: "agent"})
+		if err != nil {
+			t.Fatalf("Deploy error: %v", err)
+		}
+		if res.Status != state.StatusFailed {
+			t.Fatalf("expected StatusFailed, got %v", res.Status)
+		}
+		if !strings.HasSuffix(res.Detail, "will retry next cycle") {
+			t.Fatalf("expected Detail to end with 'will retry next cycle', got %q", res.Detail)
+		}
+		st, _ := rig.store.Load("demo-prod")
+		if st.FailedHash != "" {
+			t.Fatalf("expected FailedHash to NOT be set, got %q", st.FailedHash)
+		}
+	})
+}
+
+func TestPromoteOrderAndFailure(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	oldCommit := "0000000000000000000000000000000000000000"
+	st := &state.State{
+		Instance: "demo-dev",
+		Status:   state.StatusOK,
+		Current: &state.Desired{
+			InfraCommit: oldCommit,
+		},
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	want := defaultDesired()
+
+	finalRoutePath := filepath.Join(rig.deployer.traefikDir(), "demo-dev.yml")
+	efs := &errorFS{
+		FS: rig.fs,
+		failWriteFile: map[string]error{
+			finalRoutePath: errors.New("disk full on traefik dir"),
+		},
+	}
+	rig.deployer.FS = efs
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusFailed {
+		t.Fatalf("expected StatusFailed, got %v", res.Status)
+	}
+
+	stAfter, _ := rig.store.Load("demo-dev")
+	if stAfter.FailedHash != want.Hash() {
+		t.Fatalf("expected FailedHash to be set to want.Hash(), got %q", stAfter.FailedHash)
+	}
+
+	foundErrorNotif := false
+	for _, m := range rig.notifier.messages {
+		if m.Level == "error" && strings.Contains(m.Title, "demo-dev deploy FAILED") {
+			foundErrorNotif = true
+			break
+		}
+	}
+	if !foundErrorNotif {
+		t.Fatalf("expected error notification, got %v", rig.notifier.messages)
+	}
+
+	lastCheckout := rig.repo.checkouts[len(rig.repo.checkouts)-1]
+	if lastCheckout != oldCommit {
+		t.Fatalf("expected checkout restored to %s, got %s", oldCommit, lastCheckout)
+	}
+}
+
+func TestDeployingStateSavedBeforePull(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	want := defaultDesired()
+
+	pullCalled := false
+	rig.deployer.Compose = func(override, envFile string) ComposeAPI {
+		b := &boundCompose{fake: rig.compose, override: override, envFile: envFile}
+		return &pullCheckingCompose{
+			boundCompose: b,
+			onPull: func() {
+				pullCalled = true
+				st, err := rig.store.Load("demo-dev")
+				if err != nil {
+					t.Errorf("store.Load in Pull: %v", err)
+				}
+				if st.Status != state.StatusDeploying {
+					t.Errorf("expected StatusDeploying before Pull, got %v", st.Status)
+				}
+			},
+		}
+	}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusOK {
+		t.Fatalf("expected StatusOK, got %v", res.Status)
+	}
+	if !pullCalled {
+		t.Fatalf("Pull was not called")
+	}
+}
+
+func TestStoreSaveFailurePropagated(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	want := defaultDesired()
+
+	stateFile := filepath.Join(rig.tempDir, "state", "demo-dev", "state.json")
+	efs := &errorFS{
+		FS: rig.fs,
+		failWriteFile: map[string]error{
+			stateFile: errors.New("disk I/O error on state save"),
+		},
+	}
+	rig.store = state.NewStore(efs, filepath.Join(rig.tempDir, "state"))
+	rig.deployer.Store = rig.store
+
+	_, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err == nil {
+		t.Fatalf("expected Store.Save error to be propagated, got nil")
 	}
 }
 
@@ -659,17 +1069,131 @@ func TestPausedSkips(t *testing.T) {
 	}
 }
 
+func TestManualRollbackSetsPausedWantHash(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	currCommit := "1111111111111111111111111111111111111111"
+	oldCommit := "0000000000000000000000000000000000000000"
+	currDesired := state.Desired{InfraCommit: currCommit, Digests: map[string]string{"api": "sha256:111"}}
+	oldDesired := state.Desired{InfraCommit: oldCommit, Digests: map[string]string{"api": "sha256:000"}}
+
+	st := &state.State{
+		Instance: "demo-dev",
+		Status:   state.StatusOK,
+		Current:  &currDesired,
+		Previous: &oldDesired,
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	res, err := rig.deployer.Rollback(context.Background(), "demo-dev", nil, "cli:admin")
+	if err != nil {
+		t.Fatalf("Rollback error: %v", err)
+	}
+	if res.Status != state.StatusPaused {
+		t.Fatalf("expected StatusPaused, got %v", res.Status)
+	}
+
+	stAfter, _ := rig.store.Load("demo-dev")
+	if stAfter.PausedWantHash != currDesired.Hash() {
+		t.Fatalf("expected PausedWantHash to be currDesired hash %q, got %q", currDesired.Hash(), stAfter.PausedWantHash)
+	}
+}
+
+func TestPausedSkipsWhenSameWantHash(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	want := defaultDesired()
+
+	st := &state.State{
+		Instance:       "demo-dev",
+		Status:         state.StatusPaused,
+		PausedReason:   "manual rollback",
+		PausedWantHash: want.Hash(),
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Force: false})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusPaused {
+		t.Fatalf("expected StatusPaused, got %v", res.Status)
+	}
+}
+
+func TestPausedSkipsWhenPausedWantHashEmpty(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	want := defaultDesired()
+
+	st := &state.State{
+		Instance:       "demo-dev",
+		Status:         state.StatusPaused,
+		PausedReason:   "manual pause",
+		PausedWantHash: "",
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Force: false})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusPaused {
+		t.Fatalf("expected StatusPaused, got %v", res.Status)
+	}
+}
+
+func TestPausedAutoResumesOnNewWant(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	oldHash := "some-other-hash-12345"
+
+	st := &state.State{
+		Instance:       "demo-dev",
+		Status:         state.StatusPaused,
+		PausedReason:   "manual rollback",
+		PausedWantHash: oldHash,
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	want := defaultDesired()
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Force: false})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusOK {
+		t.Fatalf("expected StatusOK on auto-resume, got %v", res.Status)
+	}
+
+	events, err := rig.store.History("demo-dev", 10)
+	if err != nil {
+		t.Fatalf("store.History: %v", err)
+	}
+	foundResume := false
+	for _, ev := range events {
+		if ev.Kind == "resume" {
+			foundResume = true
+			break
+		}
+	}
+	if !foundResume {
+		t.Fatalf("expected 'resume' event in history, got %v", events)
+	}
+}
+
 func TestHookOutputRedacted(t *testing.T) {
 	rig := setupTestRig(t, "dev", "demo-dev")
 
-	// Create app.env with a secret of length >= 8
 	secretVal := "supersecret123456"
 	appEnvPath := filepath.Join(rig.instDir, "app.env")
 	if err := rig.fs.WriteFile(appEnvPath, []byte("APP_SECRET="+secretVal+"\n"), 0o640, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
 		t.Fatalf("write app.env: %v", err)
 	}
 
-	// Update env.spec.yml to recognize APP_SECRET
 	specWithSecret := `vars:
   DATABASE_URL: { source: service, service: main-db }
   APP_SECRET:   { source: prompt, secret: true }
@@ -678,7 +1202,6 @@ func TestHookOutputRedacted(t *testing.T) {
 		t.Fatalf("write env.spec.yml: %v", err)
 	}
 
-	// Pre-deploy hook outputs secret
 	hookOut := fmt.Sprintf("Error connecting with credentials: password=%s to database", secretVal)
 	rig.compose.failHook["api:node dist/migrate.js"] = struct {
 		res sys.Result
@@ -697,7 +1220,6 @@ func TestHookOutputRedacted(t *testing.T) {
 		t.Fatalf("expected StatusFailed, got %v", res.Status)
 	}
 
-	// Check that secretVal is replaced by *** in res.Detail
 	if strings.Contains(res.Detail, secretVal) {
 		t.Fatalf("res.Detail contains unredacted secret: %s", res.Detail)
 	}
@@ -705,14 +1227,12 @@ func TestHookOutputRedacted(t *testing.T) {
 		t.Fatalf("res.Detail does not contain redacted '***': %s", res.Detail)
 	}
 
-	// Check notifications
 	for _, m := range rig.notifier.messages {
 		if strings.Contains(m.Text, secretVal) {
 			t.Fatalf("notification contains unredacted secret: %s", m.Text)
 		}
 	}
 
-	// Check history events
 	events, err := rig.store.History("demo-dev", 10)
 	if err != nil {
 		t.Fatalf("store.History: %v", err)
@@ -724,6 +1244,109 @@ func TestHookOutputRedacted(t *testing.T) {
 	}
 }
 
+func TestRollbackFailureNotificationAndEvent(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	oldCommit := "0000000000000000000000000000000000000000"
+	st := &state.State{
+		Instance: "demo-dev",
+		Status:   state.StatusOK,
+		Current: &state.Desired{
+			InfraCommit: oldCommit,
+		},
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	want := defaultDesired()
+
+	rig.deployer.Health = func(ctx context.Context, inst, override, envFile string) error {
+		return errors.New("fatal container crash")
+	}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusFailed {
+		t.Fatalf("expected StatusFailed, got %v", res.Status)
+	}
+
+	foundRollbackFailedNotif := false
+	for _, m := range rig.notifier.messages {
+		if m.Title == "demo-dev ROLLBACK FAILED" {
+			foundRollbackFailedNotif = true
+			if !strings.Contains(m.Text, "fatal container crash") {
+				t.Fatalf("expected notification text to contain rollback error, got %q", m.Text)
+			}
+			break
+		}
+	}
+	if !foundRollbackFailedNotif {
+		t.Fatalf("expected 'demo-dev ROLLBACK FAILED' notification, got %v", rig.notifier.messages)
+	}
+
+	events, err := rig.store.History("demo-dev", 10)
+	if err != nil {
+		t.Fatalf("store.History: %v", err)
+	}
+	foundRollbackFailedEvent := false
+	for _, ev := range events {
+		if ev.Kind == "rollback" && ev.Result == "rollback_failed" {
+			foundRollbackFailedEvent = true
+			break
+		}
+	}
+	if !foundRollbackFailedEvent {
+		t.Fatalf("expected event with Kind 'rollback' and Result 'rollback_failed', got %+v", events)
+	}
+}
+
+func TestDeployMisconfigured(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	want := defaultDesired()
+
+	t.Run("NilComposeDeploy", func(t *testing.T) {
+		d := *rig.deployer
+		d.Compose = nil
+		_, err := d.Deploy(context.Background(), "demo-dev", want, Options{})
+		var oe *output.Error
+		if err == nil || !errors.As(err, &oe) || oe.Code != "E_DEPLOY_MISCONFIGURED" {
+			t.Fatalf("expected E_DEPLOY_MISCONFIGURED, got %v", err)
+		}
+	})
+
+	t.Run("NilHealthDeploy", func(t *testing.T) {
+		d := *rig.deployer
+		d.Health = nil
+		_, err := d.Deploy(context.Background(), "demo-dev", want, Options{})
+		var oe *output.Error
+		if err == nil || !errors.As(err, &oe) || oe.Code != "E_DEPLOY_MISCONFIGURED" {
+			t.Fatalf("expected E_DEPLOY_MISCONFIGURED, got %v", err)
+		}
+	})
+
+	t.Run("NilComposeRollback", func(t *testing.T) {
+		d := *rig.deployer
+		d.Compose = nil
+		_, err := d.Rollback(context.Background(), "demo-dev", nil, "agent")
+		var oe *output.Error
+		if err == nil || !errors.As(err, &oe) || oe.Code != "E_DEPLOY_MISCONFIGURED" {
+			t.Fatalf("expected E_DEPLOY_MISCONFIGURED, got %v", err)
+		}
+	})
+
+	t.Run("NilHealthRollback", func(t *testing.T) {
+		d := *rig.deployer
+		d.Health = nil
+		_, err := d.Rollback(context.Background(), "demo-dev", nil, "agent")
+		var oe *output.Error
+		if err == nil || !errors.As(err, &oe) || oe.Code != "E_DEPLOY_MISCONFIGURED" {
+			t.Fatalf("expected E_DEPLOY_MISCONFIGURED, got %v", err)
+		}
+	})
+}
+
 func TestRemovedDataServiceKeepsVolume(t *testing.T) {
 	rig := setupTestRig(t, "dev", "demo-dev")
 	want := defaultDesired()
@@ -733,7 +1356,11 @@ func TestRemovedDataServiceKeepsVolume(t *testing.T) {
 		t.Fatalf("Deploy error: %v", err)
 	}
 
-	// Update compose.yml to remove the data service main-db
+	rig.compose.mu.Lock()
+	rig.compose.calls = nil
+	rig.compose.invocations = nil
+	rig.compose.mu.Unlock()
+
 	noDataCompose := `x-cvctl:
   health: { service: api, http: /health, timeout: 30s }
 services:
@@ -752,14 +1379,26 @@ services:
 		t.Fatalf("rewrite env.spec.yml: %v", err)
 	}
 
-	_, err = rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Force: true, Actor: "agent"})
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Force: true, Actor: "agent"})
 	if err != nil {
 		t.Fatalf("Deploy without data service error: %v", err)
 	}
+	if res.Status != state.StatusOK {
+		t.Fatalf("expected status OK, got %v", res.Status)
+	}
 
-	// Assert no calls contain down -v, volume rm or rm -v
+	upCalls := 0
 	for _, c := range rig.compose.calls {
-		if strings.Contains(c, "down -v") || strings.Contains(c, "volume rm") || strings.Contains(c, "rm -v") {
+		if c == "up" || c == "up:--remove-orphans" {
+			upCalls++
+		}
+	}
+	if upCalls == 0 {
+		t.Fatalf("expected Up to be called on second deploy")
+	}
+
+	for _, c := range rig.compose.calls {
+		if strings.Contains(c, "-v") || strings.Contains(c, "volume rm") || strings.Contains(c, "down") {
 			t.Fatalf("prohibited destructive volume command executed: %s", c)
 		}
 	}

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -70,19 +69,18 @@ type Result struct {
 
 // Deployer coordinates instance deployment, promotion, health checks, and rollback.
 type Deployer struct {
-	DeployRoot  string
-	TraefikDir  string
-	FS          sys.FS
-	Store       *state.Store
-	Compose     func(override string) ComposeAPI
-	Repo        CheckoutAPI
-	Notify      notify.Notifier
-	Restore     RestorePointer
-	Host        *hostcfg.Config
-	Catalog     kinds.Catalog
-	Clock       func() time.Time
-	Health      func(ctx context.Context, inst string, override string) error
-	HealthCheck func(ctx context.Context, inst string, override string) error
+	DeployRoot string
+	TraefikDir string
+	FS         sys.FS
+	Store      *state.Store
+	Compose    func(override, envFile string) ComposeAPI
+	Repo       CheckoutAPI
+	Notify     notify.Notifier
+	Restore    RestorePointer
+	Host       *hostcfg.Config
+	Catalog    kinds.Catalog
+	Clock      func() time.Time
+	Health     func(ctx context.Context, inst, override, envFile string) error
 }
 
 func (d *Deployer) deployRoot() string {
@@ -148,53 +146,27 @@ func (d *Deployer) hostName() string {
 	return ""
 }
 
-func (d *Deployer) checkHealth(ctx context.Context, inst string, override string) error {
-	if d.Health != nil {
-		return d.Health(ctx, inst, override)
-	}
-	if d.HealthCheck != nil {
-		return d.HealthCheck(ctx, inst, override)
-	}
-	return nil
-}
-
-func (d *Deployer) getCompose(override string) ComposeAPI {
-	if d.Compose != nil {
-		return d.Compose(override)
-	}
-	return nil
-}
-
-func (d *Deployer) ensureDiskFile(path string) {
-	if d.FS == nil {
-		return
-	}
-	if _, err := os.Stat(path); err == nil {
-		return
-	}
-	data, err := d.FS.ReadFile(path)
-	if err == nil {
-		_ = os.MkdirAll(filepath.Dir(path), 0o755)
-		_ = os.WriteFile(path, data, 0o644)
-	}
-}
-
 func (d *Deployer) readAppEnv(appEnvPath string) (map[string]string, error) {
-	var data []byte
-	var err error
-	if d.FS != nil {
-		data, err = d.FS.ReadFile(appEnvPath)
-	}
-	if d.FS == nil || err != nil {
-		data, err = os.ReadFile(appEnvPath)
-	}
+	data, err := d.fs().ReadFile(appEnvPath)
 	if err != nil {
-		if os.IsNotExist(err) || errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return map[string]string{}, nil
 		}
-		return map[string]string{}, nil
+		return nil, &output.Error{
+			Code:    "E_APPENV_READ",
+			Message: fmt.Sprintf("cannot read %s: %v", appEnvPath, err),
+			Hint:    "check file permissions on app.env",
+		}
 	}
-	return godotenv.Unmarshal(string(data))
+	vals, err := godotenv.Unmarshal(string(data))
+	if err != nil {
+		return nil, &output.Error{
+			Code:    "E_APPENV_READ",
+			Message: fmt.Sprintf("cannot parse %s: %v", appEnvPath, err),
+			Hint:    "fix syntax in app.env",
+		}
+	}
+	return vals, nil
 }
 
 func (d *Deployer) cleanupStaging(stagingDir, override, appEnv, route string) {
@@ -205,41 +177,10 @@ func (d *Deployer) cleanupStaging(stagingDir, override, appEnv, route string) {
 	_ = fsys.Remove(stagingDir)
 }
 
-func (d *Deployer) abortDeploy(ctx context.Context, inst string, st *state.State, want state.Desired, deployID, actor string, now time.Time, detail string) (Result, error) {
-	st.Status = state.StatusFailed
-	st.FailedHash = want.Hash()
-	st.UpdatedAt = now
-	_ = d.Store.Save(st)
-
-	_ = d.Store.Append(inst, state.Event{
-		ID:     deployID,
-		At:     now,
-		Kind:   "failed",
-		From:   st.Current,
-		To:     &want,
-		Result: string(state.StatusFailed),
-		Detail: detail,
-		Actor:  actor,
-	})
-	_ = d.notifier().Send(ctx, notify.Message{
-		Host:  d.hostName(),
-		Level: "error",
-		Title: fmt.Sprintf("%s deploy FAILED", inst),
-		Text:  detail,
-	})
-
-	if st.Current != nil && st.Current.InfraCommit != "" && d.Repo != nil {
-		_ = d.Repo.Checkout(ctx, st.Current.InfraCommit)
-	}
-
-	return Result{
-		Status: state.StatusFailed,
-		ID:     deployID,
-		Detail: detail,
-	}, nil
-}
-
 func redact(text string, envValues map[string]string) string {
+	if len(envValues) == 0 || text == "" {
+		return text
+	}
 	var secrets []string
 	for _, v := range envValues {
 		if len(v) >= 8 {
@@ -275,14 +216,92 @@ func lastLines(text string, n int) string {
 	return strings.Join(lines[len(lines)-n:], "\n")
 }
 
+func (d *Deployer) failPermanent(ctx context.Context, inst string, st *state.State, want state.Desired, deployID, actor string, now time.Time, errText string, envVals map[string]string) (Result, error) {
+	redacted := redact(errText, envVals)
+	st.Status = state.StatusFailed
+	st.FailedHash = want.Hash()
+	st.UpdatedAt = now
+	if err := d.Store.Save(st); err != nil {
+		return Result{}, err
+	}
+	if err := d.Store.Append(inst, state.Event{
+		ID:     deployID,
+		At:     now,
+		Kind:   "failed",
+		From:   st.Current,
+		To:     &want,
+		Result: string(state.StatusFailed),
+		Detail: redacted,
+		Actor:  actor,
+	}); err != nil {
+		return Result{}, err
+	}
+	_ = d.notifier().Send(ctx, notify.Message{
+		Host:  d.hostName(),
+		Level: "error",
+		Title: fmt.Sprintf("%s deploy FAILED", inst),
+		Text:  redacted,
+	})
+	return Result{
+		Status: state.StatusFailed,
+		ID:     deployID,
+		Detail: redacted,
+	}, nil
+}
+
+func (d *Deployer) failTransient(ctx context.Context, inst string, st *state.State, want state.Desired, deployID, actor string, now time.Time, errText string, envVals map[string]string) (Result, error) {
+	redacted := redact(errText, envVals)
+	detail := strings.TrimRight(redacted, ".")
+	if !strings.HasSuffix(detail, "will retry next cycle") {
+		detail = detail + ": will retry next cycle"
+	}
+	st.Status = state.StatusFailed
+	st.FailedHash = ""
+	st.UpdatedAt = now
+	if err := d.Store.Save(st); err != nil {
+		return Result{}, err
+	}
+	if err := d.Store.Append(inst, state.Event{
+		ID:     deployID,
+		At:     now,
+		Kind:   "failed",
+		From:   st.Current,
+		To:     &want,
+		Result: string(state.StatusFailed),
+		Detail: detail,
+		Actor:  actor,
+	}); err != nil {
+		return Result{}, err
+	}
+	_ = d.notifier().Send(ctx, notify.Message{
+		Host:  d.hostName(),
+		Level: "error",
+		Title: fmt.Sprintf("%s deploy FAILED", inst),
+		Text:  detail,
+	})
+	return Result{
+		Status: state.StatusFailed,
+		ID:     deployID,
+		Detail: detail,
+	}, nil
+}
+
 // Deploy executes the deployment pipeline for an instance following the recreate strategy.
-func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, opts Options) (Result, error) {
+func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, opts Options) (res Result, retErr error) {
 	actor := opts.Actor
 	if actor == "" {
 		actor = "agent"
 	}
 	now := d.clock()
-	deployID := fmt.Sprintf("deploy-%d", now.Unix())
+	deployID := fmt.Sprintf("deploy-%d", now.UnixNano())
+
+	if d.Compose == nil || d.Health == nil {
+		return Result{}, &output.Error{
+			Code:    "E_DEPLOY_MISCONFIGURED",
+			Message: "deployer misconfigured: Compose and Health are required",
+			Hint:    "configure Compose and Health before running deploy",
+		}
+	}
 
 	// Step 1: Lock instance and load state
 	unlock, err := d.Store.Lock(inst)
@@ -297,11 +316,33 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 	}
 
 	if st.Status == state.StatusPaused && !opts.Force {
-		return Result{
-			Status: state.StatusPaused,
+		if st.PausedWantHash == "" || want.Hash() == st.PausedWantHash {
+			return Result{
+				Status: state.StatusPaused,
+				ID:     deployID,
+				Detail: st.PausedReason,
+			}, nil
+		}
+		// Auto-resume on new desired state
+		st.Status = state.StatusOK
+		st.PausedReason = ""
+		st.PausedWantHash = ""
+		st.UpdatedAt = now
+		if err := d.Store.Save(st); err != nil {
+			return Result{}, err
+		}
+		if err := d.Store.Append(inst, state.Event{
 			ID:     deployID,
-			Detail: st.PausedReason,
-		}, nil
+			At:     now,
+			Kind:   "resume",
+			From:   st.Current,
+			To:     &want,
+			Result: string(state.StatusOK),
+			Detail: "auto-resumed by new desired state",
+			Actor:  actor,
+		}); err != nil {
+			return Result{}, err
+		}
 	}
 	if st.FailedHash != "" && want.Hash() == st.FailedHash && !opts.Force {
 		return Result{
@@ -319,6 +360,20 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 	}
 
 	// Step 2: Checkout want.InfraCommit, load contract, spec, decisions, Validate + Check
+	promoted := false
+	defer func() {
+		if !promoted && st.Current != nil && st.Current.InfraCommit != "" && d.Repo != nil {
+			if rErr := d.Repo.Checkout(ctx, st.Current.InfraCommit); rErr != nil {
+				errMsg := fmt.Sprintf("restore checkout failed: %v", rErr)
+				if res.Detail != "" {
+					res.Detail += "; " + errMsg
+				} else {
+					res.Detail = errMsg
+				}
+			}
+		}
+	}()
+
 	if d.Repo != nil {
 		if err := d.Repo.Checkout(ctx, want.InfraCommit); err != nil {
 			return Result{}, err
@@ -327,19 +382,16 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 
 	instDir := filepath.Join(d.deployRoot(), inst)
 	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
-	d.ensureDiskFile(cvctlEnvPath)
 
 	d0, err := instance.Read(cvctlEnvPath, &contract.Project{})
 	if err != nil {
-		return d.abortDeploy(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("cannot read %s: %v", cvctlEnvPath, err))
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("cannot read %s: %v", cvctlEnvPath, err), nil)
 	}
 	infraPath := d0.InfraPath
 	if infraPath == "" {
 		infraPath = "."
 	}
 	infraDir := filepath.Join(instDir, "infra", infraPath)
-	d.ensureDiskFile(filepath.Join(infraDir, "compose.yml"))
-	d.ensureDiskFile(filepath.Join(infraDir, "env.spec.yml"))
 
 	cat, err := d.catalog()
 	if err != nil {
@@ -348,12 +400,12 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 
 	p, err := contract.Load(infraDir, cat)
 	if err != nil {
-		return d.abortDeploy(ctx, inst, st, want, deployID, actor, now, err.Error())
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), nil)
 	}
 
 	dec, err := instance.Read(cvctlEnvPath, p)
 	if err != nil {
-		return d.abortDeploy(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("cannot read %s: %v", cvctlEnvPath, err))
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("cannot read %s: %v", cvctlEnvPath, err), nil)
 	}
 	if dec.InfraPath == "" {
 		dec.InfraPath = "."
@@ -362,7 +414,7 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 	specPath := filepath.Join(infraDir, "env.spec.yml")
 	spec, err := envspec.Load(specPath)
 	if err != nil {
-		return d.abortDeploy(ctx, inst, st, want, deployID, actor, now, err.Error())
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), nil)
 	}
 
 	// Digests from want.Digests are verified
@@ -381,7 +433,7 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 			issueMsgs = append(issueMsgs, fmt.Sprintf("%s: %s", iss.Code, iss.Message))
 		}
 		detail := "E_DEPLOY_INVALID: " + strings.Join(issueMsgs, "; ")
-		return d.abortDeploy(ctx, inst, st, want, deployID, actor, now, detail)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, detail, nil)
 	}
 
 	// Step 3: ServiceVars -> Resolve with current app.env
@@ -393,7 +445,7 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 
 	svcVars, err := render.ServiceVars(p, dec, cat)
 	if err != nil {
-		return d.abortDeploy(ctx, inst, st, want, deployID, actor, now, err.Error())
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), existingEnv)
 	}
 
 	resEnv, err := envspec.Resolve(spec, envspec.Input{
@@ -403,21 +455,23 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 		Domains:     dec.Domains,
 	})
 	if err != nil {
-		return d.abortDeploy(ctx, inst, st, want, deployID, actor, now, err.Error())
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), existingEnv)
 	}
 
 	if len(resEnv.Missing) > 0 {
 		st.Status = state.StatusBlocked
 		st.Blocked = resEnv.Missing
 		st.UpdatedAt = now
-		_ = d.Store.Save(st)
+		if err := d.Store.Save(st); err != nil {
+			return Result{}, err
+		}
 
 		var setEnvCmds []string
 		for _, k := range resEnv.Missing {
 			setEnvCmds = append(setEnvCmds, fmt.Sprintf("cvctl set-env %s %s", inst, k))
 		}
 		warnText := strings.Join(setEnvCmds, "\n")
-		_ = d.Store.Append(inst, state.Event{
+		if err := d.Store.Append(inst, state.Event{
 			ID:     deployID,
 			At:     now,
 			Kind:   "blocked",
@@ -426,7 +480,9 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 			Result: string(state.StatusBlocked),
 			Detail: warnText,
 			Actor:  actor,
-		})
+		}); err != nil {
+			return Result{}, err
+		}
 		_ = d.notifier().Send(ctx, notify.Message{
 			Host:  d.hostName(),
 			Level: "warn",
@@ -443,6 +499,11 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 	}
 
 	st.Blocked = nil
+	st.Status = state.StatusDeploying
+	st.UpdatedAt = now
+	if err := d.Store.Save(st); err != nil {
+		return Result{}, err
+	}
 
 	// Step 4: Render into staging directory <dir>/.staging/
 	stagingDir := filepath.Join(instDir, ".staging")
@@ -453,49 +514,70 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 	finalRoutePath := filepath.Join(d.traefikDir(), inst+".yml")
 
 	appEnvBytes := instance.FormatEnv(resEnv.Values)
-	renderOpts := render.Options{
+	stagingOverrideBytes, err := render.Override(p, dec, cat, render.Options{
 		InstanceDir: instDir,
 		Edge:        d.edge(),
-		AppEnvPath:  filepath.Join(instDir, "app.env"),
-	}
-	overrideBytes, err := render.Override(p, dec, cat, renderOpts)
+		AppEnvPath:  stagingAppEnvPath,
+	})
 	if err != nil {
 		return Result{}, err
 	}
-	routeBytes, err := render.Traefik(p, dec, renderOpts)
+	finalOverrideBytes, err := render.Override(p, dec, cat, render.Options{
+		InstanceDir: instDir,
+		Edge:        d.edge(),
+		AppEnvPath:  finalAppEnvPath,
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	routeBytes, err := render.Traefik(p, dec, render.Options{
+		InstanceDir: instDir,
+		Edge:        d.edge(),
+		AppEnvPath:  finalAppEnvPath,
+	})
 	if err != nil {
 		return Result{}, err
 	}
 
 	fsys := d.fs()
 	if err := fsys.MkdirAll(stagingDir, 0o2775, deployOwner); err != nil {
-		return Result{}, err
-	}
-	if err := fsys.WriteFile(stagingOverridePath, overrideBytes, 0o640, deployOwner); err != nil {
-		return Result{}, err
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("mkdir staging failed: %v", err), resEnv.Values)
 	}
 	if err := fsys.WriteFile(stagingAppEnvPath, appEnvBytes, 0o640, deployOwner); err != nil {
-		return Result{}, err
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("write staging app.env failed: %v", err), resEnv.Values)
+	}
+	if err := fsys.WriteFile(stagingOverridePath, stagingOverrideBytes, 0o640, deployOwner); err != nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("write staging override failed: %v", err), resEnv.Values)
 	}
 	if routeBytes != nil {
 		if err := fsys.WriteFile(stagingRoutePath, routeBytes, 0o640, deployOwner); err != nil {
-			return Result{}, err
+			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+			return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("write staging route failed: %v", err), resEnv.Values)
 		}
 	}
 
-	stagingCompose := d.getCompose(stagingOverridePath)
-	if stagingCompose != nil {
-		if err := stagingCompose.Config(ctx); err != nil {
-			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-			return d.abortDeploy(ctx, inst, st, want, deployID, actor, now, err.Error())
+	stagingCompose := d.Compose(stagingOverridePath, stagingAppEnvPath)
+	if stagingCompose == nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return Result{}, &output.Error{
+			Code:    "E_DEPLOY_MISCONFIGURED",
+			Message: "deployer misconfigured: Compose returned nil",
+			Hint:    "ensure Compose factory returns a valid ComposeAPI",
 		}
+	}
+
+	if err := stagingCompose.Config(ctx); err != nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), resEnv.Values)
 	}
 
 	// Step 5: If prod, create restore point
 	if dec.Env == "prod" {
 		if err := d.restore().Create(ctx, inst, deployID); err != nil {
 			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-			return d.abortDeploy(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("restore point failed: %v", err))
+			return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("restore point failed: %v", err), resEnv.Values)
 		}
 	}
 
@@ -511,119 +593,90 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 		}
 	}
 
-	if stagingCompose != nil {
-		if err := stagingCompose.Pull(ctx, appServices...); err != nil {
-			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-			return d.abortDeploy(ctx, inst, st, want, deployID, actor, now, err.Error())
-		}
-		if err := stagingCompose.UpData(ctx, localDataServices); err != nil {
-			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-			return d.abortDeploy(ctx, inst, st, want, deployID, actor, now, err.Error())
-		}
+	if err := stagingCompose.Pull(ctx, appServices...); err != nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), resEnv.Values)
+	}
+	if err := stagingCompose.UpData(ctx, localDataServices); err != nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), resEnv.Values)
 	}
 
 	// Step 7: Pre-deploy hooks
 	preHooksRan := false
-	if stagingCompose != nil {
-		for _, hook := range p.X.Hooks.PreDeploy {
-			preHooksRan = true
-			res, err := stagingCompose.RunHook(ctx, hook.Service, hook.Run)
-			if err != nil || res.ExitCode != 0 {
-				d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+	for _, hook := range p.X.Hooks.PreDeploy {
+		preHooksRan = true
+		resHook, err := stagingCompose.RunHook(ctx, hook.Service, hook.Run)
+		if err != nil || resHook.ExitCode != 0 {
+			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 
-				rawOutput := string(res.Stderr)
-				if strings.TrimSpace(rawOutput) == "" {
-					rawOutput = string(res.Stdout)
-				}
-				if strings.TrimSpace(rawOutput) == "" && err != nil {
-					rawOutput = err.Error()
-				}
-				redactedOut := redact(lastLines(rawOutput, 20), resEnv.Values)
-
-				st.Status = state.StatusFailed
-				st.FailedHash = want.Hash()
-				st.UpdatedAt = now
-				_ = d.Store.Save(st)
-
-				_ = d.Store.Append(inst, state.Event{
-					ID:     deployID,
-					At:     now,
-					Kind:   "failed",
-					From:   st.Current,
-					To:     &want,
-					Result: string(state.StatusFailed),
-					Detail: redactedOut,
-					Actor:  actor,
-				})
-				_ = d.notifier().Send(ctx, notify.Message{
-					Host:  d.hostName(),
-					Level: "error",
-					Title: fmt.Sprintf("%s deploy FAILED", inst),
-					Text:  redactedOut,
-				})
-
-				if st.Current != nil && st.Current.InfraCommit != "" && d.Repo != nil {
-					_ = d.Repo.Checkout(ctx, st.Current.InfraCommit)
-				}
-
-				return Result{
-					Status: state.StatusFailed,
-					ID:     deployID,
-					Detail: redactedOut,
-				}, nil
+			rawOutput := string(resHook.Stderr)
+			if strings.TrimSpace(rawOutput) == "" {
+				rawOutput = string(resHook.Stdout)
 			}
+			if strings.TrimSpace(rawOutput) == "" && err != nil {
+				rawOutput = err.Error()
+			}
+			redactedOut := lastLines(redact(rawOutput, resEnv.Values), 20)
+			return d.failPermanent(ctx, inst, st, want, deployID, actor, now, redactedOut, resEnv.Values)
 		}
 	}
 
-	// Step 8: Promote staging -> final
-	if err := fsys.WriteFile(finalOverridePath, overrideBytes, 0o640, deployOwner); err != nil {
-		return Result{}, err
-	}
+	// Step 8: Promote staging -> final (order: app.env -> route -> override)
 	if err := fsys.WriteFile(finalAppEnvPath, appEnvBytes, 0o640, deployOwner); err != nil {
-		return Result{}, err
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("promote app.env failed: %v", err), resEnv.Values)
 	}
 	if routeBytes != nil {
 		if err := fsys.WriteFile(finalRoutePath, routeBytes, 0o640, deployOwner); err != nil {
-			return Result{}, err
+			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+			return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("promote route failed: %v", err), resEnv.Values)
 		}
 	} else {
 		_ = fsys.Remove(finalRoutePath)
 	}
-	d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-
-	finalCompose := d.getCompose(finalOverridePath)
-	var upErr error
-	if finalCompose != nil {
-		upErr = finalCompose.Up(ctx)
+	if err := fsys.WriteFile(finalOverridePath, finalOverrideBytes, 0o640, deployOwner); err != nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("promote override failed: %v", err), resEnv.Values)
 	}
+	d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+	promoted = true
+
+	finalCompose := d.Compose(finalOverridePath, finalAppEnvPath)
+	if finalCompose == nil {
+		return Result{}, &output.Error{
+			Code:    "E_DEPLOY_MISCONFIGURED",
+			Message: "deployer misconfigured: Compose returned nil",
+			Hint:    "ensure Compose factory returns a valid ComposeAPI",
+		}
+	}
+	upErr := finalCompose.Up(ctx)
 
 	// Step 9: HealthCheck
 	var healthErr error
 	if upErr == nil {
-		healthErr = d.checkHealth(ctx, inst, finalOverridePath)
+		healthErr = d.Health(ctx, inst, finalOverridePath, finalAppEnvPath)
 	}
 
 	if upErr == nil && healthErr == nil {
 		// Post-deploy hooks
-		if finalCompose != nil {
-			for _, hook := range p.X.Hooks.PostDeploy {
-				hRes, hErr := finalCompose.RunHook(ctx, hook.Service, hook.Run)
-				if hErr != nil || hRes.ExitCode != 0 {
-					rawHook := string(hRes.Stderr)
-					if strings.TrimSpace(rawHook) == "" {
-						rawHook = string(hRes.Stdout)
-					}
-					if strings.TrimSpace(rawHook) == "" && hErr != nil {
-						rawHook = hErr.Error()
-					}
-					redactedHook := redact(lastLines(rawHook, 20), resEnv.Values)
-					_ = d.notifier().Send(ctx, notify.Message{
-						Host:  d.hostName(),
-						Level: "warn",
-						Title: fmt.Sprintf("%s deploy OK", inst),
-						Text:  fmt.Sprintf("post-deploy hook failed: %s", redactedHook),
-					})
+		for _, hook := range p.X.Hooks.PostDeploy {
+			hRes, hErr := finalCompose.RunHook(ctx, hook.Service, hook.Run)
+			if hErr != nil || hRes.ExitCode != 0 {
+				rawHook := string(hRes.Stderr)
+				if strings.TrimSpace(rawHook) == "" {
+					rawHook = string(hRes.Stdout)
 				}
+				if strings.TrimSpace(rawHook) == "" && hErr != nil {
+					rawHook = hErr.Error()
+				}
+				redactedHook := lastLines(redact(rawHook, resEnv.Values), 20)
+				_ = d.notifier().Send(ctx, notify.Message{
+					Host:  d.hostName(),
+					Level: "warn",
+					Title: fmt.Sprintf("%s deploy OK", inst),
+					Text:  fmt.Sprintf("post-deploy hook failed: %s", redactedHook),
+				})
 			}
 		}
 
@@ -634,9 +687,11 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 		st.RollbackFailed = false
 		st.Blocked = nil
 		st.UpdatedAt = now
-		_ = d.Store.Save(st)
+		if err := d.Store.Save(st); err != nil {
+			return Result{}, err
+		}
 
-		_ = d.Store.Append(inst, state.Event{
+		if err := d.Store.Append(inst, state.Event{
 			ID:     deployID,
 			At:     now,
 			Kind:   "deploy",
@@ -645,7 +700,9 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 			Result: string(state.StatusOK),
 			Detail: fmt.Sprintf("commit %s deployed", commitShort(want.InfraCommit)),
 			Actor:  actor,
-		})
+		}); err != nil {
+			return Result{}, err
+		}
 		_ = d.notifier().Send(ctx, notify.Message{
 			Host:  d.hostName(),
 			Level: "info",
@@ -672,16 +729,18 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 			logs = healthErr.Error()
 		}
 	}
-	redactedLogs := redact(lastLines(logs, 20), resEnv.Values)
+	redactedLogs := lastLines(redact(logs, resEnv.Values), 20)
 
 	if st.Current == nil || st.Current.InfraCommit == "" {
 		st.Status = state.StatusFailed
 		st.FailedHash = want.Hash()
 		st.RollbackFailed = false
 		st.UpdatedAt = now
-		_ = d.Store.Save(st)
+		if err := d.Store.Save(st); err != nil {
+			return Result{}, err
+		}
 
-		_ = d.Store.Append(inst, state.Event{
+		if err := d.Store.Append(inst, state.Event{
 			ID:     deployID,
 			At:     now,
 			Kind:   "failed",
@@ -690,7 +749,9 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 			Result: string(state.StatusFailed),
 			Detail: redactedLogs,
 			Actor:  actor,
-		})
+		}); err != nil {
+			return Result{}, err
+		}
 		_ = d.notifier().Send(ctx, notify.Message{
 			Host:  d.hostName(),
 			Level: "error",
@@ -710,13 +771,47 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 
 	st.Status = state.StatusFailed
 	st.FailedHash = want.Hash()
+	st.UpdatedAt = now
+
 	if rollbackErr != nil {
 		st.RollbackFailed = true
-	} else {
-		st.RollbackFailed = false
+		if err := d.Store.Save(st); err != nil {
+			return Result{}, err
+		}
+
+		rbDetail := fmt.Sprintf("rollback failed: %v\noriginal error: %s", rollbackErr, redactedLogs)
+		rbRedacted := redact(rbDetail, resEnv.Values)
+
+		if err := d.Store.Append(inst, state.Event{
+			ID:     deployID,
+			At:     now,
+			Kind:   "rollback",
+			From:   st.Current,
+			To:     &want,
+			Result: "rollback_failed",
+			Detail: rbRedacted,
+			Actor:  actor,
+		}); err != nil {
+			return Result{}, err
+		}
+		_ = d.notifier().Send(ctx, notify.Message{
+			Host:  d.hostName(),
+			Level: "error",
+			Title: fmt.Sprintf("%s ROLLBACK FAILED", inst),
+			Text:  rbRedacted,
+		})
+
+		return Result{
+			Status: state.StatusFailed,
+			ID:     deployID,
+			Detail: rbRedacted,
+		}, nil
 	}
-	st.UpdatedAt = now
-	_ = d.Store.Save(st)
+
+	st.RollbackFailed = false
+	if err := d.Store.Save(st); err != nil {
+		return Result{}, err
+	}
 
 	errText := redactedLogs
 	if preHooksRan && dec.Env == "prod" {
@@ -736,7 +831,7 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 		errText += fmt.Sprintf("\nmigrations ran; restore point %s: cvctl db restore %s %s --to %s", deployID, inst, dataSvc, deployID)
 	}
 
-	_ = d.Store.Append(inst, state.Event{
+	if err := d.Store.Append(inst, state.Event{
 		ID:     deployID,
 		At:     now,
 		Kind:   "rollback",
@@ -745,7 +840,9 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 		Result: string(state.StatusFailed),
 		Detail: errText,
 		Actor:  actor,
-	})
+	}); err != nil {
+		return Result{}, err
+	}
 	_ = d.notifier().Send(ctx, notify.Message{
 		Host:  d.hostName(),
 		Level: "error",
