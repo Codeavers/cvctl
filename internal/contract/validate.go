@@ -114,7 +114,21 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 	if !isApp[p.X.Health.Service] || p.X.Health.HTTP == "" {
 		add("E_CONTRACT_NO_HEALTH", "", "x-cvctl.health is missing, empty http, or names a service that is not an app service",
 			"set x-cvctl.health.service to an app service and health.http to its health path")
+	} else {
+		var healthApp *AppService
+		for i := range p.Apps {
+			if p.Apps[i].Name == p.X.Health.Service {
+				healthApp = &p.Apps[i]
+				break
+			}
+		}
+		if healthApp != nil && p.X.Health.Port == 0 && healthApp.ExposePort == 0 {
+			add("E_CONTRACT_HEALTH_PORT", p.X.Health.Service,
+				fmt.Sprintf("health service %q has neither cvctl.expose nor x-cvctl.health.port", p.X.Health.Service),
+				fmt.Sprintf("add cvctl.expose to %s or x-cvctl.health.port", p.X.Health.Service))
+		}
 	}
+
 	for _, hooks := range [][]Hook{p.X.Hooks.PreDeploy, p.X.Hooks.PostDeploy} {
 		for _, h := range hooks {
 			if !isApp[h.Service] {

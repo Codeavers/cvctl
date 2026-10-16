@@ -2,7 +2,9 @@ x-cvctl:
   health:
     service: api
     http: /health
+    port: 3000
     timeout: 30s
+
   verify:
     service: db
     sql: select 1

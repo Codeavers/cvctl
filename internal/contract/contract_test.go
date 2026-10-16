@@ -112,3 +112,64 @@ func TestNormalize(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestContractHealthPort(t *testing.T) {
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Valid fixture has expose 3000 on api, Port 0 in compose.
+	p, err := Load("testdata/valid", cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := envspec.Load("testdata/valid/env.spec.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issues := Validate(p, cat, spec); len(issues) != 0 {
+		t.Fatalf("unexpected issues: %+v", issues)
+	}
+	if p.HealthPort() != 3000 {
+		t.Fatalf("HealthPort() = %d, want 3000", p.HealthPort())
+	}
+	if p.X.Health.EffectivePort(p.Apps[0].ExposePort) != 3000 {
+		t.Fatalf("EffectivePort = %d, want 3000", p.X.Health.EffectivePort(p.Apps[0].ExposePort))
+	}
+
+	// 2. Health service has no expose, and health.port == 0 -> E_CONTRACT_HEALTH_PORT
+	pNoExpose := *p
+	pNoExpose.Apps = []AppService{{Name: "api", Role: "app", ExposePort: 0}}
+	pNoExpose.X.Health.Port = 0
+	issues := Validate(&pNoExpose, cat, spec)
+	var found bool
+	for _, issue := range issues {
+		if issue.Code == "E_CONTRACT_HEALTH_PORT" {
+			found = true
+			wantHint := "add cvctl.expose to api or x-cvctl.health.port"
+			if issue.Hint != wantHint {
+				t.Fatalf("hint = %q, want %q", issue.Hint, wantHint)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected E_CONTRACT_HEALTH_PORT issue, got %+v", issues)
+	}
+
+	// 3. Health service has no expose, but health.port > 0 -> OK
+	pWithPort := *p
+	pWithPort.Apps = []AppService{{Name: "api", Role: "app", ExposePort: 0}}
+	pWithPort.X.Health.Port = 8080
+	if pWithPort.HealthPort() != 8080 {
+		t.Fatalf("HealthPort() = %d, want 8080", pWithPort.HealthPort())
+	}
+	if pWithPort.X.Health.EffectivePort(0) != 8080 {
+		t.Fatalf("EffectivePort = %d, want 8080", pWithPort.X.Health.EffectivePort(0))
+	}
+	for _, issue := range Validate(&pWithPort, cat, spec) {
+		if issue.Code == "E_CONTRACT_HEALTH_PORT" {
+			t.Fatalf("unexpected E_CONTRACT_HEALTH_PORT when port is set: %+v", issue)
+		}
+	}
+}

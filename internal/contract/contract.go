@@ -32,7 +32,15 @@ const (
 type HealthSpec struct {
 	Service string
 	HTTP    string
+	Port    int
 	Timeout time.Duration
+}
+
+func (h HealthSpec) EffectivePort(exposePort int) int {
+	if h.Port > 0 {
+		return h.Port
+	}
+	return exposePort
 }
 
 type VerifySpec struct {
@@ -81,10 +89,23 @@ type Project struct {
 	RawCompose []byte
 }
 
+func (p *Project) HealthPort() int {
+	if p.X.Health.Port > 0 {
+		return p.X.Health.Port
+	}
+	for _, a := range p.Apps {
+		if a.Name == p.X.Health.Service {
+			return a.ExposePort
+		}
+	}
+	return 0
+}
+
 type rawExt struct {
 	Health struct {
 		Service string `yaml:"service"`
 		HTTP    string `yaml:"http"`
+		Port    int    `yaml:"port"`
 		Timeout string `yaml:"timeout"`
 	} `yaml:"health"`
 	Verify *struct {
@@ -138,7 +159,11 @@ func Load(dir string, cat kinds.Catalog) (*Project, error) {
 		return nil, composeErr(fmt.Sprintf("invalid %s: %v", path, err), "fix the compose file syntax")
 	}
 
-	x := Ext{Health: HealthSpec{Service: doc.X.Health.Service, HTTP: doc.X.Health.HTTP}}
+	x := Ext{Health: HealthSpec{
+		Service: doc.X.Health.Service,
+		HTTP:    doc.X.Health.HTTP,
+		Port:    doc.X.Health.Port,
+	}}
 	if t := doc.X.Health.Timeout; t != "" {
 		d, err := time.ParseDuration(t)
 		if err != nil {

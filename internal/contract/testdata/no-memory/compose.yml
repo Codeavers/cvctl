@@ -13,7 +13,10 @@ x-cvctl:
 services:
   api:
     image: ghcr.io/x/api:1
-    labels: [cvctl.role=app]
+    labels:
+      cvctl.role: app
+      cvctl.expose: "3000"
+
     environment:
       DATABASE_URL: ${DB_URL}
       JWT: $JWT

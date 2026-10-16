@@ -20,6 +20,7 @@ import (
 type Options struct {
 	InstanceDir string
 	Edge        string // edge | behind-proxy
+	AppEnvPath  string
 }
 
 func missing(what string) error {
@@ -91,9 +92,13 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 		if a.ExposePort > 0 {
 			nets["edge"] = map[string]any{"aliases": []string{routeName(d, a.Name)}}
 		}
+		appEnvPath := o.AppEnvPath
+		if appEnvPath == "" {
+			appEnvPath = filepath.Join(o.InstanceDir, "app.env")
+		}
 		services[a.Name] = map[string]any{
 			"image":    a.Image + "@" + digest,
-			"env_file": []string{filepath.Join(o.InstanceDir, "app.env")},
+			"env_file": []string{appEnvPath},
 			"restart":  "unless-stopped",
 			"networks": nets,
 		}

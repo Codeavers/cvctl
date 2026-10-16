@@ -266,3 +266,32 @@ func TestEmptyInstanceRefused(t *testing.T) {
 		t.Fatal("Traefik accepted empty instance")
 	}
 }
+
+func TestRenderAppEnvPath(t *testing.T) {
+	p, d, cat := setup(t)
+
+	// 1. When AppEnvPath is provided, it is used in env_file
+	out, err := Override(p, d, cat, Options{
+		InstanceDir: "/srv/deploy/proj-dev",
+		Edge:        "edge",
+		AppEnvPath:  "/srv/deploy/proj-dev/staging.app.env",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "- /srv/deploy/proj-dev/staging.app.env") {
+		t.Fatalf("expected staging.app.env in override output:\n%s", string(out))
+	}
+
+	// 2. When AppEnvPath is empty, defaults to filepath.Join(InstanceDir, "app.env")
+	outDef, err := Override(p, d, cat, Options{
+		InstanceDir: "/srv/deploy/proj-dev",
+		Edge:        "edge",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(outDef), "- /srv/deploy/proj-dev/app.env") {
+		t.Fatalf("expected default app.env in override output:\n%s", string(outDef))
+	}
+}
