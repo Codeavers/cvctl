@@ -78,6 +78,10 @@ func newInitCmd() *cobra.Command {
 			if e.Out == nil {
 				e.Out = cmd.ErrOrStderr()
 			}
+			// Fail fast, before touching /etc/cvctl or prompting.
+			if _, err := (host.PreflightStep{}).Check(cmd.Context(), e); err != nil {
+				return err
+			}
 			if e.Cfg, e.Secrets, err = hostcfg.Load(e.FS, hostCfgDir); err != nil {
 				return err
 			}
@@ -93,26 +97,31 @@ func newInitCmd() *cobra.Command {
 			results := host.Run(cmd.Context(), e, initSteps(), dry)
 
 			rep := initReport{Host: e.Cfg.HostName, Steps: results, Pending: []string{}}
-			failed := false
+			var failedErr error
 			for _, r := range results {
-				if r.Status == host.StatusFailed {
-					failed = true
-				}
-				if r.Status == host.StatusPending {
-					rep.Pending = append(rep.Pending, r.Note)
-				}
-			}
-			printerFrom(cmd).Result(rep, func(w io.Writer) { writeInitHuman(w, rep) })
-			if failed {
-				if !asJSON {
-					for _, r := range results {
-						if r.Error != nil {
-							fmt.Fprintf(cmd.ErrOrStderr(), "error %s: %s\nhint: %s\n", r.Error.Code, r.Error.Message, r.Error.Hint)
+				switch r.Status {
+				case host.StatusFailed:
+					if failedErr == nil && r.Error != nil {
+						failedErr = &output.Error{
+							Code:    "E_INIT_STEP_FAILED",
+							Message: fmt.Sprintf("step %s failed: %s", r.Name, r.Error.Message),
+							Hint:    r.Error.Hint,
 						}
 					}
+				case host.StatusPending, host.StatusPlanned, host.StatusChanged:
+					if r.Note != "" {
+						rep.Pending = append(rep.Pending, r.Note)
+					}
 				}
-				return &output.ReportedError{Msg: "a step failed"}
 			}
+			if failedErr != nil {
+				if asJSON {
+					return &output.DataError{Err: failedErr, Data: rep}
+				}
+				writeInitHuman(cmd.OutOrStdout(), rep)
+				return failedErr
+			}
+			printerFrom(cmd).Result(rep, func(w io.Writer) { writeInitHuman(w, rep) })
 			return nil
 		},
 	}

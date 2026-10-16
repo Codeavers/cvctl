@@ -61,11 +61,15 @@ type UsageError struct {
 func (e *UsageError) Error() string { return e.Err.Error() }
 func (e *UsageError) Unwrap() error { return e.Err }
 
-// ReportedError means the command already printed its full result (including
-// the failure); Fail only maps it to exit 1 without printing a second document.
-type ReportedError struct{ Msg string }
+// DataError is a failure that also carries the command's result; Fail prints
+// it under "data" in the same single failure document.
+type DataError struct {
+	Err  error
+	Data any
+}
 
-func (e *ReportedError) Error() string { return e.Msg }
+func (e *DataError) Error() string { return e.Err.Error() }
+func (e *DataError) Unwrap() error { return e.Err }
 
 type Printer struct {
 	JSON bool
@@ -82,6 +86,7 @@ type failureEnvelope struct {
 	OK     bool    `json:"ok"`
 	Error  *Error  `json:"error"`
 	Issues []Issue `json:"issues,omitempty"`
+	Data   any     `json:"data,omitempty"`
 }
 
 // Result prints v as JSON in JSON mode; otherwise calls human (if non-nil).
@@ -97,9 +102,10 @@ func (p *Printer) Result(v any, human func(io.Writer)) {
 
 // Fail prints err and returns the process exit code.
 func (p *Printer) Fail(err error) int {
-	var rep *ReportedError
-	if errors.As(err, &rep) {
-		return ExitError
+	var data any
+	var de *DataError
+	if errors.As(err, &de) {
+		data = de.Data
 	}
 	code := ExitError
 	var usage *UsageError
@@ -126,7 +132,7 @@ func (p *Printer) Fail(err error) int {
 	}
 
 	if p.JSON {
-		p.encode(failureEnvelope{OK: false, Error: oe, Issues: issues})
+		p.encode(failureEnvelope{OK: false, Error: oe, Issues: issues, Data: data})
 		return code
 	}
 	fmt.Fprintf(p.Err, "error %s: %s\n", oe.Code, oe.Message)
