@@ -109,10 +109,18 @@ func invalid(key string, err error) error {
 	}
 }
 
-func newConfig() *Config { return &Config{vals: map[string]string{}, extra: map[string]string{}} }
+// NewConfig returns an empty initialized Config.
+func NewConfig() *Config { return &Config{vals: map[string]string{}, extra: map[string]string{}} }
+
+func newConfig() *Config { return NewConfig() }
 
 // Get returns the raw value of key (without the CVCTL_ prefix), "" if unset.
-func (c *Config) Get(key string) string { return c.vals[key] }
+func (c *Config) Get(key string) string {
+	if c.vals == nil {
+		return ""
+	}
+	return c.vals[key]
+}
 
 // Set validates and stores key (without the CVCTL_ prefix). An empty value
 // unsets it.
@@ -125,6 +133,12 @@ func (c *Config) Set(key, val string) error {
 	}
 	if !known {
 		return invalid(key, errors.New("unknown key"))
+	}
+	if c.vals == nil {
+		c.vals = map[string]string{}
+	}
+	if c.extra == nil {
+		c.extra = map[string]string{}
 	}
 	if val != "" {
 		if v := validators[key]; v != nil {
@@ -182,14 +196,23 @@ func (c *Config) sync(key, val string) {
 // Secrets holds secret values by file name. Values never appear in errors.
 type Secrets struct{ m map[string]string }
 
-func newSecrets() *Secrets { return &Secrets{m: map[string]string{}} }
+// NewSecrets returns an empty initialized Secrets.
+func NewSecrets() *Secrets { return &Secrets{m: map[string]string{}} }
+
+func newSecrets() *Secrets { return NewSecrets() }
 
 func (s *Secrets) Get(name string) (string, bool) {
+	if s.m == nil {
+		return "", false
+	}
 	v, ok := s.m[name]
 	return v, ok && v != ""
 }
 
 func (s *Secrets) Set(name, value string) {
+	if s.m == nil {
+		s.m = map[string]string{}
+	}
 	if value == "" {
 		delete(s.m, name)
 		return

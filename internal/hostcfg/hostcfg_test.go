@@ -291,3 +291,25 @@ func TestSaveFreshDefaults(t *testing.T) {
 		t.Fatalf("secret info %+v, want mode 0640 root:root", fi)
 	}
 }
+
+func TestNewConfigAndNewSecrets(t *testing.T) {
+	cfg := hostcfg.NewConfig()
+	if cfg == nil {
+		t.Fatal("NewConfig returned nil")
+	}
+	if err := cfg.Set("STORAGE", "local"); err != nil {
+		t.Fatalf("cfg.Set failed: %v", err)
+	}
+	if cfg.Storage != "local" || cfg.Get("STORAGE") != "local" {
+		t.Fatalf("cfg storage mismatch: field=%q get=%q", cfg.Storage, cfg.Get("STORAGE"))
+	}
+
+	sec := hostcfg.NewSecrets()
+	if sec == nil {
+		t.Fatal("NewSecrets returned nil")
+	}
+	sec.Set("s3_access_key", "testkey")
+	if v, ok := sec.Get("s3_access_key"); !ok || v != "testkey" {
+		t.Fatalf("sec s3_access_key mismatch: got %q, ok=%v", v, ok)
+	}
+}

@@ -424,3 +424,35 @@ func TestStorageRegisteredInDefaultSteps(t *testing.T) {
 		t.Fatalf("step 9: got %q, want storage", steps[9].Name())
 	}
 }
+
+func TestStorageWaitForBucketStopsOnAuthError(t *testing.T) {
+	for _, code := range []string{"AccessDenied", "InvalidAccessKeyId", "SignatureDoesNotMatch"} {
+		t.Run(code, func(t *testing.T) {
+			calls := 0
+			store := newFakeObjStore()
+			store.bucketErr = &output.Error{Code: "E_STORAGE_CHECK", Message: "storage ensure_bucket: " + code, Hint: "check S3"}
+			hooked := &hookedStore{
+				fakeObjStore: store,
+				onEnsure: func() {
+					calls++
+				},
+			}
+			step := StorageStep{PollInterval: 50 * time.Millisecond, PollTimeout: 2 * time.Second}
+			start := time.Now()
+			err := step.waitForBucket(context.Background(), hooked)
+			elapsed := time.Since(start)
+			if err == nil {
+				t.Fatalf("expected error for %s, got nil", code)
+			}
+			if !strings.Contains(err.Error(), code) {
+				t.Fatalf("expected error to contain %s, got %v", code, err)
+			}
+			if calls != 1 {
+				t.Fatalf("expected exactly 1 call, got %d", calls)
+			}
+			if elapsed > 500*time.Millisecond {
+				t.Fatalf("waitForBucket took %v, expected immediate return", elapsed)
+			}
+		})
+	}
+}

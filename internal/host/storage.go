@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"math/big"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -229,8 +228,11 @@ func (s StorageStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 		return "", nil
 	}
 
-	if err := ensureHostCfgInitialized(e); err != nil {
-		return "", err
+	if e.Cfg == nil {
+		e.Cfg = hostcfg.NewConfig()
+	}
+	if e.Secrets == nil {
+		e.Secrets = hostcfg.NewSecrets()
 	}
 
 	ak, okAK := e.Secrets.Get("s3_access_key")
@@ -351,6 +353,9 @@ func (s StorageStep) waitForBucket(ctx context.Context, store objstore.Store) er
 		if err == nil {
 			return nil
 		}
+		if isStorageAuthError(err) {
+			return err
+		}
 		if time.Now().After(deadline) {
 			return err
 		}
@@ -360,6 +365,16 @@ func (s StorageStep) waitForBucket(ctx context.Context, store objstore.Store) er
 		case <-time.After(interval):
 		}
 	}
+}
+
+func isStorageAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "AccessDenied") ||
+		strings.Contains(msg, "InvalidAccessKeyId") ||
+		strings.Contains(msg, "SignatureDoesNotMatch")
 }
 
 func randomAlnum(n int) (string, error) {
@@ -373,63 +388,6 @@ func randomAlnum(n int) (string, error) {
 		out[i] = alphanumChars[idx.Int64()]
 	}
 	return string(out), nil
-}
-
-// ensureHostCfgInitialized ensures e.Cfg and e.Secrets have initialized internal maps
-// even when callers construct struct literals directly in tests instead of hostcfg.Load.
-func ensureHostCfgInitialized(e *Env) error {
-	loadedCfg, loadedSec, err := hostcfg.Load(e.FS, "/etc/cvctl")
-	if err != nil {
-		return err
-	}
-	if e.Cfg == nil {
-		e.Cfg = loadedCfg
-	} else {
-		syncConfigFields(loadedCfg, e.Cfg)
-		*e.Cfg = *loadedCfg
-	}
-	if e.Secrets == nil {
-		e.Secrets = loadedSec
-	} else {
-		for _, name := range hostcfg.SecretNames {
-			if v, ok := e.Secrets.Get(name); ok {
-				loadedSec.Set(name, v)
-			}
-		}
-		*e.Secrets = *loadedSec
-	}
-	return nil
-}
-
-func syncConfigFields(dst, src *hostcfg.Config) {
-	setIf := func(k, v string) {
-		if v != "" {
-			_ = dst.Set(k, v)
-		}
-	}
-	setIf("HOST_NAME", src.HostName)
-	setIf("EDGE_MODE", src.EdgeMode)
-	if src.ProxyPort > 0 {
-		setIf("PROXY_PORT", strconv.Itoa(src.ProxyPort))
-	}
-	setIf("ADMIN_USER", src.AdminUser)
-	if src.SSHManage || src.Get("SSH_MANAGE") != "" {
-		setIf("SSH_MANAGE", strconv.FormatBool(src.SSHManage))
-	}
-	if src.FirewallManage || src.Get("FIREWALL_MANAGE") != "" {
-		setIf("FIREWALL_MANAGE", strconv.FormatBool(src.FirewallManage))
-	}
-	setIf("ACME_EMAIL", src.AcmeEmail)
-	setIf("ACME_CHALLENGE", src.AcmeChallenge)
-	setIf("STORAGE", src.Storage)
-	setIf("S3_ENDPOINT", src.S3Endpoint)
-	setIf("S3_BUCKET", src.S3Bucket)
-	setIf("S3_REGION", src.S3Region)
-	setIf("NOTIFY", src.Notify)
-	setIf("TELEGRAM_CHAT_ID", src.TelegramChatID)
-	setIf("TELEGRAM_THREAD_ID", src.TelegramThread)
-	setIf("REGISTRIES", src.Registries)
-	setIf("REGISTRY_USER", src.RegistryUser)
 }
 
 // fixSavedCfgPermissions restores root:deploy on /etc/cvctl, /etc/cvctl/secrets and
