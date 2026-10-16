@@ -37,7 +37,7 @@ func isDaemonConfigDesired(m map[string]any) bool {
 	return true
 }
 
-func (DockerDaemonStep) Check(_ context.Context, e *Env) (Plan, error) {
+func (DockerDaemonStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	data, err := e.FS.ReadFile(dockerDaemonConfigPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -59,6 +59,13 @@ func (DockerDaemonStep) Check(_ context.Context, e *Env) (Plan, error) {
 	}
 
 	if isDaemonConfigDesired(m) {
+		res, err := e.Run.Run(ctx, sys.Cmd{
+			Name: "docker",
+			Args: []string{"info", "--format", "{{.LoggingDriver}} {{.LiveRestoreEnabled}}"},
+		})
+		if err != nil || res.ExitCode != 0 || strings.TrimSpace(string(res.Stdout)) != "local true" {
+			return Plan{Pending: dockerRestartPendingMsg}, nil
+		}
 		return Plan{}, nil
 	}
 

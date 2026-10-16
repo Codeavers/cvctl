@@ -175,6 +175,7 @@ func TestDaemonUnchanged(t *testing.T) {
 }
 `
 	_ = fs.WriteFile("/etc/docker/daemon.json", []byte(content), 0o644, sys.Owner{User: "root", Group: "root"})
+	runner.On("docker info --format {{.LoggingDriver}} {{.LiveRestoreEnabled}}", sys.Result{Stdout: []byte("local true\n"), ExitCode: 0})
 
 	step := DockerDaemonStep{}
 	plan, err := step.Check(context.Background(), env)
@@ -184,8 +185,36 @@ func TestDaemonUnchanged(t *testing.T) {
 	if len(plan.Changes) != 0 {
 		t.Fatalf("expected unchanged step with 0 changes, got %v", plan.Changes)
 	}
-	if len(runner.Calls) != 0 {
-		t.Fatalf("expected no runner calls during Check, got %v", runner.Calls)
+	if plan.Pending != "" {
+		t.Fatalf("expected empty pending, got %q", plan.Pending)
+	}
+}
+
+func TestDaemonNeedsRestartWhenRunningStateMismatch(t *testing.T) {
+	env, runner, fs := newDockerTestEnv()
+	content := `{
+  "log-driver": "local",
+  "log-opts": {
+    "max-file": "5",
+    "max-size": "20m"
+  },
+  "live-restore": true
+}
+`
+	_ = fs.WriteFile("/etc/docker/daemon.json", []byte(content), 0o644, sys.Owner{User: "root", Group: "root"})
+	runner.On("docker info --format {{.LoggingDriver}} {{.LiveRestoreEnabled}}", sys.Result{Stdout: []byte("json-file false\n"), ExitCode: 0})
+
+	step := DockerDaemonStep{}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected Check error: %v", err)
+	}
+	if len(plan.Changes) != 0 {
+		t.Fatalf("expected 0 changes, got %v", plan.Changes)
+	}
+	wantPending := "daemon.json updated; run: systemctl restart docker (running containers will restart)"
+	if plan.Pending != wantPending {
+		t.Fatalf("got pending %q, want %q", plan.Pending, wantPending)
 	}
 }
 
