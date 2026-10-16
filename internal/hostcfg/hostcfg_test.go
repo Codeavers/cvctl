@@ -231,3 +231,63 @@ func TestSaveRemovesClearedSecret(t *testing.T) {
 		t.Fatal("cleared secret file still present")
 	}
 }
+
+func TestSavePreservesExistingOwnerAndMode(t *testing.T) {
+	fs := systest.NewFS()
+	rootDeploy := sys.Owner{User: "root", Group: "deploy"}
+	_ = fs.MkdirAll("/etc/cvctl", 0o750, rootDeploy)
+	_ = fs.MkdirAll("/etc/cvctl/secrets", 0o750, rootDeploy)
+	_ = fs.WriteFile("/etc/cvctl/host.env", []byte("CVCTL_HOST_NAME=box\n"), 0o640, rootDeploy)
+	_ = fs.WriteFile("/etc/cvctl/secrets/telegram_token", []byte("tok-123\n"), 0o640, rootDeploy)
+
+	cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hostcfg.Save(fs, "/etc/cvctl", cfg, sec); err != nil {
+		t.Fatal(err)
+	}
+
+	files := fs.Files()
+	if fi := files["/etc/cvctl"]; fi.Mode != 0o750 || fi.User != "root" || fi.Group != "deploy" {
+		t.Fatalf("config dir info %+v, want mode 0750 root:deploy", fi)
+	}
+	if fi := files["/etc/cvctl/secrets"]; fi.Mode != 0o750 || fi.User != "root" || fi.Group != "deploy" {
+		t.Fatalf("secrets dir info %+v, want mode 0750 root:deploy", fi)
+	}
+	if fi := files["/etc/cvctl/host.env"]; fi.Mode != 0o640 || fi.User != "root" || fi.Group != "deploy" {
+		t.Fatalf("host.env info %+v, want mode 0640 root:deploy", fi)
+	}
+	if fi := files["/etc/cvctl/secrets/telegram_token"]; fi.Mode != 0o640 || fi.User != "root" || fi.Group != "deploy" {
+		t.Fatalf("secret info %+v, want mode 0640 root:deploy", fi)
+	}
+}
+
+func TestSaveFreshDefaults(t *testing.T) {
+	fs := systest.NewFS()
+	cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Set("HOST_NAME", "box"); err != nil {
+		t.Fatal(err)
+	}
+	sec.Set("telegram_token", "tok-123")
+	if err := hostcfg.Save(fs, "/etc/cvctl", cfg, sec); err != nil {
+		t.Fatal(err)
+	}
+
+	files := fs.Files()
+	if fi := files["/etc/cvctl"]; fi.Mode != 0o700 || fi.User != "root" || fi.Group != "root" {
+		t.Fatalf("config dir info %+v, want mode 0700 root:root", fi)
+	}
+	if fi := files["/etc/cvctl/secrets"]; fi.Mode != 0o750 || fi.User != "root" || fi.Group != "root" {
+		t.Fatalf("secrets dir info %+v, want mode 0750 root:root", fi)
+	}
+	if fi := files["/etc/cvctl/host.env"]; fi.Mode != 0o640 || fi.User != "root" || fi.Group != "root" {
+		t.Fatalf("host.env info %+v, want mode 0640 root:root", fi)
+	}
+	if fi := files["/etc/cvctl/secrets/telegram_token"]; fi.Mode != 0o640 || fi.User != "root" || fi.Group != "root" {
+		t.Fatalf("secret info %+v, want mode 0640 root:root", fi)
+	}
+}

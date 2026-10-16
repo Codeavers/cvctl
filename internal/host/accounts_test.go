@@ -266,3 +266,25 @@ func TestAccountsRegisteredInDefaultSteps(t *testing.T) {
 		t.Fatalf("step 3: got %q, want accounts", steps[3].Name())
 	}
 }
+
+func TestAccountsIdempotentAfterHostcfgSave(t *testing.T) {
+	env, runner, fs := newAccountsTestEnv("andres")
+	seedDesiredAccountsState(runner, fs, "andres")
+
+	cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
+	if err != nil {
+		t.Fatalf("unexpected Load error: %v", err)
+	}
+	if err := hostcfg.Save(fs, "/etc/cvctl", cfg, sec); err != nil {
+		t.Fatalf("unexpected Save error: %v", err)
+	}
+
+	step := AccountsStep{}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected Check error: %v", err)
+	}
+	if len(plan.Changes) != 0 {
+		t.Fatalf("expected no changes after hostcfg.Save on desired state, got: %v", plan.Changes)
+	}
+}

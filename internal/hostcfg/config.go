@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
 	"regexp"
 	"strconv"
@@ -259,15 +260,18 @@ func writeErr(p string, err error) error {
 	}
 }
 
-// Save writes host.env and one file per set secret, everything root:root
-// (dir 0700 when created, secrets dir 0750, files 0640). Unknown host.env
-// entries read by Load are preserved; secrets cleared with Set(name, "") have
-// their file removed; secrets are never written to host.env.
+// Save writes host.env and one file per set secret, keeping existing mode and
+// owner (or defaulting to root:root, dir 0700 when created, secrets dir 0750,
+// files 0640). Unknown host.env entries read by Load are preserved; secrets
+// cleared with Set(name, "") have their file removed; secrets are never
+// written to host.env.
 func Save(fsys sys.FS, dir string, cfg *Config, sec *Secrets) error {
-	if _, err := fsys.Stat(dir); err != nil {
-		if err := fsys.MkdirAll(dir, 0o700, owner); err != nil {
-			return writeErr(dir, err)
-		}
+	dirMode, dirOwner, err := targetModeAndOwner(fsys, dir, 0o700)
+	if err != nil {
+		return writeErr(dir, err)
+	}
+	if err := fsys.MkdirAll(dir, dirMode, dirOwner); err != nil {
+		return writeErr(dir, err)
 	}
 	values := map[string]string{}
 	for k, v := range cfg.extra {
@@ -277,11 +281,19 @@ func Save(fsys sys.FS, dir string, cfg *Config, sec *Secrets) error {
 		values[envPrefix+k] = v
 	}
 	envPath := path.Join(dir, "host.env")
-	if err := fsys.WriteFile(envPath, instance.FormatEnv(values), 0o640, owner); err != nil {
+	envMode, envOwner, err := targetModeAndOwner(fsys, envPath, 0o640)
+	if err != nil {
+		return writeErr(envPath, err)
+	}
+	if err := fsys.WriteFile(envPath, instance.FormatEnv(values), envMode, envOwner); err != nil {
 		return writeErr(envPath, err)
 	}
 	sdir := path.Join(dir, "secrets")
-	if err := fsys.MkdirAll(sdir, 0o750, owner); err != nil {
+	sdirMode, sdirOwner, err := targetModeAndOwner(fsys, sdir, 0o750)
+	if err != nil {
+		return writeErr(sdir, err)
+	}
+	if err := fsys.MkdirAll(sdir, sdirMode, sdirOwner); err != nil {
 		return writeErr(sdir, err)
 	}
 	for _, n := range SecretNames {
@@ -293,9 +305,24 @@ func Save(fsys sys.FS, dir string, cfg *Config, sec *Secrets) error {
 			}
 			continue
 		}
-		if err := fsys.WriteFile(p, []byte(v), 0o640, owner); err != nil {
+		pMode, pOwner, err := targetModeAndOwner(fsys, p, 0o640)
+		if err != nil {
+			return writeErr(p, err)
+		}
+		if err := fsys.WriteFile(p, []byte(v), pMode, pOwner); err != nil {
 			return writeErr(p, err)
 		}
 	}
 	return nil
+}
+
+func targetModeAndOwner(fsys sys.FS, p string, defMode os.FileMode) (os.FileMode, sys.Owner, error) {
+	fi, err := fsys.Stat(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return defMode, owner, nil
+	}
+	if err != nil {
+		return 0, sys.Owner{}, err
+	}
+	return fi.Mode, sys.Owner{User: fi.User, Group: fi.Group}, nil
 }
