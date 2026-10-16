@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,6 +30,7 @@ import (
 
 var deployOwner = sys.Owner{User: "deployer", Group: "deploy"}
 var identRe = regexp.MustCompile(`^[a-z0-9_]+$`)
+var instanceNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 const alphaNum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
@@ -134,11 +136,115 @@ type AddResult struct {
 	Decisions    *instance.Decisions
 }
 
+func sanitizeName(s string) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' {
+			b.WriteByte(c)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	res := b.String()
+	for strings.Contains(res, "--") {
+		res = strings.ReplaceAll(res, "--", "-")
+	}
+	return strings.Trim(res, "-")
+}
+
+func validateInstance(deployRoot, stateRoot, inst, env string) error {
+	if len(inst) == 0 || len(inst) > 63 || !instanceNameRe.MatchString(inst) || !strings.HasSuffix(inst, "-"+env) {
+		return &output.Error{
+			Code:    "E_PROJECT_NAME_INVALID",
+			Message: fmt.Sprintf("invalid instance name %q", inst),
+			Hint:    "use --name with letters, digits and '-'",
+		}
+	}
+	expectedDeployDir := strings.TrimRight(deployRoot, "/") + "/" + inst
+	if filepath.Join(deployRoot, inst) != expectedDeployDir {
+		return &output.Error{
+			Code:    "E_PROJECT_NAME_INVALID",
+			Message: fmt.Sprintf("path traversal detected in instance %q", inst),
+			Hint:    "use --name with letters, digits and '-'",
+		}
+	}
+	expectedStateDir := strings.TrimRight(stateRoot, "/") + "/" + inst
+	if filepath.Join(stateRoot, inst) != expectedStateDir {
+		return &output.Error{
+			Code:    "E_PROJECT_NAME_INVALID",
+			Message: fmt.Sprintf("path traversal detected in instance %q", inst),
+			Hint:    "use --name with letters, digits and '-'",
+		}
+	}
+	return nil
+}
+
+func repoURLErr(url string) error {
+	return &output.Error{
+		Code:    "E_PROJECT_REPO_URL",
+		Message: fmt.Sprintf("invalid repository URL %q", url),
+		Hint:    "accepted formats: ssh://..., git@host:path, https://... (or file://... with CVCTL_ALLOW_FILE_REPOS=1)",
+	}
+}
+
+func validateRepoURL(repoURL string) error {
+	if strings.HasPrefix(repoURL, "-") {
+		return repoURLErr(repoURL)
+	}
+	if strings.HasPrefix(repoURL, "file://") {
+		if os.Getenv("CVCTL_ALLOW_FILE_REPOS") == "1" {
+			return nil
+		}
+		return repoURLErr(repoURL)
+	}
+	if strings.HasPrefix(repoURL, "https://") {
+		rest := strings.TrimPrefix(repoURL, "https://")
+		if rest == "" || strings.HasPrefix(rest, "-") {
+			return repoURLErr(repoURL)
+		}
+		return nil
+	}
+	if strings.HasPrefix(repoURL, "ssh://") {
+		rest := strings.TrimPrefix(repoURL, "ssh://")
+		if rest == "" || strings.HasPrefix(rest, "-") {
+			return repoURLErr(repoURL)
+		}
+		return nil
+	}
+	if strings.HasPrefix(repoURL, "git@") {
+		rest := strings.TrimPrefix(repoURL, "git@")
+		host, path, found := strings.Cut(rest, ":")
+		if found && host != "" && !strings.HasPrefix(host, "-") && path != "" {
+			return nil
+		}
+	}
+	return repoURLErr(repoURL)
+}
+
 func removeAll(fsys sys.FS, p string) error {
+	fi, err := fsys.Lstat(p)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fsys.Remove(p)
+	}
+	if fi.IsSymlink || !fi.IsDir {
+		return fsys.Remove(p)
+	}
 	entries, err := fsys.ReadDir(p)
 	if err == nil {
 		for _, entry := range entries {
-			if err := removeAll(fsys, filepath.Join(p, entry.Name())); err != nil {
+			child := filepath.Join(p, entry.Name())
+			if entry.Type()&os.ModeSymlink != 0 {
+				if err := fsys.Remove(child); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := removeAll(fsys, child); err != nil {
 				return err
 			}
 		}
@@ -162,8 +268,228 @@ func DeriveInstanceName(repoURL, project, env string) string {
 		}
 		name = strings.TrimSuffix(name, "-infra")
 	}
-	name = strings.ToLower(name)
+	name = sanitizeName(name)
 	return fmt.Sprintf("%s-%s", name, strings.ToLower(env))
+}
+
+func promptDataServiceMode(ctx context.Context, e *Env, dsName string) (string, error) {
+	for {
+		ans := "local"
+		if e.Prompt != nil {
+			var err error
+			ans, err = e.Prompt.Ask(hostcfg.Question{
+				Key:     "data_" + dsName + "_mode",
+				Prompt:  fmt.Sprintf("Mode for data service %s (local|external)", dsName),
+				Options: []string{"local", "external"},
+			}, "local")
+			if err != nil {
+				return "", err
+			}
+		}
+		ans = strings.ToLower(strings.TrimSpace(ans))
+		if ans == "" {
+			ans = "local"
+		}
+		if ans == "local" || ans == "external" {
+			return ans, nil
+		}
+		if !e.Interactive {
+			return "", &output.Error{
+				Code:    "E_PROJECT_ANSWER_INVALID",
+				Message: fmt.Sprintf("invalid data mode %q for service %s: must be 'local' or 'external'", ans, dsName),
+				Hint:    "answer 'local' or 'external'",
+			}
+		}
+	}
+}
+
+func loadContractAndSpec(fsys sys.FS, infraDir string, cat kinds.Catalog) (*contract.Project, *envspec.Spec, error) {
+	p, err := contract.Load(infraDir, cat)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	specPath := filepath.Join(infraDir, "env.spec.yml")
+	var spec *envspec.Spec
+	var extra []output.Issue
+	if _, statErr := fsys.Stat(specPath); statErr != nil {
+		extra = append(extra, output.Issue{
+			Code:    "E_CONTRACT_NO_ENVSPEC",
+			Message: "env.spec.yml not found",
+			Hint:    "create env.spec.yml next to compose.yml declaring every variable the compose file references",
+		})
+	} else if spec, err = envspec.Load(specPath); err != nil {
+		var oe *output.Error
+		if !errors.As(err, &oe) {
+			return nil, nil, err
+		}
+		extra = append(extra, output.Issue{Code: oe.Code, Message: oe.Message, Hint: oe.Hint})
+	}
+
+	issues := append(contract.Validate(p, cat, spec), extra...)
+	output.SortIssues(issues)
+	if len(issues) > 0 {
+		return nil, nil, &output.IssuesError{Issues: issues}
+	}
+	return p, spec, nil
+}
+
+func promptDataServices(ctx context.Context, e *Env, cat kinds.Catalog, p *contract.Project, d *instance.Decisions) error {
+	for _, ds := range p.Data {
+		sd, ok := d.Services[ds.Name]
+		if ok && sd.Mode != "" {
+			continue
+		}
+
+		mode := "local"
+		if ds.ExternalAllowed {
+			var err error
+			mode, err = promptDataServiceMode(ctx, e, ds.Name)
+			if err != nil {
+				return err
+			}
+		}
+
+		if mode == "local" {
+			user := strings.ToLower(contract.Normalize(ds.Name))
+			user = strings.ReplaceAll(user, "-", "_")
+			user = strings.ReplaceAll(user, ".", "_")
+			if !identRe.MatchString(user) {
+				return &output.Error{
+					Code:    "E_DECISION_INVALID",
+					Message: fmt.Sprintf("service %s normalizes to invalid identifier %q", ds.Name, user),
+					Hint:    "use characters a-z, 0-9 and _",
+				}
+			}
+			pass, err := randomPassword32()
+			if err != nil {
+				return err
+			}
+			d.Services[ds.Name] = instance.ServiceDecision{
+				Mode:    "local",
+				Version: ds.Version,
+				Creds: kinds.Credentials{
+					User:     user,
+					DB:       user,
+					Password: pass,
+				},
+			}
+		} else {
+			extMap := make(map[string]string)
+			k := cat[ds.Kind]
+			for _, field := range k.External {
+				fieldLower := strings.ToLower(field)
+				isSec := strings.Contains(fieldLower, "password") ||
+					strings.Contains(fieldLower, "secret") ||
+					strings.Contains(fieldLower, "key") ||
+					strings.Contains(fieldLower, "token") ||
+					strings.Contains(fieldLower, "url")
+				val := ""
+				if e.Prompt != nil {
+					ans, err := e.Prompt.Ask(hostcfg.Question{
+						Key:    "data_" + ds.Name + "_ext_" + field,
+						Prompt: fmt.Sprintf("%s external %s", ds.Name, field),
+						Secret: isSec,
+					}, "")
+					if err != nil {
+						return err
+					}
+					val = ans
+				}
+				extMap[field] = val
+			}
+			d.Services[ds.Name] = instance.ServiceDecision{
+				Mode:     "external",
+				External: extMap,
+			}
+		}
+	}
+	return nil
+}
+
+func promptDomains(ctx context.Context, e *Env, p *contract.Project, d *instance.Decisions) error {
+	for _, a := range p.Apps {
+		if a.ExposePort > 0 && d.Domains[a.Name] == "" {
+			domain := ""
+			if e.Prompt != nil {
+				ans, err := e.Prompt.Ask(hostcfg.Question{
+					Key:    "domain_" + a.Name,
+					Prompt: fmt.Sprintf("Domain for %s", a.Name),
+				}, "")
+				if err != nil {
+					return err
+				}
+				domain = ans
+			}
+			d.Domains[a.Name] = domain
+		}
+	}
+	return nil
+}
+
+func promptEnvSpec(ctx context.Context, e *Env, spec *envspec.Spec, appEnvValues map[string]string) error {
+	if spec == nil {
+		return nil
+	}
+	names := make([]string, 0, len(spec.Vars))
+	for n := range spec.Vars {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		v := spec.Vars[name]
+		if v.Source == "prompt" {
+			if _, ok := appEnvValues[name]; ok {
+				continue
+			}
+			def := ""
+			if v.Default != nil {
+				def = *v.Default
+			}
+			if e.Prompt != nil {
+				ans, err := e.Prompt.Ask(hostcfg.Question{
+					Key:    "env_" + name,
+					Prompt: fmt.Sprintf("Value for %s", name),
+					Secret: v.Secret,
+				}, def)
+				if err != nil {
+					return err
+				}
+				appEnvValues[name] = ans
+			} else if def != "" {
+				appEnvValues[name] = def
+			}
+		}
+	}
+	return nil
+}
+
+func runDeploy(ctx context.Context, e *Env, repo RepoLike, d *instance.Decisions, p *contract.Project, actor string) (deploy.Result, error) {
+	if e.Deployer == nil {
+		return deploy.Result{Status: state.StatusOK}, nil
+	}
+	if e.Deployer.Repo == nil {
+		e.Deployer.Repo = repo
+	}
+	var allowed []string
+	if e.Host != nil && e.Host.Registries != "" {
+		for _, r := range strings.Split(e.Host.Registries, ",") {
+			if s := strings.TrimSpace(r); s != "" {
+				allowed = append(allowed, s)
+			}
+		}
+	}
+	src := deploy.SourceFor(d, deploy.Deps{
+		Repo:     repo,
+		Resolver: e.Resolver,
+		Allowed:  allowed,
+	})
+	desired, err := src.Desired(ctx, d, p)
+	if err != nil {
+		return deploy.Result{}, err
+	}
+	return e.Deployer.Deploy(ctx, d.Instance, desired, deploy.Options{Actor: actor})
 }
 
 func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResult, error) {
@@ -189,7 +515,25 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	if envName == "" {
 		envName = "dev"
 	}
+	if envName != "dev" && envName != "prod" {
+		return nil, &output.UsageError{
+			Err: &output.Error{
+				Code:    "E_PROJECT_ENV_INVALID",
+				Message: fmt.Sprintf("invalid environment %q: must be dev or prod", opts.Env),
+				Hint:    "use --env dev or --env prod",
+			},
+		}
+	}
+
+	if err := validateRepoURL(repoURL); err != nil {
+		return nil, err
+	}
+
 	inst := DeriveInstanceName(repoURL, opts.Project, envName)
+	if err := validateInstance(e.deployRoot(), e.stateRoot(), inst, envName); err != nil {
+		return nil, err
+	}
+
 	instDir := filepath.Join(e.deployRoot(), inst)
 
 	if _, err := e.fs().Stat(instDir); err == nil {
@@ -201,13 +545,6 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	}
 
 	isFileRepo := strings.HasPrefix(repoURL, "file://")
-	if isFileRepo && os.Getenv("CVCTL_ALLOW_FILE_REPOS") != "1" {
-		return nil, &output.Error{
-			Code:    "E_PROJECT_FILE_REPO",
-			Message: fmt.Sprintf("file:// repo %q is not allowed without CVCTL_ALLOW_FILE_REPOS=1", repoURL),
-			Hint:    "export CVCTL_ALLOW_FILE_REPOS=1 or use a git/ssh URL",
-		}
-	}
 
 	keyPath := ""
 	pubKey := ""
@@ -312,35 +649,10 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		return nil, err
 	}
 
-	p, err := contract.Load(infraDir, cat)
+	p, spec, err := loadContractAndSpec(e.fs(), infraDir, cat)
 	if err != nil {
 		cleanupInst()
 		return nil, err
-	}
-
-	specPath := filepath.Join(infraDir, "env.spec.yml")
-	var spec *envspec.Spec
-	var extra []output.Issue
-	if _, statErr := e.fs().Stat(specPath); statErr != nil {
-		extra = append(extra, output.Issue{
-			Code:    "E_CONTRACT_NO_ENVSPEC",
-			Message: "env.spec.yml not found",
-			Hint:    "create env.spec.yml next to compose.yml declaring every variable the compose file references",
-		})
-	} else if spec, err = envspec.Load(specPath); err != nil {
-		var oe *output.Error
-		if !errors.As(err, &oe) {
-			cleanupInst()
-			return nil, err
-		}
-		extra = append(extra, output.Issue{Code: oe.Code, Message: oe.Message, Hint: oe.Hint})
-	}
-
-	issues := append(contract.Validate(p, cat, spec), extra...)
-	output.SortIssues(issues)
-	if len(issues) > 0 {
-		cleanupInst()
-		return nil, &output.IssuesError{Issues: issues}
 	}
 
 	trackTag := opts.TrackTag
@@ -360,97 +672,14 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		Digests:     make(map[string]string),
 	}
 
-	for _, ds := range p.Data {
-		mode := "local"
-		if ds.ExternalAllowed && e.Prompt != nil {
-			ans, err := e.Prompt.Ask(hostcfg.Question{
-				Key:     "data_" + ds.Name + "_mode",
-				Prompt:  fmt.Sprintf("Mode for data service %s (local|external)", ds.Name),
-				Options: []string{"local", "external"},
-			}, "local")
-			if err != nil {
-				cleanupInst()
-				return nil, err
-			}
-			if ans != "" {
-				mode = ans
-			}
-		}
-
-		if mode == "local" {
-			user := strings.ToLower(contract.Normalize(ds.Name))
-			user = strings.ReplaceAll(user, "-", "_")
-			user = strings.ReplaceAll(user, ".", "_")
-			if !identRe.MatchString(user) {
-				cleanupInst()
-				return nil, &output.Error{
-					Code:    "E_DECISION_INVALID",
-					Message: fmt.Sprintf("service %s normalizes to invalid identifier %q", ds.Name, user),
-					Hint:    "use characters a-z, 0-9 and _",
-				}
-			}
-			pass, err := randomPassword32()
-			if err != nil {
-				cleanupInst()
-				return nil, err
-			}
-			d.Services[ds.Name] = instance.ServiceDecision{
-				Mode:    "local",
-				Version: ds.Version,
-				Creds: kinds.Credentials{
-					User:     user,
-					DB:       user,
-					Password: pass,
-				},
-			}
-		} else {
-			extMap := make(map[string]string)
-			k := cat[ds.Kind]
-			for _, field := range k.External {
-				fieldLower := strings.ToLower(field)
-				isSec := strings.Contains(fieldLower, "password") ||
-					strings.Contains(fieldLower, "secret") ||
-					strings.Contains(fieldLower, "key") ||
-					strings.Contains(fieldLower, "token") ||
-					strings.Contains(fieldLower, "url")
-				val := ""
-				if e.Prompt != nil {
-					ans, err := e.Prompt.Ask(hostcfg.Question{
-						Key:    "data_" + ds.Name + "_ext_" + field,
-						Prompt: fmt.Sprintf("%s external %s", ds.Name, field),
-						Secret: isSec,
-					}, "")
-					if err != nil {
-						cleanupInst()
-						return nil, err
-					}
-					val = ans
-				}
-				extMap[field] = val
-			}
-			d.Services[ds.Name] = instance.ServiceDecision{
-				Mode:     "external",
-				External: extMap,
-			}
-		}
+	if err := promptDataServices(ctx, e, cat, p, d); err != nil {
+		cleanupInst()
+		return nil, err
 	}
 
-	for _, a := range p.Apps {
-		if a.ExposePort > 0 {
-			domain := ""
-			if e.Prompt != nil {
-				ans, err := e.Prompt.Ask(hostcfg.Question{
-					Key:    "domain_" + a.Name,
-					Prompt: fmt.Sprintf("Domain for %s", a.Name),
-				}, "")
-				if err != nil {
-					cleanupInst()
-					return nil, err
-				}
-				domain = ans
-			}
-			d.Domains[a.Name] = domain
-		}
+	if err := promptDomains(ctx, e, p, d); err != nil {
+		cleanupInst()
+		return nil, err
 	}
 
 	appEnvValues := make(map[string]string)
@@ -458,39 +687,9 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		appEnvValues[k] = v
 	}
 
-	if spec != nil {
-		names := make([]string, 0, len(spec.Vars))
-		for n := range spec.Vars {
-			names = append(names, n)
-		}
-		sort.Strings(names)
-
-		for _, name := range names {
-			v := spec.Vars[name]
-			if v.Source == "prompt" {
-				if _, ok := appEnvValues[name]; ok {
-					continue
-				}
-				def := ""
-				if v.Default != nil {
-					def = *v.Default
-				}
-				if e.Prompt != nil {
-					ans, err := e.Prompt.Ask(hostcfg.Question{
-						Key:    "env_" + name,
-						Prompt: fmt.Sprintf("Value for %s", name),
-						Secret: v.Secret,
-					}, def)
-					if err != nil {
-						cleanupInst()
-						return nil, err
-					}
-					appEnvValues[name] = ans
-				} else if def != "" {
-					appEnvValues[name] = def
-				}
-			}
-		}
+	if err := promptEnvSpec(ctx, e, spec, appEnvValues); err != nil {
+		cleanupInst()
+		return nil, err
 	}
 
 	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
@@ -505,34 +704,9 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		return nil, err
 	}
 
-	var deployRes deploy.Result
-	if e.Deployer != nil {
-		if e.Deployer.Repo == nil {
-			e.Deployer.Repo = repo
-		}
-		var allowed []string
-		if e.Host != nil && e.Host.Registries != "" {
-			for _, r := range strings.Split(e.Host.Registries, ",") {
-				if s := strings.TrimSpace(r); s != "" {
-					allowed = append(allowed, s)
-				}
-			}
-		}
-		src := deploy.SourceFor(d, deploy.Deps{
-			Repo:     repo,
-			Resolver: e.Resolver,
-			Allowed:  allowed,
-		})
-		desired, err := src.Desired(ctx, d, p)
-		if err != nil {
-			return nil, err
-		}
-		deployRes, err = e.Deployer.Deploy(ctx, d.Instance, desired, deploy.Options{Actor: "cli:project-add"})
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		deployRes = deploy.Result{Status: state.StatusOK}
+	deployRes, err := runDeploy(ctx, e, repo, d, p, "cli:project-add")
+	if err != nil {
+		return nil, err
 	}
 
 	return &AddResult{
@@ -544,6 +718,23 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 }
 
 func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
+	envName := ""
+	if strings.HasSuffix(inst, "-dev") {
+		envName = "dev"
+	} else if strings.HasSuffix(inst, "-prod") {
+		envName = "prod"
+	}
+	if envName == "" {
+		return nil, &output.Error{
+			Code:    "E_PROJECT_NAME_INVALID",
+			Message: fmt.Sprintf("invalid instance name %q: must end with -dev or -prod", inst),
+			Hint:    "use --name with letters, digits and '-'",
+		}
+	}
+	if err := validateInstance(e.deployRoot(), e.stateRoot(), inst, envName); err != nil {
+		return nil, err
+	}
+
 	instDir := filepath.Join(e.deployRoot(), inst)
 	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
 
@@ -572,32 +763,9 @@ func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
 		return nil, err
 	}
 
-	p, err := contract.Load(infraDir, cat)
+	p, spec, err := loadContractAndSpec(e.fs(), infraDir, cat)
 	if err != nil {
 		return nil, err
-	}
-
-	specPath := filepath.Join(infraDir, "env.spec.yml")
-	var spec *envspec.Spec
-	var extra []output.Issue
-	if _, statErr := e.fs().Stat(specPath); statErr != nil {
-		extra = append(extra, output.Issue{
-			Code:    "E_CONTRACT_NO_ENVSPEC",
-			Message: "env.spec.yml not found",
-			Hint:    "create env.spec.yml next to compose.yml declaring every variable the compose file references",
-		})
-	} else if spec, err = envspec.Load(specPath); err != nil {
-		var oe *output.Error
-		if !errors.As(err, &oe) {
-			return nil, err
-		}
-		extra = append(extra, output.Issue{Code: oe.Code, Message: oe.Message, Hint: oe.Hint})
-	}
-
-	issues := append(contract.Validate(p, cat, spec), extra...)
-	output.SortIssues(issues)
-	if len(issues) > 0 {
-		return nil, &output.IssuesError{Issues: issues}
 	}
 
 	d, err := instance.Read(cvctlEnvPath, p)
@@ -608,134 +776,33 @@ func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
 	appEnvPath := filepath.Join(instDir, "app.env")
 	appEnvValues := make(map[string]string)
 	if data, err := e.fs().ReadFile(appEnvPath); err == nil {
-		if parsed, pErr := godotenv.Unmarshal(string(data)); pErr == nil {
-			appEnvValues = parsed
+		parsed, pErr := godotenv.Unmarshal(string(data))
+		if pErr != nil {
+			return nil, &output.Error{
+				Code:    "E_APPENV_READ",
+				Message: fmt.Sprintf("parsing app.env: %v", pErr),
+				Hint:    "fix syntax in app.env or remove the file",
+			}
+		}
+		appEnvValues = parsed
+	} else if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, os.ErrNotExist) {
+		return nil, &output.Error{
+			Code:    "E_APPENV_READ",
+			Message: fmt.Sprintf("reading app.env: %v", err),
+			Hint:    "fix permissions on app.env",
 		}
 	}
 
-	for _, ds := range p.Data {
-		sd, ok := d.Services[ds.Name]
-		if !ok || sd.Mode == "" {
-			mode := "local"
-			if ds.ExternalAllowed && e.Prompt != nil {
-				ans, err := e.Prompt.Ask(hostcfg.Question{
-					Key:     "data_" + ds.Name + "_mode",
-					Prompt:  fmt.Sprintf("Mode for data service %s (local|external)", ds.Name),
-					Options: []string{"local", "external"},
-				}, "local")
-				if err != nil {
-					return nil, err
-				}
-				if ans != "" {
-					mode = ans
-				}
-			}
-
-			if mode == "local" {
-				user := strings.ToLower(contract.Normalize(ds.Name))
-				user = strings.ReplaceAll(user, "-", "_")
-				user = strings.ReplaceAll(user, ".", "_")
-				if !identRe.MatchString(user) {
-					return nil, &output.Error{
-						Code:    "E_DECISION_INVALID",
-						Message: fmt.Sprintf("service %s normalizes to invalid identifier %q", ds.Name, user),
-						Hint:    "use characters a-z, 0-9 and _",
-					}
-				}
-				pass, err := randomPassword32()
-				if err != nil {
-					return nil, err
-				}
-				d.Services[ds.Name] = instance.ServiceDecision{
-					Mode:    "local",
-					Version: ds.Version,
-					Creds: kinds.Credentials{
-						User:     user,
-						DB:       user,
-						Password: pass,
-					},
-				}
-			} else {
-				extMap := make(map[string]string)
-				k := cat[ds.Kind]
-				for _, field := range k.External {
-					fieldLower := strings.ToLower(field)
-					isSec := strings.Contains(fieldLower, "password") ||
-						strings.Contains(fieldLower, "secret") ||
-						strings.Contains(fieldLower, "key") ||
-						strings.Contains(fieldLower, "token") ||
-						strings.Contains(fieldLower, "url")
-					val := ""
-					if e.Prompt != nil {
-						ans, err := e.Prompt.Ask(hostcfg.Question{
-							Key:    "data_" + ds.Name + "_ext_" + field,
-							Prompt: fmt.Sprintf("%s external %s", ds.Name, field),
-							Secret: isSec,
-						}, "")
-						if err != nil {
-							return nil, err
-						}
-						val = ans
-					}
-					extMap[field] = val
-				}
-				d.Services[ds.Name] = instance.ServiceDecision{
-					Mode:     "external",
-					External: extMap,
-				}
-			}
-		}
+	if err := promptDataServices(ctx, e, cat, p, d); err != nil {
+		return nil, err
 	}
 
-	for _, a := range p.Apps {
-		if a.ExposePort > 0 && d.Domains[a.Name] == "" {
-			domain := ""
-			if e.Prompt != nil {
-				ans, err := e.Prompt.Ask(hostcfg.Question{
-					Key:    "domain_" + a.Name,
-					Prompt: fmt.Sprintf("Domain for %s", a.Name),
-				}, "")
-				if err != nil {
-					return nil, err
-				}
-				domain = ans
-			}
-			d.Domains[a.Name] = domain
-		}
+	if err := promptDomains(ctx, e, p, d); err != nil {
+		return nil, err
 	}
 
-	if spec != nil {
-		names := make([]string, 0, len(spec.Vars))
-		for n := range spec.Vars {
-			names = append(names, n)
-		}
-		sort.Strings(names)
-
-		for _, name := range names {
-			v := spec.Vars[name]
-			if v.Source == "prompt" {
-				if _, ok := appEnvValues[name]; ok {
-					continue
-				}
-				def := ""
-				if v.Default != nil {
-					def = *v.Default
-				}
-				if e.Prompt != nil {
-					ans, err := e.Prompt.Ask(hostcfg.Question{
-						Key:    "env_" + name,
-						Prompt: fmt.Sprintf("Value for %s", name),
-						Secret: v.Secret,
-					}, def)
-					if err != nil {
-						return nil, err
-					}
-					appEnvValues[name] = ans
-				} else if def != "" {
-					appEnvValues[name] = def
-				}
-			}
-		}
+	if err := promptEnvSpec(ctx, e, spec, appEnvValues); err != nil {
+		return nil, err
 	}
 
 	if err := e.fs().WriteFile(cvctlEnvPath, instance.FormatEnv(d.Entries()), 0o640, deployOwner); err != nil {
@@ -745,34 +812,9 @@ func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
 		return nil, err
 	}
 
-	var deployRes deploy.Result
-	if e.Deployer != nil {
-		if e.Deployer.Repo == nil {
-			e.Deployer.Repo = repo
-		}
-		var allowed []string
-		if e.Host != nil && e.Host.Registries != "" {
-			for _, r := range strings.Split(e.Host.Registries, ",") {
-				if s := strings.TrimSpace(r); s != "" {
-					allowed = append(allowed, s)
-				}
-			}
-		}
-		src := deploy.SourceFor(d, deploy.Deps{
-			Repo:     repo,
-			Resolver: e.Resolver,
-			Allowed:  allowed,
-		})
-		desired, err := src.Desired(ctx, d, p)
-		if err != nil {
-			return nil, err
-		}
-		deployRes, err = e.Deployer.Deploy(ctx, d.Instance, desired, deploy.Options{Actor: "cli:project-update"})
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		deployRes = deploy.Result{Status: state.StatusOK}
+	deployRes, err := runDeploy(ctx, e, repo, d, p, "cli:project-update")
+	if err != nil {
+		return nil, err
 	}
 
 	return &AddResult{

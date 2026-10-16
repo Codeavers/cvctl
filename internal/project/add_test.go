@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/codeavers/cvctl/internal/contract"
+	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/hostcfg/hostcfgtest"
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/sys"
@@ -158,6 +159,24 @@ func TestAddDerivesInstanceName(t *testing.T) {
 			url:      "git@github.com:myorg/UPPER-infra.git",
 			env:      "dev",
 			expected: "upper-dev",
+		},
+		{
+			url:      "git@github.com:myorg/repo.git",
+			project:  "Foo.Bar",
+			env:      "dev",
+			expected: "foo-bar-dev",
+		},
+		{
+			url:      "git@github.com:myorg/repo.git",
+			project:  "a_b",
+			env:      "dev",
+			expected: "a-b-dev",
+		},
+		{
+			url:      "git@github.com:myorg/repo.git",
+			project:  "a/../../x",
+			env:      "dev",
+			expected: "a-x-dev",
 		},
 	}
 
@@ -615,8 +634,8 @@ func TestAddFileRepoAllowed(t *testing.T) {
 		t.Fatal("expected error for file repo without env var, got nil")
 	}
 	var oe *output.Error
-	if !errors.As(err, &oe) || oe.Code != "E_PROJECT_FILE_REPO" {
-		t.Errorf("expected E_PROJECT_FILE_REPO, got %v", err)
+	if !errors.As(err, &oe) || oe.Code != "E_PROJECT_REPO_URL" {
+		t.Errorf("expected E_PROJECT_REPO_URL, got %v", err)
 	}
 
 	// With CVCTL_ALLOW_FILE_REPOS=1, file:// succeeds and generates no deploy key
@@ -733,4 +752,385 @@ vars:
 		t.Errorf("expected pre-seeded var in app.env, got:\n%s", string(appEnvData))
 	}
 	_ = res
+}
+
+func TestAddPathTraversalAndValidation(t *testing.T) {
+	fsys := systest.NewFS()
+	runner := &systest.Runner{}
+	e := &Env{
+		FS:         fsys,
+		Run:        runner,
+		DeployRoot: "/srv/deploy",
+		StateRoot:  "/var/lib/cvctl",
+	}
+
+	// 1. --name ".."
+	_, err := Add(context.Background(), e, "git@github.com:myorg/repo.git", AddOptions{Project: "..", Env: "dev"})
+	if err == nil {
+		t.Fatal("expected error for --name '..', got nil")
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_PROJECT_NAME_INVALID" {
+		t.Fatalf("expected E_PROJECT_NAME_INVALID, got %v", err)
+	}
+	if !strings.Contains(oe.Hint, "use --name with letters, digits and '-'") {
+		t.Errorf("expected hint to contain 'use --name with letters, digits and -', got %q", oe.Hint)
+	}
+
+	// 2. 70-char name
+	longName := strings.Repeat("a", 70)
+	_, err = Add(context.Background(), e, "git@github.com:myorg/repo.git", AddOptions{Project: longName, Env: "dev"})
+	if err == nil {
+		t.Fatal("expected error for 70-char name, got nil")
+	}
+	if !errors.As(err, &oe) || oe.Code != "E_PROJECT_NAME_INVALID" {
+		t.Fatalf("expected E_PROJECT_NAME_INVALID for 70-char name, got %v", err)
+	}
+
+	// 3. --env "../foo"
+	_, err = Add(context.Background(), e, "git@github.com:myorg/repo.git", AddOptions{Project: "my-app", Env: "../foo"})
+	if err == nil {
+		t.Fatal("expected error for --env '../foo', got nil")
+	}
+	if !errors.As(err, &oe) || oe.Code != "E_PROJECT_ENV_INVALID" {
+		t.Fatalf("expected E_PROJECT_ENV_INVALID for invalid env, got %v", err)
+	}
+
+	// Assert fake FS has no files created (none of the error cases touched FS)
+	if len(fsys.Files()) != 0 {
+		t.Fatalf("expected fake FS to have no files, got %d files: %+v", len(fsys.Files()), fsys.Files())
+	}
+}
+
+func TestUpdatePathTraversalAndValidation(t *testing.T) {
+	fsys := systest.NewFS()
+	runner := &systest.Runner{}
+	e := &Env{
+		FS:         fsys,
+		Run:        runner,
+		DeployRoot: "/srv/deploy",
+		StateRoot:  "/var/lib/cvctl",
+	}
+
+	_, err := Update(context.Background(), e, "../x")
+	if err == nil {
+		t.Fatal("expected error for Update('../x'), got nil")
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_PROJECT_NAME_INVALID" {
+		t.Fatalf("expected E_PROJECT_NAME_INVALID, got %v", err)
+	}
+
+	// Assert fake FS has no files created
+	if len(fsys.Files()) != 0 {
+		t.Fatalf("expected fake FS to have no files, got %d files: %+v", len(fsys.Files()), fsys.Files())
+	}
+}
+
+func TestRemoveAllNeverFollowsSymlinks(t *testing.T) {
+	outsideDir := t.TempDir()
+	targetFile := filepath.Join(outsideDir, "target.txt")
+	if err := os.WriteFile(targetFile, []byte("preserve me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanDir := t.TempDir()
+	treeDir := filepath.Join(cleanDir, "tree")
+	if err := os.MkdirAll(treeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(treeDir, "link_to_outside")
+	if err := os.Symlink(outsideDir, symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	fsys := sys.NewOSFS()
+	if err := removeAll(fsys, treeDir); err != nil {
+		t.Fatalf("removeAll failed: %v", err)
+	}
+
+	if _, err := os.Stat(targetFile); err != nil {
+		t.Errorf("expected target file outside tree to still exist, but got: %v", err)
+	}
+	if _, err := os.Stat(outsideDir); err != nil {
+		t.Errorf("expected target dir outside tree to still exist, but got: %v", err)
+	}
+}
+
+func TestRepoURLAllowlist(t *testing.T) {
+	fsys := systest.NewFS()
+	runner := &systest.Runner{}
+	e := &Env{
+		FS:         fsys,
+		Run:        runner,
+		DeployRoot: "/srv/deploy",
+		StateRoot:  "/var/lib/cvctl",
+	}
+
+	t.Setenv("CVCTL_ALLOW_FILE_REPOS", "")
+
+	invalidURLs := []string{
+		"-u/path/to/repo",
+		"--upload-pack=evil",
+		"ext::sh -c evil",
+		"/tmp/local/repo",
+		"./relative/repo",
+		"relative/repo",
+		"http://github.com/myorg/repo.git",
+		"file:///tmp/repo-infra",
+	}
+
+	for _, url := range invalidURLs {
+		_, err := Add(context.Background(), e, url, AddOptions{})
+		if err == nil {
+			t.Errorf("expected error for URL %q, got nil", url)
+			continue
+		}
+		var oe *output.Error
+		if !errors.As(err, &oe) || oe.Code != "E_PROJECT_REPO_URL" {
+			t.Errorf("expected E_PROJECT_REPO_URL for %q, got %v", url, err)
+		}
+		if oe != nil {
+			if !strings.Contains(oe.Hint, "ssh://") || !strings.Contains(oe.Hint, "git@") || !strings.Contains(oe.Hint, "https://") {
+				t.Errorf("expected hint to list accepted forms for %q, got %q", url, oe.Hint)
+			}
+		}
+	}
+
+	if len(fsys.Files()) != 0 {
+		t.Fatalf("expected fake FS to have no files, got %d files", len(fsys.Files()))
+	}
+}
+
+func TestDataModeValidation(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra")
+	compose := `
+services:
+  web:
+    image: ghcr.io/codeavers/web:develop
+    labels:
+      cvctl.role: app
+      cvctl.expose: "3000"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+  main-db:
+    image: postgres:16
+    labels:
+      cvctl.kind: postgres
+      cvctl.version: "16"
+      cvctl.env: MAIN_DB
+      cvctl.external: allowed
+x-cvctl:
+  health:
+    service: web
+    http: /healthz
+`
+	spec := `
+vars:
+  MAIN_DB_URL:
+    source: service
+    service: main-db
+`
+	writeTestInfra(t, infraDir, compose, spec)
+	cat := testCatalog(t)
+	stub := &stubRepo{infraSource: infraDir}
+
+	// 1. Non-interactive with invalid answer -> E_PROJECT_ANSWER_INVALID
+	prompterInvalid := hostcfgtest.NewPrompter(t, map[string]string{
+		"data_main-db_mode": "other",
+	})
+	eNonInt := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "var-lib-cvctl"),
+		Interactive: false,
+		Catalog:     cat,
+		Prompt:      prompterInvalid,
+		RepoFactory: func(dir, _ string) RepoLike {
+			r := *stub
+			r.dir = dir
+			return &r
+		},
+	}
+	_, err := Add(context.Background(), eNonInt, "git@github.com:myorg/repo.git", AddOptions{})
+	if err == nil {
+		t.Fatal("expected error for invalid data mode in non-interactive, got nil")
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_PROJECT_ANSWER_INVALID" {
+		t.Fatalf("expected E_PROJECT_ANSWER_INVALID, got %v", err)
+	}
+
+	// 2. Interactive with whitespace and uppercase: "  LOCAL  " -> trimmed & lowercased to "local"
+	prompterTrim := hostcfgtest.NewPrompter(t, map[string]string{
+		"data_main-db_mode": "  LOCAL  ",
+		"domain_web":        "web.example.com",
+	})
+	eInt := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  filepath.Join(tmp, "deploy-trim"),
+		StateRoot:   filepath.Join(tmp, "var-lib-cvctl-trim"),
+		Interactive: true,
+		Catalog:     cat,
+		Prompt:      prompterTrim,
+		RepoFactory: func(dir, _ string) RepoLike {
+			r := *stub
+			r.dir = dir
+			return &r
+		},
+	}
+	res, err := Add(context.Background(), eInt, "git@github.com:myorg/repo.git", AddOptions{})
+	if err != nil {
+		t.Fatalf("Add failed with trimmed/lowercased answer: %v", err)
+	}
+	if res.Decisions.Services["main-db"].Mode != "local" {
+		t.Errorf("expected mode local, got %s", res.Decisions.Services["main-db"].Mode)
+	}
+
+	// 3. Interactive with invalid answer first, then valid answer on re-ask
+	seqPrompt := &sequencePrompter{
+		answers: map[string][]string{
+			"data_main-db_mode":    {"bad-input", "external"},
+			"data_main-db_ext_url": {"postgres://host:5432/db"},
+			"domain_web":           {"web.example.com"},
+		},
+		idx: make(map[string]int),
+	}
+	eReask := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  filepath.Join(tmp, "deploy-reask"),
+		StateRoot:   filepath.Join(tmp, "var-lib-cvctl-reask"),
+		Interactive: true,
+		Catalog:     cat,
+		Prompt:      seqPrompt,
+		RepoFactory: func(dir, _ string) RepoLike {
+			r := *stub
+			r.dir = dir
+			return &r
+		},
+	}
+	resReask, err := Add(context.Background(), eReask, "git@github.com:myorg/repo.git", AddOptions{})
+	if err != nil {
+		t.Fatalf("Add failed on re-ask: %v", err)
+	}
+	if resReask.Decisions.Services["main-db"].Mode != "external" {
+		t.Errorf("expected mode external, got %s", resReask.Decisions.Services["main-db"].Mode)
+	}
+	if seqPrompt.idx["data_main-db_mode"] != 2 {
+		t.Errorf("expected data_main-db_mode to be asked twice, got %d", seqPrompt.idx["data_main-db_mode"])
+	}
+}
+
+type sequencePrompter struct {
+	answers map[string][]string
+	idx     map[string]int
+}
+
+func (s *sequencePrompter) Ask(q hostcfg.Question, def string) (string, error) {
+	list := s.answers[q.Key]
+	i := s.idx[q.Key]
+	if i < len(list) {
+		s.idx[q.Key]++
+		return list[i], nil
+	}
+	return def, nil
+}
+
+func TestUpdateAppEnvMalformedAndMerge(t *testing.T) {
+	tmp := t.TempDir()
+	inst := "my-service-dev"
+	instDir := filepath.Join(tmp, inst)
+	infraDir := filepath.Join(instDir, "infra")
+
+	cat := testCatalog(t)
+	stub := &stubRepo{}
+
+	existingCvctlEnv := `CVCTL_INSTANCE=my-service-dev
+CVCTL_ENV=dev
+CVCTL_INFRA_BRANCH=develop
+CVCTL_TRACK_TAG=develop
+CVCTL_INFRA_PATH=.
+CVCTL_STRATEGY=recreate
+CVCTL_DOMAIN_WEB=web.example.com
+`
+	// 1. Malformed app.env -> E_APPENV_READ, file unchanged
+	malformedAppEnv := "EXPORT_FOO=\"unterminated_quote"
+	writeTestInfra(t, infraDir, validCompose, validSpec)
+	if err := os.WriteFile(filepath.Join(instDir, "cvctl.env"), []byte(existingCvctlEnv), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	appEnvPath := filepath.Join(instDir, "app.env")
+	if err := os.WriteFile(appEnvPath, []byte(malformedAppEnv), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	e := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "var-lib-cvctl"),
+		Interactive: false,
+		Catalog:     cat,
+		RepoFactory: func(_, _ string) RepoLike { return stub },
+	}
+
+	_, err := Update(context.Background(), e, inst)
+	if err == nil {
+		t.Fatal("expected error for malformed app.env, got nil")
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_APPENV_READ" {
+		t.Fatalf("expected E_APPENV_READ, got %v", err)
+	}
+
+	// Verify file is unchanged
+	afterData, rErr := os.ReadFile(appEnvPath)
+	if rErr != nil {
+		t.Fatal(rErr)
+	}
+	if string(afterData) != malformedAppEnv {
+		t.Errorf("expected malformed app.env to remain unchanged, got %q", string(afterData))
+	}
+
+	// 2. Valid app.env with existing keys: merge without dropping existing keys
+	validExistingAppEnv := "PRESERVED_KEY=preserved_value\n"
+	if err := os.WriteFile(appEnvPath, []byte(validExistingAppEnv), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	specWithNewVar := `
+vars:
+  DB_URL:
+    source: service
+    service: db
+  PRESERVED_KEY:
+    source: prompt
+  NEW_PROMPT_VAR:
+    source: prompt
+`
+	writeTestInfra(t, infraDir, validCompose, specWithNewVar)
+	prompter := hostcfgtest.NewPrompter(t, map[string]string{
+		"env_NEW_PROMPT_VAR": "added_value",
+	})
+	e.Prompt = prompter
+	e.Interactive = true
+
+	_, err = Update(context.Background(), e, inst)
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	mergedData, err := os.ReadFile(appEnvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergedContent := string(mergedData)
+	if !strings.Contains(mergedContent, "PRESERVED_KEY=preserved_value") {
+		t.Errorf("expected PRESERVED_KEY preserved, got:\n%s", mergedContent)
+	}
+	if !strings.Contains(mergedContent, "NEW_PROMPT_VAR=added_value") {
+		t.Errorf("expected NEW_PROMPT_VAR added, got:\n%s", mergedContent)
+	}
 }
