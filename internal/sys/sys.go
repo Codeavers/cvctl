@@ -42,6 +42,7 @@ type FileInfo struct {
 	Mode        os.FileMode
 	User, Group string
 	IsDir       bool
+	IsSymlink   bool
 }
 
 type FS interface {
@@ -52,6 +53,7 @@ type FS interface {
 	// MkdirAll also fixes mode/owner of the last dir if it already exists.
 	MkdirAll(path string, mode os.FileMode, o Owner) error
 	Stat(path string) (FileInfo, error)
+	Lstat(path string) (FileInfo, error)
 	// Remove treats a missing path as success.
 	Remove(path string) error
 	ReadDir(path string) ([]os.DirEntry, error)

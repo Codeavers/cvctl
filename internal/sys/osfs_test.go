@@ -101,3 +101,32 @@ func TestExecRunnerStdoutStdinAndStartFailure(t *testing.T) {
 		t.Fatal("expected start error")
 	}
 }
+
+func TestOSFSLstat(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	link := filepath.Join(dir, "link")
+	f := NewOSFS()
+	if err := f.WriteFile(target, []byte("data"), 0o644, Owner{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	fiStat, err := f.Stat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fiStat.IsSymlink {
+		t.Errorf("Stat should follow symlink, got IsSymlink=true")
+	}
+
+	fiLstat, err := f.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fiLstat.IsSymlink {
+		t.Errorf("Lstat should report IsSymlink=true")
+	}
+}

@@ -49,6 +49,27 @@ func (osFS) Stat(path string) (FileInfo, error) {
 	return fi, nil
 }
 
+func (osFS) Lstat(path string) (FileInfo, error) {
+	var st syscall.Stat_t
+	if err := syscall.Lstat(path, &st); err != nil {
+		return FileInfo{}, &fs.PathError{Op: "lstat", Path: path, Err: err}
+	}
+	fi := FileInfo{
+		Mode:      os.FileMode(st.Mode & 0o7777),
+		IsDir:     st.Mode&syscall.S_IFMT == syscall.S_IFDIR,
+		IsSymlink: st.Mode&syscall.S_IFMT == syscall.S_IFLNK,
+		User:      strconv.Itoa(int(st.Uid)),
+		Group:     strconv.Itoa(int(st.Gid)),
+	}
+	if u, err := user.LookupId(fi.User); err == nil {
+		fi.User = u.Username
+	}
+	if g, err := user.LookupGroupId(fi.Group); err == nil {
+		fi.Group = g.Name
+	}
+	return fi, nil
+}
+
 func (osFS) WriteFile(path string, data []byte, mode os.FileMode, o Owner) (err error) {
 	uid, gid, err := resolveOwner(o)
 	if err != nil {

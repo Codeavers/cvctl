@@ -148,6 +148,16 @@ func (f *FS) Stat(p string) (sys.FileInfo, error) {
 	return e.info, nil
 }
 
+func (f *FS) Lstat(p string) (sys.FileInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.m[path.Clean(p)]
+	if !ok {
+		return sys.FileInfo{}, &fs.PathError{Op: "lstat", Path: p, Err: fs.ErrNotExist}
+	}
+	return e.info, nil
+}
+
 func (f *FS) Remove(p string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
