@@ -71,6 +71,7 @@ func DefaultSteps() []Step {
 		Fail2banStep{},
 		FirewallStep{},
 		UnattendedStep{},
+		TraefikStep{},
 	}
 }
 

@@ -1,0 +1,20 @@
+http:
+  middlewares:
+    cvctl-default:
+      chain:
+        middlewares:
+          - headers
+          - rateLimit
+          - inFlightReq
+    headers:
+      headers:
+        contentTypeNosniff: true
+        frameDeny: true
+        referrerPolicy: strict-origin-when-cross-origin
+    inFlightReq:
+      inFlightReq:
+        amount: 100
+    rateLimit:
+      rateLimit:
+        average: 50
+        burst: 100
