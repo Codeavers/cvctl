@@ -51,8 +51,9 @@ func stubInit(t *testing.T, fs *systest.FS, p hostcfg.Prompter, interactive bool
 	if _, err := fs.ReadFile("/etc/os-release"); err != nil {
 		_ = fs.WriteFile("/etc/os-release", []byte("ID=ubuntu\nVERSION_ID=\"24.04\"\n"), 0o644, sys.Owner{User: "root", Group: "root"})
 	}
-	oldEnv, oldSteps := newInitEnv, initSteps
-	t.Cleanup(func() { newInitEnv, initSteps = oldEnv, oldSteps })
+	oldEnv, oldSteps, oldLock := newInitEnv, initSteps, sys.Lock
+	t.Cleanup(func() { newInitEnv, initSteps, sys.Lock = oldEnv, oldSteps, oldLock })
+	sys.Lock = systest.NoopLock
 	newInitEnv = func(o initOpts) (*host.Env, hostcfg.Facts, error) {
 		return &host.Env{FS: fs, Prompt: p, Interactive: interactive && !o.NonInteractive, Adopt: o.Adopt, EUID: testEUID},
 			hostcfg.Facts{Hostname: "box", SudoUser: "andres", Adopt: o.Adopt}, nil
@@ -219,5 +220,30 @@ func TestConfirmSSHCommand(t *testing.T) {
 	}
 	if len(runner.Calls) == 0 || !strings.HasPrefix(runner.Calls[0].String(), "systemctl stop cvctl-ssh-revert.timer") {
 		t.Fatalf("expected systemctl stop cvctl-ssh-revert.timer call, got %v", runner.Calls)
+	}
+}
+
+func TestInitLockedFailsWithEInitLocked(t *testing.T) {
+	fs := seeded()
+	locker := systest.NewFakeLocker()
+	unlock, err := locker.Lock("/run/cvctl-init.lock")
+	if err != nil {
+		t.Fatalf("setup lock failed: %v", err)
+	}
+	defer unlock()
+
+	stubInit(t, fs, failPrompter{t}, false, stubStep{name: "a"})
+	// Re-assign sys.Lock to fake locker where /run/cvctl-init.lock is held
+	sys.Lock = locker.Lock
+
+	code, out, errOut := run(t, "init")
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d; out=%s err=%s", code, out, errOut)
+	}
+	if !strings.Contains(errOut, "E_INIT_LOCKED") {
+		t.Fatalf("expected errOut to contain E_INIT_LOCKED, got: %s", errOut)
+	}
+	if !strings.Contains(errOut, "another cvctl init is running") {
+		t.Fatalf("expected errOut to contain hint 'another cvctl init is running', got: %s", errOut)
 	}
 }

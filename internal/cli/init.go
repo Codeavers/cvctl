@@ -63,6 +63,16 @@ func newInitCmd() *cobra.Command {
   sudo cvctl init --dry-run --json`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			unlock, err := sys.Lock("/run/cvctl-init.lock")
+			if err != nil {
+				return &output.Error{
+					Code:    "E_INIT_LOCKED",
+					Message: "cannot acquire /run/cvctl-init.lock",
+					Hint:    "another cvctl init is running",
+				}
+			}
+			defer unlock()
+
 			adopt, _ := cmd.Flags().GetBool("adopt")
 			dry, _ := cmd.Flags().GetBool("dry-run")
 			nonInt, _ := cmd.Flags().GetBool("non-interactive")
