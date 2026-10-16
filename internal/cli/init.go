@@ -128,7 +128,36 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().Bool("adopt", false, "adopt an already-configured host (conservative defaults)")
 	cmd.Flags().Bool("dry-run", false, "show what would change without changing anything")
 	cmd.Flags().Bool("non-interactive", false, "never prompt; use host.env values and defaults")
+	cmd.AddCommand(newConfirmSSHCmd())
 	return cmd
+}
+
+func newConfirmSSHCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "confirm-ssh",
+		Short: "Confirm SSH hardening and cancel the auto-revert timer",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			e, _, err := newInitEnv(initOpts{
+				NonInteractive: true,
+				In:             cmd.InOrStdin(),
+				Out:            cmd.ErrOrStderr(),
+			})
+			if err != nil {
+				return err
+			}
+			if _, err := (host.PreflightStep{}).Check(cmd.Context(), e); err != nil {
+				return err
+			}
+			if err := host.ConfirmSSH(cmd.Context(), e); err != nil {
+				return err
+			}
+			printerFrom(cmd).Result(map[string]any{"confirmed": true}, func(w io.Writer) {
+				fmt.Fprintln(w, "ssh change confirmed")
+			})
+			return nil
+		},
+	}
 }
 
 func writeInitHuman(w io.Writer, rep initReport) {

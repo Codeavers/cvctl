@@ -62,7 +62,7 @@ type StepResult struct {
 
 // DefaultSteps is the final step order; later tasks append here.
 func DefaultSteps() []Step {
-	return []Step{PreflightStep{}, PackagesStep{}, DockerDaemonStep{}, AccountsStep{}}
+	return []Step{PreflightStep{}, PackagesStep{}, DockerDaemonStep{}, AccountsStep{}, SSHStep{}}
 }
 
 func stepErr(name string, err error) *output.Error {

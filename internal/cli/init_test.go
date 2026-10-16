@@ -195,3 +195,27 @@ func (pendPlanStep) Check(context.Context, *host.Env) (host.Plan, error) {
 	return host.Plan{Changes: []string{"c"}, Pending: "confirm ssh"}, nil
 }
 func (pendPlanStep) Apply(context.Context, *host.Env, host.Plan) (string, error) { return "", nil }
+
+func TestConfirmSSHCommand(t *testing.T) {
+	fs := systest.NewFS()
+	_ = fs.WriteFile("/etc/os-release", []byte("ID=ubuntu\nVERSION_ID=\"24.04\"\n"), 0o644, sys.Owner{User: "root", Group: "root"})
+	runner := &systest.Runner{}
+	runner.On("systemctl stop cvctl-ssh-revert.timer cvctl-ssh-revert.service", sys.Result{ExitCode: 0})
+
+	oldEnv := newInitEnv
+	t.Cleanup(func() { newInitEnv = oldEnv })
+	newInitEnv = func(o initOpts) (*host.Env, hostcfg.Facts, error) {
+		return &host.Env{Run: runner, FS: fs, EUID: testEUID}, hostcfg.Facts{}, nil
+	}
+
+	code, out, errs := run(t, "init", "confirm-ssh")
+	if code != 0 {
+		t.Fatalf("exit %d: out=%q err=%q", code, out, errs)
+	}
+	if !strings.Contains(out, "ssh change confirmed") {
+		t.Fatalf("expected 'ssh change confirmed' in stdout, got %q", out)
+	}
+	if len(runner.Calls) == 0 || !strings.HasPrefix(runner.Calls[0].String(), "systemctl stop cvctl-ssh-revert.timer") {
+		t.Fatalf("expected systemctl stop cvctl-ssh-revert.timer call, got %v", runner.Calls)
+	}
+}
