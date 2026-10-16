@@ -3,18 +3,21 @@ http:
     cvctl-default:
       chain:
         middlewares:
-          - headers
-          - rateLimit
-          - inFlightReq
-    headers:
+          - cvctl-headers
+          - cvctl-ratelimit
+          - cvctl-inflight
+    cvctl-headers:
       headers:
         contentTypeNosniff: true
         frameDeny: true
         referrerPolicy: strict-origin-when-cross-origin
-    inFlightReq:
+    cvctl-inflight:
       inFlightReq:
         amount: 100
-    rateLimit:
+    cvctl-ratelimit:
       rateLimit:
         average: 50
         burst: 100
+        sourceCriterion:
+          ipStrategy:
+            depth: 1

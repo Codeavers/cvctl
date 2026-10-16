@@ -28,7 +28,7 @@ const (
 	traefikDynamicPath = "/etc/traefik/dynamic/_cvctl.yml"
 	traefikSecretsPath = "/etc/cvctl/secrets/traefik.env"
 	traefikProject     = "cvctl-traefik"
-	traefikContainer   = "cvctl-traefik-traefik-1"
+	traefikContainer   = "cvctl-traefik"
 
 	defaultTraefikPollInterval = 2 * time.Second
 	defaultTraefikPollTimeout  = 60 * time.Second

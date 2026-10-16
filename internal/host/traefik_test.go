@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -184,7 +185,7 @@ func TestTraefikSecretsNotInCompose(t *testing.T) {
 	r.On("docker network inspect cvctl-edge", sys.Result{Stdout: []byte("[{}]\n"), ExitCode: 0})
 	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml ps --format json", sys.Result{Stdout: []byte(""), ExitCode: 0})
 	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d --force-recreate", sys.Result{ExitCode: 0})
-	r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik-traefik-1", sys.Result{Stdout: []byte("healthy\n"), ExitCode: 0})
+	r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik", sys.Result{Stdout: []byte("healthy\n"), ExitCode: 0})
 
 	step := TraefikStep{PollInterval: time.Millisecond, PollTimeout: 10 * time.Millisecond}
 	plan, err := step.Check(context.Background(), env)
@@ -293,7 +294,7 @@ func TestTraefikSwitchDNSToHTTPRemovesEnvAndRecreates(t *testing.T) {
 		ExitCode: 0,
 	})
 	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d --force-recreate", sys.Result{ExitCode: 0})
-	r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik-traefik-1", sys.Result{Stdout: []byte("healthy\n"), ExitCode: 0})
+	r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik", sys.Result{Stdout: []byte("healthy\n"), ExitCode: 0})
 
 	step := TraefikStep{PollInterval: time.Millisecond, PollTimeout: 10 * time.Millisecond}
 	plan, err := step.Check(context.Background(), env)
@@ -369,7 +370,7 @@ func TestTraefikRecreateOnlyWhenStaticOrEnvChanges(t *testing.T) {
 		r.On("docker network inspect cvctl-edge", sys.Result{Stdout: []byte("[{}]\n"), ExitCode: 0})
 		r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml ps --format json", sys.Result{Stdout: []byte(psJSON), ExitCode: 0})
 		r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d --force-recreate", sys.Result{ExitCode: 0})
-		r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik-traefik-1", sys.Result{Stdout: []byte("healthy\n"), ExitCode: 0})
+		r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik", sys.Result{Stdout: []byte("healthy\n"), ExitCode: 0})
 
 		step := TraefikStep{PollInterval: time.Millisecond, PollTimeout: 10 * time.Millisecond}
 		plan, err := step.Check(context.Background(), env)
@@ -412,7 +413,7 @@ func TestTraefikRecreateOnlyWhenStaticOrEnvChanges(t *testing.T) {
 		r.On("docker network inspect cvctl-edge", sys.Result{Stdout: []byte("[{}]\n"), ExitCode: 0})
 		r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml ps --format json", sys.Result{Stdout: []byte(psJSON), ExitCode: 0})
 		r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d", sys.Result{ExitCode: 0})
-		r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik-traefik-1", sys.Result{Stdout: []byte("healthy\n"), ExitCode: 0})
+		r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik", sys.Result{Stdout: []byte("healthy\n"), ExitCode: 0})
 
 		step := TraefikStep{PollInterval: time.Millisecond, PollTimeout: 10 * time.Millisecond}
 		plan, err := step.Check(context.Background(), env)
@@ -515,7 +516,7 @@ func TestTraefikCreatesNetworkOnce(t *testing.T) {
 	r.On("docker network create cvctl-edge", sys.Result{Stdout: []byte("net-id\n"), ExitCode: 0})
 	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d --force-recreate", sys.Result{ExitCode: 0})
 	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d", sys.Result{ExitCode: 0})
-	r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik-traefik-1", sys.Result{Stdout: []byte("healthy\n"), ExitCode: 0})
+	r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik", sys.Result{Stdout: []byte("healthy\n"), ExitCode: 0})
 
 	step := TraefikStep{PollInterval: time.Millisecond, PollTimeout: 10 * time.Millisecond}
 	plan1, err := step.Check(context.Background(), env)
@@ -585,8 +586,8 @@ func TestTraefikUnhealthy(t *testing.T) {
 	r.On("docker network inspect cvctl-edge", sys.Result{Stdout: []byte("[{}]\n"), ExitCode: 0})
 	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml ps --format json", sys.Result{Stdout: []byte(""), ExitCode: 0})
 	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d --force-recreate", sys.Result{ExitCode: 0})
-	r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik-traefik-1", sys.Result{Stdout: []byte("starting\n"), ExitCode: 0})
-	r.On("docker logs --tail 20 cvctl-traefik-traefik-1", sys.Result{
+	r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik", sys.Result{Stdout: []byte("starting\n"), ExitCode: 0})
+	r.On("docker logs --tail 20 cvctl-traefik", sys.Result{
 		Stderr:   []byte("ERR command traefik error: port 80 already in use\n"),
 		ExitCode: 0,
 	})
@@ -667,5 +668,88 @@ func TestTraefikRegisteredInDefaultSteps(t *testing.T) {
 	}
 	if steps[8].Name() != "traefik" {
 		t.Fatalf("step 8: got %q, want traefik", steps[8].Name())
+	}
+}
+
+func TestTraefikBehindProxyItem7Requirements(t *testing.T) {
+	behindCfg := &hostcfg.Config{
+		EdgeMode:  "behind-proxy",
+		ProxyPort: 8081,
+	}
+
+	// 1. Static config trusted IPs
+	staticBytes, err := renderTraefikStatic(behindCfg)
+	if err != nil {
+		t.Fatalf("renderTraefikStatic: %v", err)
+	}
+	var staticObj traefikStaticConfig
+	if err := yaml.Unmarshal(staticBytes, &staticObj); err != nil {
+		t.Fatalf("unmarshal static: %v", err)
+	}
+	webEp, ok := staticObj.EntryPoints["web"]
+	if !ok || webEp.ForwardedHeaders == nil {
+		t.Fatalf("expected web entrypoint with forwardedHeaders, got %+v", webEp)
+	}
+	wantIPs := []string{"127.0.0.1/32", "172.16.0.0/12"}
+	if !slices.Equal(webEp.ForwardedHeaders.TrustedIPs, wantIPs) {
+		t.Fatalf("trustedIPs: got %v, want %v", webEp.ForwardedHeaders.TrustedIPs, wantIPs)
+	}
+
+	// 2. Dynamic config middlewares: cvctl-headers, cvctl-ratelimit, cvctl-inflight in cvctl-default
+	// and depth: 1 in behind-proxy mode
+	dynBytes, err := renderTraefikDynamic(behindCfg)
+	if err != nil {
+		t.Fatalf("renderTraefikDynamic: %v", err)
+	}
+	var dynObj traefikDynamicConfig
+	if err := yaml.Unmarshal(dynBytes, &dynObj); err != nil {
+		t.Fatalf("unmarshal dynamic: %v", err)
+	}
+	defChain, ok := dynObj.HTTP.Middlewares["cvctl-default"]
+	if !ok || defChain.Chain == nil {
+		t.Fatalf("expected cvctl-default chain, got %+v", dynObj.HTTP.Middlewares)
+	}
+	wantChain := []string{"cvctl-headers", "cvctl-ratelimit", "cvctl-inflight"}
+	if !slices.Equal(defChain.Chain.Middlewares, wantChain) {
+		t.Fatalf("chain middlewares: got %v, want %v", defChain.Chain.Middlewares, wantChain)
+	}
+	rl, ok := dynObj.HTTP.Middlewares["cvctl-ratelimit"]
+	if !ok || rl.RateLimit == nil || rl.RateLimit.SourceCriterion == nil || rl.RateLimit.SourceCriterion.IPStrategy == nil {
+		t.Fatalf("expected cvctl-ratelimit with sourceCriterion.ipStrategy, got %+v", rl)
+	}
+	if rl.RateLimit.SourceCriterion.IPStrategy.Depth != 1 {
+		t.Fatalf("depth: got %d, want 1", rl.RateLimit.SourceCriterion.IPStrategy.Depth)
+	}
+
+	// 3. Compose container_name: cvctl-traefik
+	composeBytes, err := renderTraefikCompose(behindCfg)
+	if err != nil {
+		t.Fatalf("renderTraefikCompose: %v", err)
+	}
+	var compObj traefikComposeConfig
+	if err := yaml.Unmarshal(composeBytes, &compObj); err != nil {
+		t.Fatalf("unmarshal compose: %v", err)
+	}
+	svc, ok := compObj.Services["traefik"]
+	if !ok {
+		t.Fatalf("missing service traefik: %+v", compObj.Services)
+	}
+	if svc.ContainerName != "cvctl-traefik" {
+		t.Fatalf("container_name: got %q, want cvctl-traefik", svc.ContainerName)
+	}
+
+	// Edge mode: depth must NOT be present
+	edgeCfg := &hostcfg.Config{EdgeMode: "edge"}
+	edgeDynBytes, err := renderTraefikDynamic(edgeCfg)
+	if err != nil {
+		t.Fatalf("renderTraefikDynamic edge: %v", err)
+	}
+	var edgeDynObj traefikDynamicConfig
+	if err := yaml.Unmarshal(edgeDynBytes, &edgeDynObj); err != nil {
+		t.Fatalf("unmarshal edge dynamic: %v", err)
+	}
+	edgeRL := edgeDynObj.HTTP.Middlewares["cvctl-ratelimit"]
+	if edgeRL.RateLimit != nil && edgeRL.RateLimit.SourceCriterion != nil {
+		t.Fatalf("expected no sourceCriterion in edge mode, got %+v", edgeRL.RateLimit.SourceCriterion)
 	}
 }

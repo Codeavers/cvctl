@@ -37,9 +37,14 @@ type traefikPing struct {
 type traefikHTTP3 struct{}
 
 type traefikEntryPoint struct {
-	Address string                 `yaml:"address"`
-	HTTP    *traefikEntryPointHTTP `yaml:"http,omitempty"`
-	HTTP3   *traefikHTTP3          `yaml:"http3,omitempty"`
+	Address          string                   `yaml:"address"`
+	HTTP             *traefikEntryPointHTTP   `yaml:"http,omitempty"`
+	HTTP3            *traefikHTTP3            `yaml:"http3,omitempty"`
+	ForwardedHeaders *traefikForwardedHeaders `yaml:"forwardedHeaders,omitempty"`
+}
+
+type traefikForwardedHeaders struct {
+	TrustedIPs []string `yaml:"trustedIPs"`
 }
 
 type traefikEntryPointHTTP struct {
@@ -112,8 +117,17 @@ type traefikHeadersMiddleware struct {
 }
 
 type traefikRateLimitMiddleware struct {
-	Average int `yaml:"average"`
-	Burst   int `yaml:"burst"`
+	Average         int                              `yaml:"average"`
+	Burst           int                              `yaml:"burst"`
+	SourceCriterion *traefikRateLimitSourceCriterion `yaml:"sourceCriterion,omitempty"`
+}
+
+type traefikRateLimitSourceCriterion struct {
+	IPStrategy *traefikRateLimitIPStrategy `yaml:"ipStrategy,omitempty"`
+}
+
+type traefikRateLimitIPStrategy struct {
+	Depth int `yaml:"depth"`
 }
 
 type traefikInFlightReqMiddleware struct {
@@ -127,13 +141,14 @@ type traefikComposeConfig struct {
 }
 
 type traefikComposeService struct {
-	Image       string                    `yaml:"image"`
-	Restart     string                    `yaml:"restart"`
-	Ports       []string                  `yaml:"ports"`
-	EnvFile     []string                  `yaml:"env_file,omitempty"`
-	Volumes     []string                  `yaml:"volumes"`
-	Networks    []string                  `yaml:"networks"`
-	Healthcheck traefikComposeHealthcheck `yaml:"healthcheck"`
+	ContainerName string                    `yaml:"container_name,omitempty"`
+	Image         string                    `yaml:"image"`
+	Restart       string                    `yaml:"restart"`
+	Ports         []string                  `yaml:"ports"`
+	EnvFile       []string                  `yaml:"env_file,omitempty"`
+	Volumes       []string                  `yaml:"volumes"`
+	Networks      []string                  `yaml:"networks"`
+	Healthcheck   traefikComposeHealthcheck `yaml:"healthcheck"`
 }
 
 type traefikComposeHealthcheck struct {
@@ -217,7 +232,12 @@ func renderTraefikStatic(cfg *hostcfg.Config) ([]byte, error) {
 			CertResolver: {ACME: acme},
 		}
 	} else {
-		eps[EntryWeb] = traefikEntryPoint{Address: ":80"}
+		eps[EntryWeb] = traefikEntryPoint{
+			Address: ":80",
+			ForwardedHeaders: &traefikForwardedHeaders{
+				TrustedIPs: []string{"127.0.0.1/32", "172.16.0.0/12"},
+			},
+		}
 	}
 
 	doc := traefikStaticConfig{
@@ -249,25 +269,34 @@ func renderTraefikDynamic(cfg *hostcfg.Config) ([]byte, error) {
 		hdrs.STSIncludeSubdomains = true
 	}
 
+	rl := &traefikRateLimitMiddleware{
+		Average: 50,
+		Burst:   100,
+	}
+	if mode != "edge" {
+		rl.SourceCriterion = &traefikRateLimitSourceCriterion{
+			IPStrategy: &traefikRateLimitIPStrategy{
+				Depth: 1,
+			},
+		}
+	}
+
 	defaultName := strings.TrimSuffix(DefaultMiddleware, "@file")
 	doc := traefikDynamicConfig{
 		HTTP: traefikDynamicHTTP{
 			Middlewares: map[string]traefikMiddleware{
 				defaultName: {
 					Chain: &traefikChainMiddleware{
-						Middlewares: []string{"headers", "rateLimit", "inFlightReq"},
+						Middlewares: []string{"cvctl-headers", "cvctl-ratelimit", "cvctl-inflight"},
 					},
 				},
-				"headers": {
+				"cvctl-headers": {
 					Headers: hdrs,
 				},
-				"rateLimit": {
-					RateLimit: &traefikRateLimitMiddleware{
-						Average: 50,
-						Burst:   100,
-					},
+				"cvctl-ratelimit": {
+					RateLimit: rl,
 				},
-				"inFlightReq": {
+				"cvctl-inflight": {
 					InFlightReq: &traefikInFlightReqMiddleware{
 						Amount: 100,
 					},
@@ -299,10 +328,11 @@ func renderTraefikCompose(cfg *hostcfg.Config) ([]byte, error) {
 	doc := traefikComposeConfig{
 		Services: map[string]traefikComposeService{
 			"traefik": {
-				Image:   traefikImage,
-				Restart: "unless-stopped",
-				Ports:   ports,
-				EnvFile: envFile,
+				ContainerName: "cvctl-traefik",
+				Image:         traefikImage,
+				Restart:       "unless-stopped",
+				Ports:         ports,
+				EnvFile:       envFile,
 				Volumes: []string{
 					traefikStaticPath + ":/etc/traefik/traefik.yml:ro",
 					"/etc/traefik/dynamic:/etc/traefik/dynamic:ro",

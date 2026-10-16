@@ -61,7 +61,7 @@ jobs:
 
       - name: Verify Traefik has no docker.sock mount
         run: |
-          test "$(docker inspect cvctl-traefik-traefik-1 | jq '[.[0].Mounts[] | select(.Source | contains("docker.sock"))] | length')" -eq 0
+          test "$(docker inspect cvctl-traefik | jq '[.[0].Mounts[] | select(.Source | contains("docker.sock"))] | length')" -eq 0
 
       - name: Verify /srv/deploy permissions
         run: |
@@ -72,7 +72,7 @@ jobs:
         run: |
           mkdir -p /tmp/e2e-logs
           cp run1.json run1.code run2.json run2.code /tmp/e2e-logs/ 2>/dev/null || true
-          docker logs cvctl-traefik-traefik-1 > /tmp/e2e-logs/traefik.log 2>&1 || true
+          docker logs cvctl-traefik > /tmp/e2e-logs/traefik.log 2>&1 || true
           docker logs cvctl-storage-s3-1 > /tmp/e2e-logs/storage.log 2>&1 || true
 
       - name: Upload artifacts on failure
