@@ -103,6 +103,7 @@ func (t *telegramNotifier) Send(ctx context.Context, m Message) error {
 	if m.Text != "" {
 		text = header + "\n" + m.Text
 	}
+	text = truncateMessageText(text, 4000)
 
 	payload := telegramPayload{
 		ChatID:                t.chatID,
@@ -125,7 +126,7 @@ func (t *telegramNotifier) Send(ctx context.Context, m Message) error {
 	if err != nil {
 		return &output.Error{
 			Code:    "E_NOTIFY_SEND",
-			Message: fmt.Sprintf("failed to create telegram request: %v", err),
+			Message: sanitizeError(err, t.baseURL, t.token),
 			Hint:    "check telegram configuration",
 		}
 	}
@@ -133,26 +134,15 @@ func (t *telegramNotifier) Send(ctx context.Context, m Message) error {
 
 	resp, err := t.client.Do(req)
 	if err != nil {
-		var ue *url.Error
-		var msg string
-		if errors.As(err, &ue) {
-			redactedURL := redactURL(ue.URL, t.baseURL)
-			msg = fmt.Sprintf("%s %s: %v", ue.Op, redactedURL, ue.Err)
-		} else {
-			msg = err.Error()
-		}
-		if t.token != "" {
-			msg = strings.ReplaceAll(msg, t.token, "<redacted>")
-		}
 		return &output.Error{
 			Code:    "E_NOTIFY_SEND",
-			Message: msg,
+			Message: sanitizeError(err, t.baseURL, t.token),
 			Hint:    "check network connectivity and telegram base URL",
 		}
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var tgResp telegramResponse
 	_ = json.Unmarshal(respBody, &tgResp)
 
@@ -172,6 +162,32 @@ func (t *telegramNotifier) Send(ctx context.Context, m Message) error {
 	}
 
 	return nil
+}
+
+func truncateMessageText(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + "…[truncated]"
+}
+
+func sanitizeError(err error, baseURL, token string) string {
+	if err == nil {
+		return ""
+	}
+	var ue *url.Error
+	var msg string
+	if errors.As(err, &ue) {
+		redactedURL := redactURL(ue.URL, baseURL)
+		msg = fmt.Sprintf("%s %s: %v", ue.Op, redactedURL, ue.Err)
+	} else {
+		msg = err.Error()
+	}
+	if token != "" {
+		msg = strings.ReplaceAll(msg, token, "<redacted>")
+	}
+	return msg
 }
 
 func redactURL(rawURL, baseURL string) string {

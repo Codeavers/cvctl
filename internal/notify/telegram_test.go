@@ -171,3 +171,84 @@ func TestTelegramInvalidThread(t *testing.T) {
 		t.Fatalf("got %v, want code E_NOTIFY_SEND", err)
 	}
 }
+
+func TestTelegramErrorTokenWithSpace(t *testing.T) {
+	tokenWithSpace := "12 34:AB"
+
+	// Request construction error: NewRequestWithContext fails on invalid URL scheme
+	nReq := notify.NewTelegram(tokenWithSpace, "123", "", "://invalid-url")
+	errReq := nReq.Send(context.Background(), notify.Message{Level: "info", Title: "t", Text: "m"})
+	if errReq == nil {
+		t.Fatalf("expected error for invalid request construction, got nil")
+	}
+	var oeReq *output.Error
+	if !errors.As(errReq, &oeReq) {
+		t.Fatalf("expected *output.Error, got %T: %v", errReq, errReq)
+	}
+	if strings.Contains(oeReq.Message, "12 34:AB") || strings.Contains(oeReq.Message, "12 34") {
+		t.Fatalf("request error message contains token: %s", oeReq.Message)
+	}
+	if strings.Contains(oeReq.Hint, "12 34:AB") || strings.Contains(oeReq.Hint, "12 34") {
+		t.Fatalf("request error hint contains token: %s", oeReq.Hint)
+	}
+
+	// Network error: closed server ensures no external traffic and tests client.Do sanitization
+	srvClosed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srvClosed.Close()
+
+	nNet := notify.NewTelegram(tokenWithSpace, "123", "", srvClosed.URL)
+	errNet := nNet.Send(context.Background(), notify.Message{Level: "info", Title: "t", Text: "m"})
+	if errNet == nil {
+		t.Fatalf("expected error for token with space, got nil")
+	}
+	var oeNet *output.Error
+	if !errors.As(errNet, &oeNet) {
+		t.Fatalf("expected *output.Error, got %T: %v", errNet, errNet)
+	}
+	if strings.Contains(oeNet.Message, "12 34:AB") || strings.Contains(oeNet.Message, "12 34") {
+		t.Fatalf("network error message contains token with space: %s", oeNet.Message)
+	}
+	if strings.Contains(oeNet.Hint, "12 34:AB") || strings.Contains(oeNet.Hint, "12 34") {
+		t.Fatalf("network error hint contains token with space: %s", oeNet.Hint)
+	}
+}
+
+func TestTelegramMessageTruncation(t *testing.T) {
+	var gotBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotBody)
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{}})
+	}))
+	defer srv.Close()
+
+	n := notify.NewTelegram("test-token", "12345", "", srv.URL)
+
+	longText := strings.Repeat("世", 5000)
+	msg := notify.Message{
+		Host:  "srv-01",
+		Level: "info",
+		Title: "LongMsg",
+		Text:  longText,
+	}
+
+	if err := n.Send(context.Background(), msg); err != nil {
+		t.Fatalf("unexpected Send error: %v", err)
+	}
+
+	sentText, ok := gotBody["text"].(string)
+	if !ok {
+		t.Fatalf("text not found in payload or not a string: %v", gotBody["text"])
+	}
+
+	sentRunes := []rune(sentText)
+	if len(sentRunes) > 4013 {
+		t.Fatalf("sent text has %d runes, want <= 4013", len(sentRunes))
+	}
+	if !strings.HasSuffix(sentText, "…[truncated]") {
+		t.Fatalf("sent text does not end with '…[truncated]'")
+	}
+}
