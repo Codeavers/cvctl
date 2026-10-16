@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -164,12 +165,24 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 		st.Status = state.StatusFailed
 		st.RollbackFailed = true
 		st.UpdatedAt = now
-		if err := d.Store.Save(st); err != nil {
-			return Result{}, err
-		}
 
 		redactedSwapErr := redact(swapErr.Error(), existingEnv)
+		res := Result{
+			Status: state.StatusFailed,
+			ID:     deployID,
+			Detail: redactedSwapErr,
+		}
+		_ = d.notifier().Send(ctx, notify.Message{
+			Host:  d.hostName(),
+			Level: "error",
+			Title: fmt.Sprintf("%s ROLLBACK FAILED", inst),
+			Text:  fmt.Sprintf("manual rollback failed: %s", redactedSwapErr),
+		})
 
+		var errs []error
+		if err := d.Store.Save(st); err != nil {
+			errs = append(errs, err)
+		}
 		if err := d.Store.Append(inst, state.Event{
 			ID:     deployID,
 			At:     now,
@@ -180,20 +193,10 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 			Detail: redactedSwapErr,
 			Actor:  actor,
 		}); err != nil {
-			return Result{}, err
+			errs = append(errs, err)
 		}
-		_ = d.notifier().Send(ctx, notify.Message{
-			Host:  d.hostName(),
-			Level: "error",
-			Title: fmt.Sprintf("%s ROLLBACK FAILED", inst),
-			Text:  fmt.Sprintf("manual rollback failed: %s", redactedSwapErr),
-		})
 
-		return Result{
-			Status: state.StatusFailed,
-			ID:     deployID,
-			Detail: redactedSwapErr,
-		}, nil
+		return res, errors.Join(errs...)
 	}
 
 	pausedReason := fmt.Sprintf("manual rollback; resume with cvctl resume %s", inst)

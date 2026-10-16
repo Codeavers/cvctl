@@ -1606,3 +1606,58 @@ func TestDeployFailThenRollbackPausedSkipsRetry(t *testing.T) {
 	}
 }
 
+func TestRollbackFailureStoreSaveErrorStillNotifies(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	oldCommit := "0000000000000000000000000000000000000000"
+	currCommit := "1111111111111111111111111111111111111111"
+	oldDesired := state.Desired{InfraCommit: oldCommit, Digests: map[string]string{"api": "sha256:000"}}
+	currDesired := state.Desired{InfraCommit: currCommit, Digests: map[string]string{"api": "sha256:111"}}
+
+	st := &state.State{
+		Instance: "demo-dev",
+		Status:   state.StatusOK,
+		Current:  &currDesired,
+		Previous: &oldDesired,
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	// Make health check fail so executeSwap in Rollback fails
+	rig.deployer.Health = func(ctx context.Context, inst, override, envFile string) error {
+		return errors.New("swap healthcheck failed")
+	}
+
+	// Make store save fail on state.json
+	stateDir := filepath.Join(rig.tempDir, "state")
+	statePath := filepath.Join(stateDir, "demo-dev", "state.json")
+	efs := &errorFS{
+		FS: rig.fs,
+		failWriteFile: map[string]error{
+			statePath: errors.New("read-only state filesystem"),
+		},
+	}
+	rig.deployer.FS = efs
+	rig.deployer.Store = state.NewStore(efs, stateDir)
+
+	res, err := rig.deployer.Rollback(context.Background(), "demo-dev", nil, "cli:admin")
+	if err == nil {
+		t.Fatalf("expected error from failed Store.Save, got nil")
+	}
+	if res.Status != state.StatusFailed {
+		t.Fatalf("expected res.Status FAILED, got %v", res.Status)
+	}
+
+	foundRollbackFailedNotif := false
+	for _, m := range rig.notifier.messages {
+		if m.Title == "demo-dev ROLLBACK FAILED" {
+			foundRollbackFailedNotif = true
+			break
+		}
+	}
+	if !foundRollbackFailedNotif {
+		t.Fatalf("expected 'demo-dev ROLLBACK FAILED' notification to be sent even when Store.Save fails, got %v", rig.notifier.messages)
+	}
+}
+
+

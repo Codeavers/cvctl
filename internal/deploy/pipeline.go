@@ -221,8 +221,20 @@ func (d *Deployer) failPermanent(ctx context.Context, inst string, st *state.Sta
 	st.Status = state.StatusFailed
 	st.FailedHash = want.Hash()
 	st.UpdatedAt = now
+	res := Result{
+		Status: state.StatusFailed,
+		ID:     deployID,
+		Detail: redacted,
+	}
+	_ = d.notifier().Send(ctx, notify.Message{
+		Host:  d.hostName(),
+		Level: "error",
+		Title: fmt.Sprintf("%s deploy FAILED", inst),
+		Text:  redacted,
+	})
+	var errs []error
 	if err := d.Store.Save(st); err != nil {
-		return Result{}, err
+		errs = append(errs, err)
 	}
 	if err := d.Store.Append(inst, state.Event{
 		ID:     deployID,
@@ -234,19 +246,9 @@ func (d *Deployer) failPermanent(ctx context.Context, inst string, st *state.Sta
 		Detail: redacted,
 		Actor:  actor,
 	}); err != nil {
-		return Result{}, err
+		errs = append(errs, err)
 	}
-	_ = d.notifier().Send(ctx, notify.Message{
-		Host:  d.hostName(),
-		Level: "error",
-		Title: fmt.Sprintf("%s deploy FAILED", inst),
-		Text:  redacted,
-	})
-	return Result{
-		Status: state.StatusFailed,
-		ID:     deployID,
-		Detail: redacted,
-	}, nil
+	return res, errors.Join(errs...)
 }
 
 func (d *Deployer) failTransient(ctx context.Context, inst string, st *state.State, want state.Desired, deployID, actor string, now time.Time, errText string, envVals map[string]string) (Result, error) {
@@ -258,8 +260,20 @@ func (d *Deployer) failTransient(ctx context.Context, inst string, st *state.Sta
 	st.Status = state.StatusFailed
 	st.FailedHash = ""
 	st.UpdatedAt = now
+	res := Result{
+		Status: state.StatusFailed,
+		ID:     deployID,
+		Detail: detail,
+	}
+	_ = d.notifier().Send(ctx, notify.Message{
+		Host:  d.hostName(),
+		Level: "error",
+		Title: fmt.Sprintf("%s deploy FAILED", inst),
+		Text:  detail,
+	})
+	var errs []error
 	if err := d.Store.Save(st); err != nil {
-		return Result{}, err
+		errs = append(errs, err)
 	}
 	if err := d.Store.Append(inst, state.Event{
 		ID:     deployID,
@@ -271,19 +285,9 @@ func (d *Deployer) failTransient(ctx context.Context, inst string, st *state.Sta
 		Detail: detail,
 		Actor:  actor,
 	}); err != nil {
-		return Result{}, err
+		errs = append(errs, err)
 	}
-	_ = d.notifier().Send(ctx, notify.Message{
-		Host:  d.hostName(),
-		Level: "error",
-		Title: fmt.Sprintf("%s deploy FAILED", inst),
-		Text:  detail,
-	})
-	return Result{
-		Status: state.StatusFailed,
-		ID:     deployID,
-		Detail: detail,
-	}, nil
+	return res, errors.Join(errs...)
 }
 
 // Deploy executes the deployment pipeline for an instance following the recreate strategy.
@@ -467,15 +471,29 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 		st.Status = state.StatusBlocked
 		st.Blocked = resEnv.Missing
 		st.UpdatedAt = now
-		if err := d.Store.Save(st); err != nil {
-			return Result{}, err
-		}
 
 		var setEnvCmds []string
 		for _, k := range resEnv.Missing {
 			setEnvCmds = append(setEnvCmds, fmt.Sprintf("cvctl set-env %s %s", inst, k))
 		}
 		warnText := strings.Join(setEnvCmds, "\n")
+		res := Result{
+			Status:  state.StatusBlocked,
+			ID:      deployID,
+			Missing: resEnv.Missing,
+			Detail:  warnText,
+		}
+		_ = d.notifier().Send(ctx, notify.Message{
+			Host:  d.hostName(),
+			Level: "warn",
+			Title: fmt.Sprintf("%s deploy BLOCKED", inst),
+			Text:  warnText,
+		})
+
+		var errs []error
+		if err := d.Store.Save(st); err != nil {
+			errs = append(errs, err)
+		}
 		if err := d.Store.Append(inst, state.Event{
 			ID:     deployID,
 			At:     now,
@@ -486,21 +504,10 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 			Detail: warnText,
 			Actor:  actor,
 		}); err != nil {
-			return Result{}, err
+			errs = append(errs, err)
 		}
-		_ = d.notifier().Send(ctx, notify.Message{
-			Host:  d.hostName(),
-			Level: "warn",
-			Title: fmt.Sprintf("%s deploy BLOCKED", inst),
-			Text:  warnText,
-		})
 
-		return Result{
-			Status:  state.StatusBlocked,
-			ID:      deployID,
-			Missing: resEnv.Missing,
-			Detail:  warnText,
-		}, nil
+		return res, errors.Join(errs...)
 	}
 
 	st.Blocked = nil
@@ -780,13 +787,24 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 
 	if rollbackErr != nil {
 		st.RollbackFailed = true
-		if err := d.Store.Save(st); err != nil {
-			return Result{}, err
-		}
-
 		rbDetail := fmt.Sprintf("rollback failed: %v\noriginal error: %s", rollbackErr, redactedLogs)
 		rbRedacted := redact(rbDetail, resEnv.Values)
+		res := Result{
+			Status: state.StatusFailed,
+			ID:     deployID,
+			Detail: rbRedacted,
+		}
+		_ = d.notifier().Send(ctx, notify.Message{
+			Host:  d.hostName(),
+			Level: "error",
+			Title: fmt.Sprintf("%s ROLLBACK FAILED", inst),
+			Text:  rbRedacted,
+		})
 
+		var errs []error
+		if err := d.Store.Save(st); err != nil {
+			errs = append(errs, err)
+		}
 		if err := d.Store.Append(inst, state.Event{
 			ID:     deployID,
 			At:     now,
@@ -797,20 +815,10 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 			Detail: rbRedacted,
 			Actor:  actor,
 		}); err != nil {
-			return Result{}, err
+			errs = append(errs, err)
 		}
-		_ = d.notifier().Send(ctx, notify.Message{
-			Host:  d.hostName(),
-			Level: "error",
-			Title: fmt.Sprintf("%s ROLLBACK FAILED", inst),
-			Text:  rbRedacted,
-		})
 
-		return Result{
-			Status: state.StatusFailed,
-			ID:     deployID,
-			Detail: rbRedacted,
-		}, nil
+		return res, errors.Join(errs...)
 	}
 
 	st.RollbackFailed = false
