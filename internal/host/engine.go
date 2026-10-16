@@ -73,6 +73,7 @@ func DefaultSteps() []Step {
 		UnattendedStep{},
 		TraefikStep{},
 		StorageStep{},
+		NotifierStep{},
 	}
 }
 
