@@ -3,6 +3,7 @@ package state
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -344,5 +345,154 @@ func TestInstances(t *testing.T) {
 	}
 	if len(list) != 2 || list[0] != "alpha" || list[1] != "beta" {
 		t.Fatalf("expected sorted instances [alpha beta], got: %v", list)
+	}
+}
+
+func TestLockFileOwnershipDeployer(t *testing.T) {
+	fs := systest.NewFS()
+	store := NewStore(fs, "/var/lib/cvctl")
+
+	fl := systest.NewFakeLocker()
+	oldLock := sys.Lock
+	t.Cleanup(func() { sys.Lock = oldLock })
+	sys.Lock = fl.Lock
+
+	unlock, err := store.Lock("my-app")
+	if err != nil {
+		t.Fatalf("Lock failed: %v", err)
+	}
+	defer unlock()
+
+	files := fs.Files()
+	lockInfo, ok := files["/var/lib/cvctl/my-app/lock"]
+	if !ok {
+		t.Fatalf("expected lock file /var/lib/cvctl/my-app/lock to exist")
+	}
+	if lockInfo.IsDir {
+		t.Fatalf("lock file should not be a directory")
+	}
+	if lockInfo.User != "deployer" || lockInfo.Group != "deploy" {
+		t.Errorf("lock file owner: got %s:%s, want deployer:deploy", lockInfo.User, lockInfo.Group)
+	}
+	if lockInfo.Mode != 0o660 {
+		t.Errorf("lock file mode: got %o, want 0660", lockInfo.Mode)
+	}
+}
+
+func TestDesiredHashAmbiguity(t *testing.T) {
+	d1 := Desired{
+		InfraCommit: "commit1",
+		Digests: map[string]string{
+			"a=b": "c",
+		},
+	}
+	d2 := Desired{
+		InfraCommit: "commit1",
+		Digests: map[string]string{
+			"a": "b=c",
+		},
+	}
+	if d1.Hash() == d2.Hash() {
+		t.Fatalf("expected different hashes for %v and %v, got same: %s", d1.Digests, d2.Digests, d1.Hash())
+	}
+
+	dNil := Desired{InfraCommit: "commit1", Digests: nil}
+	dEmpty := Desired{InfraCommit: "commit1", Digests: map[string]string{}}
+	if dNil.Hash() != dEmpty.Hash() {
+		t.Fatalf("expected nil and empty digests to produce same hash: %q != %q", dNil.Hash(), dEmpty.Hash())
+	}
+}
+
+func TestHistoryCorruptLine(t *testing.T) {
+	fs := systest.NewFS()
+	store := NewStore(fs, "/var/lib/cvctl")
+
+	histPath := "/var/lib/cvctl/my-app/history.jsonl"
+	_ = fs.MkdirAll("/var/lib/cvctl/my-app", 0o750, sys.Owner{User: "deployer", Group: "deploy"})
+	_ = fs.WriteFile(histPath, []byte("{\"at\":\"2026-10-16T10:00:00Z\",\"id\":\"deploy-1\"}\n{not valid json\n"), 0o640, sys.Owner{User: "deployer", Group: "deploy"})
+
+	_, err := store.History("my-app", 0)
+	if err == nil {
+		t.Fatalf("expected error on corrupt history line, got nil")
+	}
+
+	var oe *output.Error
+	if !errors.As(err, &oe) {
+		t.Fatalf("expected *output.Error, got %T: %v", err, err)
+	}
+	if oe.Code != "E_STATE_CORRUPT" {
+		t.Errorf("expected code E_STATE_CORRUPT, got %s", oe.Code)
+	}
+	if !strings.Contains(oe.Message, "history.jsonl") {
+		t.Errorf("expected error message to name history.jsonl, got %s", oe.Message)
+	}
+	if oe.Hint != "inspect or move the file" {
+		t.Errorf("expected hint 'inspect or move the file', got %q", oe.Hint)
+	}
+}
+
+type failingFS struct {
+	*systest.FS
+	readErr    error
+	readDirErr error
+}
+
+func (f *failingFS) ReadFile(p string) ([]byte, error) {
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
+	return f.FS.ReadFile(p)
+}
+
+func (f *failingFS) ReadDir(p string) ([]os.DirEntry, error) {
+	if f.readDirErr != nil {
+		return nil, f.readDirErr
+	}
+	return f.FS.ReadDir(p)
+}
+
+func TestStoreFSErrorsWrappedInStateIO(t *testing.T) {
+	fakeFS := &failingFS{
+		FS:      systest.NewFS(),
+		readErr: errors.New("disk read error"),
+	}
+	store := NewStore(fakeFS, "/var/lib/cvctl")
+
+	_, err := store.Load("my-app")
+	if err == nil {
+		t.Fatalf("expected error from Load on FS error, got nil")
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) {
+		t.Fatalf("expected *output.Error, got %T: %v", err, err)
+	}
+	if oe.Code != "E_STATE_IO" {
+		t.Errorf("expected code E_STATE_IO, got %s", oe.Code)
+	}
+	expectedPath := "/var/lib/cvctl/my-app/state.json"
+	if !strings.Contains(oe.Message, expectedPath) {
+		t.Errorf("expected message to contain path %s, got: %s", expectedPath, oe.Message)
+	}
+	if oe.Hint != "check permissions on /var/lib/cvctl" {
+		t.Errorf("expected hint 'check permissions on /var/lib/cvctl', got %q", oe.Hint)
+	}
+
+	fakeFS.readErr = nil
+	fakeFS.readDirErr = errors.New("permission denied")
+	_, err = store.Instances()
+	if err == nil {
+		t.Fatalf("expected error from Instances on FS error, got nil")
+	}
+	if !errors.As(err, &oe) {
+		t.Fatalf("expected *output.Error, got %T: %v", err, err)
+	}
+	if oe.Code != "E_STATE_IO" {
+		t.Errorf("expected code E_STATE_IO, got %s", oe.Code)
+	}
+	if !strings.Contains(oe.Message, "/var/lib/cvctl") {
+		t.Errorf("expected message to contain root /var/lib/cvctl, got: %s", oe.Message)
+	}
+	if oe.Hint != "check permissions on /var/lib/cvctl" {
+		t.Errorf("expected hint 'check permissions on /var/lib/cvctl', got %q", oe.Hint)
 	}
 }

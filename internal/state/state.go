@@ -35,20 +35,25 @@ type Desired struct {
 	Digests     map[string]string `json:"digests,omitempty"`
 }
 
+type canonicalDesired struct {
+	InfraCommit string      `json:"infra_commit"`
+	Digests     [][2]string `json:"digests"`
+}
+
 func (d Desired) Hash() string {
-	h := sha256.New()
-	fmt.Fprintf(h, "commit=%s\n", d.InfraCommit)
-	if len(d.Digests) > 0 {
-		services := make([]string, 0, len(d.Digests))
-		for svc := range d.Digests {
-			services = append(services, svc)
-		}
-		slices.Sort(services)
-		for _, svc := range services {
-			fmt.Fprintf(h, "%s=%s\n", svc, d.Digests[svc])
-		}
+	digests := make([][2]string, 0, len(d.Digests))
+	for svc, dig := range d.Digests {
+		digests = append(digests, [2]string{svc, dig})
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	slices.SortFunc(digests, func(a, b [2]string) int {
+		return strings.Compare(a[0], b[0])
+	})
+	payload, _ := json.Marshal(canonicalDesired{
+		InfraCommit: d.InfraCommit,
+		Digests:     digests,
+	})
+	h := sha256.Sum256(payload)
+	return hex.EncodeToString(h[:])
 }
 
 type State struct {
@@ -93,7 +98,11 @@ func (s *Store) Load(inst string) (*State, error) {
 				Status:   StatusOK,
 			}, nil
 		}
-		return nil, err
+		return nil, &output.Error{
+			Code:    "E_STATE_IO",
+			Message: fmt.Sprintf("cannot read state file %s: %v", statePath, err),
+			Hint:    "check permissions on /var/lib/cvctl",
+		}
 	}
 	var st State
 	if err := json.Unmarshal(data, &st); err != nil {
@@ -171,7 +180,11 @@ func (s *Store) History(inst string, n int) ([]Event, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return []Event{}, nil
 		}
-		return nil, err
+		return nil, &output.Error{
+			Code:    "E_STATE_IO",
+			Message: fmt.Sprintf("cannot read history file %s: %v", histPath, err),
+			Hint:    "check permissions on /var/lib/cvctl",
+		}
 	}
 	var lines []string
 	sc := bufio.NewScanner(bytes.NewReader(data))
@@ -192,7 +205,11 @@ func (s *Store) History(inst string, n int) ([]Event, error) {
 		}
 		var ev Event
 		if err := json.Unmarshal([]byte(lines[i]), &ev); err != nil {
-			return nil, err
+			return nil, &output.Error{
+				Code:    "E_STATE_CORRUPT",
+				Message: fmt.Sprintf("corrupt history file %s: %v", histPath, err),
+				Hint:    "inspect or move the file",
+			}
 		}
 		events = append(events, ev)
 	}
@@ -208,7 +225,11 @@ func (s *Store) Instances() ([]string, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return []string{}, nil
 		}
-		return nil, err
+		return nil, &output.Error{
+			Code:    "E_STATE_IO",
+			Message: fmt.Sprintf("cannot read directory %s: %v", s.root, err),
+			Hint:    "check permissions on /var/lib/cvctl",
+		}
 	}
 	var instances []string
 	for _, ent := range entries {
@@ -216,7 +237,18 @@ func (s *Store) Instances() ([]string, error) {
 			continue
 		}
 		stateFile := filepath.Join(s.root, ent.Name(), "state.json")
-		if fi, err := s.fs.Stat(stateFile); err == nil && !fi.IsDir {
+		fi, err := s.fs.Stat(stateFile)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return nil, &output.Error{
+				Code:    "E_STATE_IO",
+				Message: fmt.Sprintf("cannot stat %s: %v", stateFile, err),
+				Hint:    "check permissions on /var/lib/cvctl",
+			}
+		}
+		if !fi.IsDir {
 			instances = append(instances, ent.Name())
 		}
 	}
@@ -237,6 +269,23 @@ func (s *Store) Lock(inst string) (func(), error) {
 		}
 	}
 	lockPath := filepath.Join(instDir, "lock")
+	if _, err := s.fs.Stat(lockPath); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			if err := s.fs.WriteFile(lockPath, nil, 0o660, deployOwner); err != nil {
+				return nil, &output.Error{
+					Code:    "E_INSTANCE_LOCK_FAILED",
+					Message: fmt.Sprintf("cannot create lock file %s: %v", lockPath, err),
+					Hint:    "check permissions on " + s.root,
+				}
+			}
+		} else {
+			return nil, &output.Error{
+				Code:    "E_INSTANCE_LOCK_FAILED",
+				Message: fmt.Sprintf("cannot stat lock file %s: %v", lockPath, err),
+				Hint:    "check permissions on " + s.root,
+			}
+		}
+	}
 	unlock, err := sys.Lock(lockPath)
 	if err != nil {
 		if errors.Is(err, sys.ErrLocked) {
