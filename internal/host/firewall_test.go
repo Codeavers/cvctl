@@ -527,10 +527,10 @@ To                         Action      From
 			wantChanges: nil,
 		},
 		{
-			name:        "22/tcp ALLOW IN 10.0.0.0/8 restricted source does not count",
-			sshPort:     "22",
-			ufwStdout:   activeHeader + "22/tcp                     ALLOW IN    10.0.0.0/8\n",
-			wantChanges: []string{"ufw allow 22/tcp"},
+			name:        "2228/tcp ALLOW IN 10.0.0.0/8 restricted source counts as present for SSH port",
+			sshPort:     "2228",
+			ufwStdout:   activeHeader + "2228/tcp                   ALLOW IN    10.0.0.0/8\n",
+			wantChanges: nil,
 		},
 		{
 			name:      "Status: inactive plans defaults, allow and enable",
@@ -566,5 +566,33 @@ To                         Action      From
 				t.Fatalf("Changes mismatch:\ngot:  %v\nwant: %v", plan.Changes, tc.wantChanges)
 			}
 		})
+	}
+}
+
+func TestFirewallRestrictedSourceWebPortsNotCounted(t *testing.T) {
+	env, runner, _ := newFirewallTestEnv(true, "edge")
+	runner.On("sshd -T -C user=root,host=localhost,addr=127.0.0.1", sys.Result{
+		Stdout:   []byte("port 2228\n"),
+		ExitCode: 0,
+	})
+	activeHeader := "Status: active\n" +
+		"Default: deny (incoming), allow (outgoing), disabled (routed)\n" +
+		"To                         Action      From\n" +
+		"--                         ------      ----\n"
+	runner.On("ufw status verbose", sys.Result{
+		Stdout: []byte(activeHeader +
+			"2228/tcp                   ALLOW IN    10.0.0.0/8\n" +
+			"80/tcp                     ALLOW IN    10.0.0.0/8\n" +
+			"443/tcp                    ALLOW IN    Anywhere\n"),
+		ExitCode: 0,
+	})
+	step := FirewallStep{}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected Check error: %v", err)
+	}
+	wantChanges := []string{"ufw allow 80/tcp"}
+	if !slices.Equal(plan.Changes, wantChanges) {
+		t.Fatalf("Changes mismatch:\ngot:  %v\nwant: %v", plan.Changes, wantChanges)
 	}
 }

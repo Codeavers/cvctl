@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -74,7 +75,7 @@ func (FirewallStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		if res.ExitCode != 0 {
 			return Plan{}, firewallCmdFailed(c, res)
 		}
-		active, denyIncoming, allowOutgoing, presentRules = parseUfwStatus(res.Stdout, rules)
+		active, denyIncoming, allowOutgoing, presentRules = parseUfwStatus(res.Stdout, rules, sshPorts)
 	}
 
 	var changes []string
@@ -149,7 +150,7 @@ func parseSSHPorts(stdout []byte) []string {
 	return ports
 }
 
-func parseUfwStatus(stdout []byte, rules []string) (active, denyIncoming, allowOutgoing bool, present map[string]bool) {
+func parseUfwStatus(stdout []byte, rules []string, sshPorts []string) (active, denyIncoming, allowOutgoing bool, present map[string]bool) {
 	present = make(map[string]bool, len(rules))
 	for _, line := range strings.Split(string(stdout), "\n") {
 		line = strings.TrimSpace(line)
@@ -179,12 +180,14 @@ func parseUfwStatus(stdout []byte, rules []string) (active, denyIncoming, allowO
 		if action != "ALLOW IN" && action != "LIMIT IN" {
 			continue
 		}
-		if source != "Anywhere" {
-			continue
-		}
 		for _, r := range rules {
 			port := strings.TrimSuffix(r, "/tcp")
-			if target == port || target == port+"/tcp" || (port == "22" && target == "OpenSSH") {
+			matchesTarget := target == port || target == port+"/tcp" || (port == "22" && target == "OpenSSH")
+			if !matchesTarget {
+				continue
+			}
+			isSSH := slices.Contains(sshPorts, port)
+			if isSSH || source == "Anywhere" {
 				present[r] = true
 			}
 		}
