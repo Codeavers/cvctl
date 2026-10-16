@@ -379,8 +379,8 @@ func TestDaemonSystemctlFailure(t *testing.T) {
 	if !errors.As(err, &oe) {
 		t.Fatalf("want output.Error, got %v", err)
 	}
-	if oe.Code != "E_SYSTEMCTL_FAILED" {
-		t.Errorf("got code %q, want E_SYSTEMCTL_FAILED", oe.Code)
+	if oe.Code != "E_DOCKER_RESTART_FAILED" {
+		t.Errorf("got code %q, want E_DOCKER_RESTART_FAILED", oe.Code)
 	}
 	if oe.Hint != "check systemctl status docker" {
 		t.Errorf("got hint %q, want 'check systemctl status docker'", oe.Hint)

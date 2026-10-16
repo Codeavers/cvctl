@@ -178,7 +178,7 @@ func restartDocker(ctx context.Context, e *Env) error {
 			msg += ": " + stderr
 		}
 		return &output.Error{
-			Code:    "E_SYSTEMCTL_FAILED",
+			Code:    "E_DOCKER_RESTART_FAILED",
 			Message: msg,
 			Hint:    "check systemctl status docker",
 		}
