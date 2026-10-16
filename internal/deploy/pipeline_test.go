@@ -11,9 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/hostcfg"
+	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/output"
+	"github.com/codeavers/cvctl/internal/render"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/internal/sys/systest"
@@ -1659,5 +1662,98 @@ func TestRollbackFailureStoreSaveErrorStillNotifies(t *testing.T) {
 		t.Fatalf("expected 'demo-dev ROLLBACK FAILED' notification to be sent even when Store.Save fails, got %v", rig.notifier.messages)
 	}
 }
+
+func TestDeployRenderErrorFailPermanent(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	want := defaultDesired()
+
+	rig.deployer.RenderOverride = func(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o render.Options) ([]byte, error) {
+		return nil, errors.New("synthetic render override error")
+	}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusFailed {
+		t.Fatalf("expected StatusFailed, got %v", res.Status)
+	}
+	if !strings.Contains(res.Detail, "synthetic render override error") {
+		t.Fatalf("expected Detail to contain render error, got %q", res.Detail)
+	}
+
+	st, _ := rig.store.Load("demo-dev")
+	if st.FailedHash != want.Hash() {
+		t.Fatalf("expected FailedHash %q, got %q", want.Hash(), st.FailedHash)
+	}
+	if st.Status != state.StatusFailed {
+		t.Fatalf("expected store status FAILED, got %v", st.Status)
+	}
+
+	foundErrorNotif := false
+	for _, m := range rig.notifier.messages {
+		if m.Level == "error" && strings.Contains(m.Text, "synthetic render override error") {
+			foundErrorNotif = true
+			break
+		}
+	}
+	if !foundErrorNotif {
+		t.Fatalf("expected error notification with render error, got %v", rig.notifier.messages)
+	}
+
+	events, _ := rig.store.History("demo-dev", 10)
+	foundFailedEvent := false
+	for _, ev := range events {
+		if ev.Kind == "failed" && strings.Contains(ev.Detail, "synthetic render override error") {
+			foundFailedEvent = true
+			break
+		}
+	}
+	if !foundFailedEvent {
+		t.Fatalf("expected failed event with render error in history, got %v", events)
+	}
+}
+
+func TestDeployNilFactoryAfterDeployingFailPermanent(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	want := defaultDesired()
+
+	// Compose returns nil on staging
+	rig.deployer.Compose = func(override, envFile string) ComposeAPI {
+		return nil
+	}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusFailed {
+		t.Fatalf("expected StatusFailed, got %v", res.Status)
+	}
+	if !strings.Contains(res.Detail, "Compose returned nil") {
+		t.Fatalf("expected Detail to mention Compose returned nil, got %q", res.Detail)
+	}
+
+	st, _ := rig.store.Load("demo-dev")
+	if st.FailedHash != want.Hash() {
+		t.Fatalf("expected FailedHash %q, got %q", want.Hash(), st.FailedHash)
+	}
+	if st.Status != state.StatusFailed {
+		t.Fatalf("expected store status FAILED, got %v", st.Status)
+	}
+
+	foundErrorNotif := false
+	for _, m := range rig.notifier.messages {
+		if m.Level == "error" && strings.Contains(m.Text, "Compose returned nil") {
+			foundErrorNotif = true
+			break
+		}
+	}
+	if !foundErrorNotif {
+		t.Fatalf("expected error notification, got %v", rig.notifier.messages)
+	}
+}
+
+
 
 

@@ -78,9 +78,11 @@ type Deployer struct {
 	Notify     notify.Notifier
 	Restore    RestorePointer
 	Host       *hostcfg.Config
-	Catalog    kinds.Catalog
-	Clock      func() time.Time
-	Health     func(ctx context.Context, inst, override, envFile string) error
+	Catalog        kinds.Catalog
+	Clock          func() time.Time
+	Health         func(ctx context.Context, inst, override, envFile string) error
+	RenderOverride func(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o render.Options) ([]byte, error)
+	RenderTraefik  func(p *contract.Project, d *instance.Decisions, o render.Options) ([]byte, error)
 }
 
 func (d *Deployer) deployRoot() string {
@@ -130,6 +132,20 @@ func (d *Deployer) catalog() (kinds.Catalog, error) {
 		return d.Catalog, nil
 	}
 	return kinds.Load()
+}
+
+func (d *Deployer) renderOverride(p *contract.Project, dec *instance.Decisions, cat kinds.Catalog, o render.Options) ([]byte, error) {
+	if d.RenderOverride != nil {
+		return d.RenderOverride(p, dec, cat, o)
+	}
+	return render.Override(p, dec, cat, o)
+}
+
+func (d *Deployer) renderTraefik(p *contract.Project, dec *instance.Decisions, o render.Options) ([]byte, error) {
+	if d.RenderTraefik != nil {
+		return d.RenderTraefik(p, dec, o)
+	}
+	return render.Traefik(p, dec, o)
 }
 
 func (d *Deployer) edge() string {
@@ -526,29 +542,29 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 	finalRoutePath := filepath.Join(d.traefikDir(), inst+".yml")
 
 	appEnvBytes := instance.FormatEnv(resEnv.Values)
-	stagingOverrideBytes, err := render.Override(p, dec, cat, render.Options{
+	stagingOverrideBytes, err := d.renderOverride(p, dec, cat, render.Options{
 		InstanceDir: instDir,
 		Edge:        d.edge(),
 		AppEnvPath:  stagingAppEnvPath,
 	})
 	if err != nil {
-		return Result{}, err
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("render staging override failed: %v", err), resEnv.Values)
 	}
-	finalOverrideBytes, err := render.Override(p, dec, cat, render.Options{
+	finalOverrideBytes, err := d.renderOverride(p, dec, cat, render.Options{
 		InstanceDir: instDir,
 		Edge:        d.edge(),
 		AppEnvPath:  finalAppEnvPath,
 	})
 	if err != nil {
-		return Result{}, err
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("render final override failed: %v", err), resEnv.Values)
 	}
-	routeBytes, err := render.Traefik(p, dec, render.Options{
+	routeBytes, err := d.renderTraefik(p, dec, render.Options{
 		InstanceDir: instDir,
 		Edge:        d.edge(),
 		AppEnvPath:  finalAppEnvPath,
 	})
 	if err != nil {
-		return Result{}, err
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("render traefik route failed: %v", err), resEnv.Values)
 	}
 
 	fsys := d.fs()
@@ -573,11 +589,7 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 	stagingCompose := d.Compose(stagingOverridePath, stagingAppEnvPath)
 	if stagingCompose == nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-		return Result{}, &output.Error{
-			Code:    "E_DEPLOY_MISCONFIGURED",
-			Message: "deployer misconfigured: Compose returned nil",
-			Hint:    "ensure Compose factory returns a valid ComposeAPI",
-		}
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, "deployer misconfigured: Compose returned nil", resEnv.Values)
 	}
 
 	if err := stagingCompose.Config(ctx); err != nil {
@@ -656,11 +668,7 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 
 	finalCompose := d.Compose(finalOverridePath, finalAppEnvPath)
 	if finalCompose == nil {
-		return Result{}, &output.Error{
-			Code:    "E_DEPLOY_MISCONFIGURED",
-			Message: "deployer misconfigured: Compose returned nil",
-			Hint:    "ensure Compose factory returns a valid ComposeAPI",
-		}
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, "deployer misconfigured: Compose returned nil", resEnv.Values)
 	}
 	upErr := finalCompose.Up(ctx)
 
