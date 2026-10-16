@@ -199,8 +199,10 @@ func (pendPlanStep) Apply(context.Context, *host.Env, host.Plan) (string, error)
 func TestConfirmSSHCommand(t *testing.T) {
 	fs := systest.NewFS()
 	_ = fs.WriteFile("/etc/os-release", []byte("ID=ubuntu\nVERSION_ID=\"24.04\"\n"), 0o644, sys.Owner{User: "root", Group: "root"})
+	_ = fs.WriteFile("/etc/ssh/sshd_config.d/00-cvctl.conf", []byte("PasswordAuthentication no\n"), 0o644, sys.Owner{User: "root", Group: "root"})
 	runner := &systest.Runner{}
 	runner.On("systemctl stop cvctl-ssh-revert.timer cvctl-ssh-revert.service", sys.Result{ExitCode: 0})
+	runner.On("systemctl is-active cvctl-ssh-revert.timer", sys.Result{Stdout: []byte("inactive\n"), ExitCode: 3})
 
 	oldEnv := newInitEnv
 	t.Cleanup(func() { newInitEnv = oldEnv })

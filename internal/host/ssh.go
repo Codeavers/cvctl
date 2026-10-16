@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -18,6 +19,7 @@ const (
 	sshDropInContent = "PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\nPubkeyAuthentication yes\n"
 	sshPendingMsg    = "ssh hardened; confirm from a NEW session within 5 minutes: sudo cvctl init confirm-ssh"
 	sshConfirmPrompt = "Open a NEW ssh session to this server now. If it works, answer yes. If you answer no or do nothing for 5 minutes, the change is reverted."
+	sshRevertNotice  = " (the change will be reverted automatically within 5 minutes)"
 )
 
 type SSHStep struct{}
@@ -27,6 +29,17 @@ func (SSHStep) Name() string { return "ssh" }
 func (SSHStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	if e.Cfg == nil || !e.Cfg.SSHManage {
 		return Plan{Skip: "SSH_MANAGE=false"}, nil
+	}
+
+	activeRes, err := e.Run.Run(ctx, sys.Cmd{
+		Name: "systemctl",
+		Args: []string{"is-active", "cvctl-ssh-revert.timer"},
+	})
+	if err != nil {
+		return Plan{}, err
+	}
+	if strings.TrimSpace(string(activeRes.Stdout)) == "active" {
+		return Plan{Pending: sshPendingMsg}, nil
 	}
 
 	var changes []string
@@ -79,6 +92,18 @@ func (SSHStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 		return "", err
 	}
 
+	if homeInfo, err := e.FS.Stat(home); err == nil {
+		if homeInfo.Mode&0o022 != 0 {
+			return "", &output.Error{
+				Code:    "E_SSH_UNSAFE_HOME",
+				Message: fmt.Sprintf("home directory %s is group- or world-writable (%04o)", home, homeInfo.Mode),
+				Hint:    fmt.Sprintf("chmod go-w %s", home),
+			}
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+
 	sshDir := path.Join(home, ".ssh")
 	akPath := path.Join(sshDir, "authorized_keys")
 	akData, err := e.FS.ReadFile(akPath)
@@ -86,7 +111,25 @@ func (SSHStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 		return "", err
 	}
 
-	if !hasValidAuthorizedKey(akData) {
+	if hasValidAuthorizedKey(akData) {
+		group, err := resolveGroupName(ctx, e, gid)
+		if err != nil {
+			return "", err
+		}
+		adminOwner := sys.Owner{User: adminUser, Group: group}
+		if err := e.FS.MkdirAll(sshDir, 0o700, adminOwner); err != nil {
+			return "", err
+		}
+		akInfo, err := e.FS.Stat(akPath)
+		if err != nil {
+			return "", err
+		}
+		if akInfo.Mode != 0o600 || akInfo.User != adminUser || akInfo.Group != group {
+			if err := e.FS.WriteFile(akPath, akData, 0o600, adminOwner); err != nil {
+				return "", err
+			}
+		}
+	} else {
 		if !e.Interactive || e.Prompt == nil {
 			return "", noKeysErr(adminUser)
 		}
@@ -125,11 +168,10 @@ func (SSHStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 
 	res, err := e.Run.Run(ctx, sys.Cmd{Name: "sshd", Args: []string{"-t"}})
 	if err != nil {
-		_ = e.FS.Remove(sshDropInPath)
-		return "", err
+		return "", wrapRemoveErr(err, e.FS.Remove(sshDropInPath))
 	}
 	if res.ExitCode != 0 {
-		_ = e.FS.Remove(sshDropInPath)
+		rmErr := e.FS.Remove(sshDropInPath)
 		out := strings.TrimSpace(string(res.Stderr))
 		if out == "" {
 			out = strings.TrimSpace(string(res.Stdout))
@@ -138,11 +180,43 @@ func (SSHStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 		if out != "" {
 			msg += ": " + out
 		}
-		return "", &output.Error{
+		return "", wrapRemoveErr(&output.Error{
 			Code:    "E_SSH_CONFIG",
 			Message: msg,
 			Hint:    "sshd -t output is in the message; fix sshd_config and re-run",
-		}
+		}, rmErr)
+	}
+
+	connSpec := fmt.Sprintf("user=%s,host=localhost,addr=127.0.0.1", adminUser)
+	effRes, err := e.Run.Run(ctx, sys.Cmd{
+		Name: "sshd",
+		Args: []string{"-T", "-C", connSpec},
+	})
+	if err != nil {
+		return "", wrapRemoveErr(err, e.FS.Remove(sshDropInPath))
+	}
+	eff := parseSSHDEffective(effRes.Stdout)
+	if effRes.ExitCode != 0 || eff["passwordauthentication"] != "no" || eff["permitrootlogin"] != "no" {
+		rmErr := e.FS.Remove(sshDropInPath)
+		return "", wrapRemoveErr(&output.Error{
+			Code:    "E_SSH_CONFIG",
+			Message: "drop-in written but not effective (is sshd_config.d included?)",
+			Hint:    "ensure /etc/ssh/sshd_config includes /etc/ssh/sshd_config.d/*.conf before any Match blocks",
+		}, rmErr)
+	}
+
+	// Clear any leftover revert unit before arming so systemd-run is idempotent across retries.
+	if _, err := e.Run.Run(ctx, sys.Cmd{
+		Name: "systemctl",
+		Args: []string{"stop", "cvctl-ssh-revert.timer", "cvctl-ssh-revert.service"},
+	}); err != nil {
+		return "", wrapRemoveErr(err, e.FS.Remove(sshDropInPath))
+	}
+	if _, err := e.Run.Run(ctx, sys.Cmd{
+		Name: "systemctl",
+		Args: []string{"reset-failed", "cvctl-ssh-revert.timer", "cvctl-ssh-revert.service"},
+	}); err != nil {
+		return "", wrapRemoveErr(err, e.FS.Remove(sshDropInPath))
 	}
 
 	// Arm the auto-revert timer before reloading sshd so a broken reload or dropped session still reverts.
@@ -152,14 +226,14 @@ func (SSHStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 			"--unit", "cvctl-ssh-revert",
 			"--on-active=300",
 			"/bin/sh", "-c",
-			"rm -f /etc/ssh/sshd_config.d/00-cvctl.conf && systemctl reload ssh",
+			"rm -f /etc/ssh/sshd_config.d/00-cvctl.conf && systemctl try-reload-or-restart ssh",
 		},
 	}); err != nil {
-		return "", err
+		return "", wrapRemoveErr(err, e.FS.Remove(sshDropInPath))
 	}
 
-	if err := runSSHCmd(ctx, e, sys.Cmd{Name: "systemctl", Args: []string{"reload", "ssh"}}); err != nil {
-		return "", err
+	if err := runSSHCmd(ctx, e, sys.Cmd{Name: "systemctl", Args: []string{"try-reload-or-restart", "ssh"}}); err != nil {
+		return "", withRevertNotice(err)
 	}
 
 	if e.Interactive && e.Prompt != nil {
@@ -169,22 +243,26 @@ func (SSHStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 			Options: []string{"yes", "no"},
 		}, "no")
 		if err != nil {
-			return "", err
+			return "", withRevertNotice(err)
 		}
 		if ans == "yes" {
 			if err := ConfirmSSH(ctx, e); err != nil {
-				return "", err
+				var oe *output.Error
+				if errors.As(err, &oe) && oe.Code == "E_SSH_NOT_CONFIRMED" {
+					return "", err
+				}
+				return "", withRevertNotice(err)
 			}
 			return "", nil
 		}
 		if err := e.FS.Remove(sshDropInPath); err != nil {
-			return "", err
+			return "", withRevertNotice(err)
 		}
-		if err := runSSHCmd(ctx, e, sys.Cmd{Name: "systemctl", Args: []string{"reload", "ssh"}}); err != nil {
-			return "", err
+		if err := runSSHCmd(ctx, e, sys.Cmd{Name: "systemctl", Args: []string{"try-reload-or-restart", "ssh"}}); err != nil {
+			return "", withRevertNotice(err)
 		}
-		if err := ConfirmSSH(ctx, e); err != nil {
-			return "", err
+		if err := stopRevertTimer(ctx, e); err != nil {
+			return "", withRevertNotice(err)
 		}
 		return "", &output.Error{
 			Code:    "E_SSH_NOT_CONFIRMED",
@@ -196,14 +274,77 @@ func (SSHStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 	return sshPendingMsg, nil
 }
 
-// ConfirmSSH stops the auto-revert timer and service. A non-zero exit from
-// systemctl is ignored because the timer may have already expired or not exist.
+// ConfirmSSH verifies the drop-in was not already reverted, stops the auto-revert
+// timer and service, and verifies the timer is no longer active.
 func ConfirmSSH(ctx context.Context, e *Env) error {
-	_, err := e.Run.Run(ctx, sys.Cmd{
+	if _, err := e.FS.Stat(sshDropInPath); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &output.Error{
+				Code:    "E_SSH_NOT_CONFIRMED",
+				Message: "the change was already reverted",
+				Hint:    "run cvctl init again",
+			}
+		}
+		return err
+	}
+	return stopRevertTimer(ctx, e)
+}
+
+func stopRevertTimer(ctx context.Context, e *Env) error {
+	stopCmd := sys.Cmd{
 		Name: "systemctl",
 		Args: []string{"stop", "cvctl-ssh-revert.timer", "cvctl-ssh-revert.service"},
-	})
-	return err
+	}
+	res, err := e.Run.Run(ctx, stopCmd)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 && !strings.Contains(strings.ToLower(string(res.Stderr)), "not loaded") {
+		return sshCmdFailed(stopCmd, res)
+	}
+
+	activeCmd := sys.Cmd{
+		Name: "systemctl",
+		Args: []string{"is-active", "cvctl-ssh-revert.timer"},
+	}
+	activeRes, err := e.Run.Run(ctx, activeCmd)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(activeRes.Stdout)) == "active" {
+		return &output.Error{
+			Code:    "E_SSH_FAILED",
+			Message: "cvctl-ssh-revert.timer is still active after stop",
+			Hint:    "check `systemctl status cvctl-ssh-revert.timer`",
+		}
+	}
+	return nil
+}
+
+func wrapRemoveErr(err error, rmErr error) error {
+	if rmErr == nil {
+		return err
+	}
+	var oe *output.Error
+	if errors.As(err, &oe) {
+		oe.Message = fmt.Sprintf("%s (remove %s: %v)", oe.Message, sshDropInPath, rmErr)
+		return oe
+	}
+	return fmt.Errorf("%w (remove %s: %v)", err, sshDropInPath, rmErr)
+}
+
+func withRevertNotice(err error) error {
+	if err == nil {
+		return nil
+	}
+	var oe *output.Error
+	if errors.As(err, &oe) {
+		if !strings.HasSuffix(oe.Message, sshRevertNotice) {
+			oe.Message += sshRevertNotice
+		}
+		return oe
+	}
+	return fmt.Errorf("%w%s", err, sshRevertNotice)
 }
 
 func parseSSHDEffective(stdout []byte) map[string]string {
@@ -236,14 +377,18 @@ func validateSSHPubKey(line string) error {
 		return errors.New("empty or comment line")
 	}
 	fields := strings.Fields(line)
-	if len(fields) == 0 {
-		return errors.New("empty key")
+	if len(fields) < 2 {
+		return errors.New("key must have at least key type and base64-encoded key")
 	}
 	ktype := fields[0]
-	if strings.HasPrefix(ktype, "ssh-") || strings.HasPrefix(ktype, "ecdsa-") || strings.HasPrefix(ktype, "sk-") {
-		return nil
+	if !strings.HasPrefix(ktype, "ssh-") && !strings.HasPrefix(ktype, "ecdsa-") && !strings.HasPrefix(ktype, "sk-") {
+		return errors.New("key must start with ssh-, ecdsa-, or sk-")
 	}
-	return errors.New("key must start with ssh-, ecdsa-, or sk-")
+	decoded, err := base64.StdEncoding.DecodeString(fields[1])
+	if err != nil || len(decoded) == 0 {
+		return errors.New("second field must be valid base64")
+	}
+	return nil
 }
 
 func appendAuthorizedKey(existing []byte, pubkey string) []byte {
