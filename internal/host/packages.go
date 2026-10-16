@@ -77,18 +77,35 @@ func checkPackageInstalled(ctx context.Context, e *Env, pkg string) bool {
 func (PackagesStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	var changes []string
 
-	res, err := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"compose", "version", "--short"}})
-	if err == nil && res.ExitCode == 0 && isComposeSatisfied(string(res.Stdout)) {
-		// Compose is installed and version is >= 2.24.0. Check daemon responsiveness.
-		resInfo, errInfo := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"info"}})
-		if errInfo != nil || resInfo.ExitCode != 0 {
+	resInfo, errInfo := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"info"}})
+	if errInfo == nil && resInfo.ExitCode == 0 {
+		resComp, errComp := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"compose", "version", "--short"}})
+		if errComp == nil && resComp.ExitCode == 0 && isComposeSatisfied(string(resComp.Stdout)) {
+			// Compose is installed and version is >= 2.24.0.
+		} else {
+			return Plan{}, &output.Error{
+				Code:    "E_DOCKER_COMPOSE_OLD",
+				Message: "docker is running but docker compose is missing or older than 2.24",
+				Hint:    "install the compose plugin: apt-get install docker-compose-v2 (or docker-compose-plugin from Docker's repo)",
+			}
+		}
+	} else {
+		resComp, errComp := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"compose", "version", "--short"}})
+		if errComp == nil && resComp.ExitCode == 0 && isComposeSatisfied(string(resComp.Stdout)) {
 			return Plan{}, &output.Error{
 				Code:    "E_DOCKER_DAEMON_DOWN",
 				Message: "docker is installed but the daemon is not responding",
 				Hint:    "systemctl start docker",
 			}
 		}
-	} else {
+		// Install docker-ce only when docker is not runnable at all.
+		if errInfo == nil && resInfo.ExitCode != 127 {
+			return Plan{}, &output.Error{
+				Code:    "E_DOCKER_DAEMON_DOWN",
+				Message: "docker is installed but the daemon is not responding",
+				Hint:    "systemctl start docker",
+			}
+		}
 		changes = append(changes, "install docker")
 	}
 

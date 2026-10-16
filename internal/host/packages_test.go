@@ -133,35 +133,51 @@ func TestDockerOldCompose(t *testing.T) {
 	runner.On("docker info", sys.Result{ExitCode: 0})
 	markAllInstalled(runner)
 
-	runner.On("install -m 0755 -d /etc/apt/keyrings", sys.Result{ExitCode: 0})
-	runner.On("curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc", sys.Result{ExitCode: 0})
-	runner.On("dpkg --print-architecture", sys.Result{Stdout: []byte("arm64\n"), ExitCode: 0})
-	runner.On("apt-get update", sys.Result{ExitCode: 0})
-	runner.On("apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin", sys.Result{ExitCode: 0})
+	step := PackagesStep{}
+	_, err := step.Check(context.Background(), env)
+	if err == nil {
+		t.Fatal("expected error for old compose version 2.20.0, got nil")
+	}
+
+	var oe *output.Error
+	if !errors.As(err, &oe) {
+		t.Fatalf("want output.Error, got %v", err)
+	}
+	if oe.Code != "E_DOCKER_COMPOSE_OLD" {
+		t.Errorf("got code %q, want E_DOCKER_COMPOSE_OLD", oe.Code)
+	}
+	if oe.Hint != "install the compose plugin: apt-get install docker-compose-v2 (or docker-compose-plugin from Docker's repo)" {
+		t.Errorf("got hint %q", oe.Hint)
+	}
+}
+
+func TestDockerComposeMissingWhenDockerRunning(t *testing.T) {
+	env, runner, _ := newPackagesTestEnv()
+	runner.On("docker info", sys.Result{ExitCode: 0})
+	// compose missing (runner returns 127)
+	markAllInstalled(runner)
 
 	step := PackagesStep{}
-	plan, err := step.Check(context.Background(), env)
-	if err != nil {
-		t.Fatalf("unexpected Check error: %v", err)
-	}
-	if len(plan.Changes) == 0 {
-		t.Fatal("expected changes for old compose version 2.20.0, got none")
+	_, err := step.Check(context.Background(), env)
+	if err == nil {
+		t.Fatal("expected error when compose is missing but docker info succeeds, got nil")
 	}
 
-	_, err = step.Apply(context.Background(), env, plan)
-	if err != nil {
-		t.Fatalf("unexpected Apply error: %v", err)
+	var oe *output.Error
+	if !errors.As(err, &oe) {
+		t.Fatalf("want output.Error, got %v", err)
+	}
+	if oe.Code != "E_DOCKER_COMPOSE_OLD" {
+		t.Errorf("got code %q, want E_DOCKER_COMPOSE_OLD", oe.Code)
+	}
+	if oe.Hint != "install the compose plugin: apt-get install docker-compose-v2 (or docker-compose-plugin from Docker's repo)" {
+		t.Errorf("got hint %q", oe.Hint)
 	}
 
-	foundInstall := false
 	for _, c := range runner.Calls {
-		if c.String() == "apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin" {
-			foundInstall = true
-			break
+		if strings.Contains(c.String(), "docker-ce") {
+			t.Fatalf("unexpected docker-ce install call: %s", c.String())
 		}
-	}
-	if !foundInstall {
-		t.Fatal("expected docker packages install command to be executed")
 	}
 }
 
