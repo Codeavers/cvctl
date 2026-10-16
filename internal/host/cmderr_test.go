@@ -40,6 +40,22 @@ func TestCmdErrFormat(t *testing.T) {
 		}
 	})
 
+	t.Run("exit non-zero with empty stderr and non-empty stdout", func(t *testing.T) {
+		cmd := sys.Cmd{Name: "sshd", Args: []string{"-t"}}
+		res := sys.Result{ExitCode: 1, Stdout: []byte("configuration test failed\n")}
+		err := CmdErr("E_SSH_CONFIG", cmd, res, nil, "fix sshd_config")
+		if err.Code != "E_SSH_CONFIG" {
+			t.Errorf("got code %q, want E_SSH_CONFIG", err.Code)
+		}
+		wantMsg := "sshd -t failed (exit 1): configuration test failed"
+		if err.Message != wantMsg {
+			t.Errorf("got message %q, want %q", err.Message, wantMsg)
+		}
+		if err.Hint != "fix sshd_config" {
+			t.Errorf("got hint %q, want 'fix sshd_config'", err.Hint)
+		}
+	})
+
 	t.Run("failed to start runErr", func(t *testing.T) {
 		cmd := sys.Cmd{Name: "ufw", Args: []string{"status"}}
 		runErr := errors.New("exec: executable file not found in $PATH")

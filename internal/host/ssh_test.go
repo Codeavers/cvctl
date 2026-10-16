@@ -316,6 +316,48 @@ func TestSSHInvalidConfigRollsBack(t *testing.T) {
 	}
 }
 
+func TestSSHInvalidConfigStdoutOnly(t *testing.T) {
+	env, runner, fs := newSSHTestEnv("andres", true, false)
+	seedAdminWithKey(runner, fs, "andres", "/home/andres", "1000", "andres", testEd25519Key)
+	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+		Stdout:   []byte("passwordauthentication yes\npermitrootlogin yes\n"),
+		ExitCode: 0,
+	})
+	runner.On("sshd -t", sys.Result{
+		ExitCode: 1,
+		Stdout:   []byte("/etc/ssh/sshd_config line 99: Bad configuration option on stdout\n"),
+	})
+
+	step := SSHStep{}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected Check error: %v", err)
+	}
+	if len(plan.Changes) == 0 {
+		t.Fatal("expected changes, got none")
+	}
+
+	_, err = step.Apply(context.Background(), env, plan)
+	if err == nil {
+		t.Fatal("expected E_SSH_CONFIG error when sshd -t fails, got nil")
+	}
+	if got := code(t, err); got != "E_SSH_CONFIG" {
+		t.Fatalf("got error code %q, want E_SSH_CONFIG", got)
+	}
+	var oe *output.Error
+	errors.As(err, &oe)
+	if !strings.Contains(oe.Message, "Bad configuration option on stdout") {
+		t.Fatalf("expected sshd -t stdout in message, got %q", oe.Message)
+	}
+	if oe.Hint != "sshd -t output is in the message; fix sshd_config and re-run" {
+		t.Fatalf("unexpected hint: %q", oe.Hint)
+	}
+
+	if _, err := fs.Stat("/etc/ssh/sshd_config.d/00-cvctl.conf"); err == nil {
+		t.Fatal("expected drop-in to be removed after sshd -t failure")
+	}
+}
+
 type removeErrFS struct {
 	*systest.FS
 	removeErr error
