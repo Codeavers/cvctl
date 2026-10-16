@@ -13,10 +13,25 @@ import (
 	"github.com/codeavers/cvctl/internal/sys"
 )
 
-const (
-	fail2banJailPath    = "/etc/fail2ban/jail.d/cvctl.conf"
-	fail2banJailContent = "[sshd]\nenabled = true\nbackend = systemd\nmaxretry = 5\nfindtime = 10m\nbantime = 1h\n"
-)
+const fail2banJailPath = "/etc/fail2ban/jail.d/cvctl.conf"
+
+func fail2banJailContent(portStr string) string {
+	return fmt.Sprintf("[sshd]\nenabled = true\nport = %s\nbackend = systemd\nmaxretry = 5\nfindtime = 10m\nbantime = 1h\n", portStr)
+}
+
+func resolveFail2banPorts(ctx context.Context, e *Env) string {
+	res, err := e.Run.Run(ctx, sys.Cmd{
+		Name: "sshd",
+		Args: []string{"-T", "-C", "user=root,host=localhost,addr=127.0.0.1"},
+	})
+	if err == nil && res.ExitCode == 0 {
+		ports := parseSSHPorts(res.Stdout)
+		if len(ports) > 0 {
+			return strings.Join(ports, ",")
+		}
+	}
+	return "ssh"
+}
 
 var rootOwner = sys.Owner{User: "root", Group: "root"}
 
@@ -27,12 +42,15 @@ func (Fail2banStep) Name() string { return "fail2ban" }
 func (Fail2banStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	var changes []string
 
-	fileChanged, err := fileNeedsWrite(e.FS, fail2banJailPath, []byte(fail2banJailContent), 0o644, rootOwner)
+	portStr := resolveFail2banPorts(ctx, e)
+	content := fail2banJailContent(portStr)
+
+	fileChanged, err := fileNeedsWrite(e.FS, fail2banJailPath, []byte(content), 0o644, rootOwner)
 	if err != nil {
 		return Plan{}, fail2banFSErr(fail2banJailPath, err)
 	}
 	if fileChanged {
-		changes = append(changes, "configure "+fail2banJailPath)
+		changes = append(changes, fmt.Sprintf("configure %s (port=%s)", fail2banJailPath, portStr))
 	}
 
 	enabledRes, err := e.Run.Run(ctx, sys.Cmd{Name: "systemctl", Args: []string{"is-enabled", "fail2ban"}})
@@ -61,21 +79,42 @@ func (Fail2banStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	return Plan{Changes: changes}, nil
 }
 
+func parseJailPort(change string) string {
+	const prefix = "configure " + fail2banJailPath
+	if !strings.HasPrefix(change, prefix) {
+		return ""
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(change, prefix))
+	if strings.HasPrefix(rest, "(port=") && strings.HasSuffix(rest, ")") {
+		return strings.TrimSuffix(strings.TrimPrefix(rest, "(port="), ")")
+	}
+	return "ssh"
+}
+
 func (Fail2banStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 	if len(p.Changes) == 0 {
 		return "", nil
 	}
 
 	changeSet := make(map[string]bool, len(p.Changes))
+	var configureJail bool
+	jailPort := "ssh"
 	for _, c := range p.Changes {
 		changeSet[c] = true
+		if strings.HasPrefix(c, "configure "+fail2banJailPath) {
+			configureJail = true
+			if p := parseJailPort(c); p != "" {
+				jailPort = p
+			}
+		}
 	}
 
-	if changeSet["configure "+fail2banJailPath] {
+	if configureJail {
+		content := fail2banJailContent(jailPort)
 		if err := e.FS.MkdirAll(path.Dir(fail2banJailPath), 0o755, rootOwner); err != nil {
 			return "", fail2banFSErr(fail2banJailPath, err)
 		}
-		if err := e.FS.WriteFile(fail2banJailPath, []byte(fail2banJailContent), 0o644, rootOwner); err != nil {
+		if err := e.FS.WriteFile(fail2banJailPath, []byte(content), 0o644, rootOwner); err != nil {
 			return "", fail2banFSErr(fail2banJailPath, err)
 		}
 	}

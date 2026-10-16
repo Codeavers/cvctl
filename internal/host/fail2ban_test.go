@@ -49,7 +49,7 @@ func TestFail2banWritesJailAndEnables(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected %s to be written: %v", fail2banJailPath, err)
 	}
-	want := "[sshd]\nenabled = true\nbackend = systemd\nmaxretry = 5\nfindtime = 10m\nbantime = 1h\n"
+	want := "[sshd]\nenabled = true\nport = ssh\nbackend = systemd\nmaxretry = 5\nfindtime = 10m\nbantime = 1h\n"
 	if string(data) != want {
 		t.Fatalf("jail content mismatch:\ngot:\n%q\nwant:\n%q", string(data), want)
 	}
@@ -70,7 +70,9 @@ func TestFail2banWritesJailAndEnables(t *testing.T) {
 
 func TestFail2banUnchanged(t *testing.T) {
 	env, runner, fs := newFail2banTestEnv()
-	_ = fs.WriteFile(fail2banJailPath, []byte(fail2banJailContent), 0o644, sys.Owner{User: "root", Group: "root"})
+	runner.On("sshd -T -C user=root,host=localhost,addr=127.0.0.1", sys.Result{Stdout: []byte("port 22\n"), ExitCode: 0})
+	content := "[sshd]\nenabled = true\nport = 22\nbackend = systemd\nmaxretry = 5\nfindtime = 10m\nbantime = 1h\n"
+	_ = fs.WriteFile(fail2banJailPath, []byte(content), 0o644, sys.Owner{User: "root", Group: "root"})
 	runner.On("systemctl is-enabled fail2ban", sys.Result{Stdout: []byte("enabled\n"), ExitCode: 0})
 	runner.On("systemctl is-active fail2ban", sys.Result{Stdout: []byte("active\n"), ExitCode: 0})
 
@@ -90,6 +92,68 @@ func TestFail2banUnchanged(t *testing.T) {
 	}
 	if len(runner.Calls) != callsBeforeApply {
 		t.Fatalf("expected no Apply calls when unchanged, got %v", runner.Calls[callsBeforeApply:])
+	}
+}
+
+func TestFail2banCustomSSHPort2228(t *testing.T) {
+	env, runner, fs := newFail2banTestEnv()
+	runner.On("sshd -T -C user=root,host=localhost,addr=127.0.0.1", sys.Result{Stdout: []byte("port 2228\n"), ExitCode: 0})
+	runner.On("systemctl is-enabled fail2ban", sys.Result{Stdout: []byte("enabled\n"), ExitCode: 0})
+	runner.On("systemctl is-active fail2ban", sys.Result{Stdout: []byte("active\n"), ExitCode: 0})
+	runner.On("systemctl try-reload-or-restart fail2ban", sys.Result{ExitCode: 0})
+
+	step := Fail2banStep{}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected Check error: %v", err)
+	}
+	if len(plan.Changes) == 0 {
+		t.Fatal("expected changes when jail is missing, got none")
+	}
+
+	_, err = step.Apply(context.Background(), env, plan)
+	if err != nil {
+		t.Fatalf("unexpected Apply error: %v", err)
+	}
+
+	data, err := fs.ReadFile(fail2banJailPath)
+	if err != nil {
+		t.Fatalf("failed to read jail file: %v", err)
+	}
+	want := "[sshd]\nenabled = true\nport = 2228\nbackend = systemd\nmaxretry = 5\nfindtime = 10m\nbantime = 1h\n"
+	if string(data) != want {
+		t.Fatalf("jail content mismatch:\ngot:\n%q\nwant:\n%q", string(data), want)
+	}
+}
+
+func TestFail2banMultipleSSHPorts(t *testing.T) {
+	env, runner, fs := newFail2banTestEnv()
+	runner.On("sshd -T -C user=root,host=localhost,addr=127.0.0.1", sys.Result{Stdout: []byte("port 22\nport 2228\n"), ExitCode: 0})
+	runner.On("systemctl is-enabled fail2ban", sys.Result{Stdout: []byte("enabled\n"), ExitCode: 0})
+	runner.On("systemctl is-active fail2ban", sys.Result{Stdout: []byte("active\n"), ExitCode: 0})
+	runner.On("systemctl try-reload-or-restart fail2ban", sys.Result{ExitCode: 0})
+
+	step := Fail2banStep{}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected Check error: %v", err)
+	}
+	if len(plan.Changes) == 0 {
+		t.Fatal("expected changes when jail is missing, got none")
+	}
+
+	_, err = step.Apply(context.Background(), env, plan)
+	if err != nil {
+		t.Fatalf("unexpected Apply error: %v", err)
+	}
+
+	data, err := fs.ReadFile(fail2banJailPath)
+	if err != nil {
+		t.Fatalf("failed to read jail file: %v", err)
+	}
+	want := "[sshd]\nenabled = true\nport = 22,2228\nbackend = systemd\nmaxretry = 5\nfindtime = 10m\nbantime = 1h\n"
+	if string(data) != want {
+		t.Fatalf("jail content mismatch:\ngot:\n%q\nwant:\n%q", string(data), want)
 	}
 }
 
