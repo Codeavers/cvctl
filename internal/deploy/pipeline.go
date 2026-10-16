@@ -306,6 +306,19 @@ func (d *Deployer) failTransient(ctx context.Context, inst string, st *state.Sta
 	return res, errors.Join(errs...)
 }
 
+func (d *Deployer) handlePromoteFailure(ctx context.Context, inst string, st *state.State, want state.Desired, deployID, actor string, now time.Time, existingEnv, resEnvVals map[string]string, stagingDir, stagingOverride, stagingAppEnv, stagingRoute, failedMsg string) (Result, error) {
+	d.cleanupStaging(stagingDir, stagingOverride, stagingAppEnv, stagingRoute)
+	restoreMsg := ""
+	if st.Current != nil {
+		if rErr := d.executeSwap(ctx, inst, st.Current, existingEnv); rErr != nil {
+			restoreMsg = fmt.Sprintf("; restore to %s failed: %v", commitShort(st.Current.InfraCommit), rErr)
+		} else {
+			restoreMsg = fmt.Sprintf("; restored to %s", commitShort(st.Current.InfraCommit))
+		}
+	}
+	return d.failPermanent(ctx, inst, st, want, deployID, actor, now, failedMsg+restoreMsg, resEnvVals)
+}
+
 // Deploy executes the deployment pipeline for an instance following the recreate strategy.
 func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, opts Options) (res Result, retErr error) {
 	actor := opts.Actor
@@ -648,20 +661,17 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 
 	// Step 8: Promote staging -> final (order: app.env -> route -> override)
 	if err := fsys.WriteFile(finalAppEnvPath, appEnvBytes, 0o640, deployOwner); err != nil {
-		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("promote app.env failed: %v", err), resEnv.Values)
+		return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, existingEnv, resEnv.Values, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote app.env failed: %v", err))
 	}
 	if routeBytes != nil {
 		if err := fsys.WriteFile(finalRoutePath, routeBytes, 0o640, deployOwner); err != nil {
-			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-			return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("promote route failed: %v", err), resEnv.Values)
+			return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, existingEnv, resEnv.Values, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote route failed: %v", err))
 		}
 	} else {
 		_ = fsys.Remove(finalRoutePath)
 	}
 	if err := fsys.WriteFile(finalOverridePath, finalOverrideBytes, 0o640, deployOwner); err != nil {
-		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("promote override failed: %v", err), resEnv.Values)
+		return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, existingEnv, resEnv.Values, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote override failed: %v", err))
 	}
 	d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 	promoted = true

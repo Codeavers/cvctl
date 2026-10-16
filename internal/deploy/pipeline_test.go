@@ -1754,6 +1754,107 @@ func TestDeployNilFactoryAfterDeployingFailPermanent(t *testing.T) {
 	}
 }
 
+type failOnceFS struct {
+	sys.FS
+	failPath string
+	failed   bool
+}
+
+func (f *failOnceFS) WriteFile(path string, data []byte, mode os.FileMode, owner sys.Owner) error {
+	if path == f.failPath && !f.failed {
+		f.failed = true
+		return errors.New("override disk full")
+	}
+	return f.FS.WriteFile(path, data, mode, owner)
+}
+
+func TestPromoteFailureOverrideWriteRestoresPreviousState(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	oldCommit := "0000000000000000000000000000000000000000"
+	oldDesired := state.Desired{
+		InfraCommit: oldCommit,
+		Digests: map[string]string{
+			"api": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		},
+	}
+
+	appEnvPath := filepath.Join(rig.instDir, "app.env")
+	prevAppEnv := "DATABASE_URL=postgres://main_db:secret@demo-dev-main-db:5432/main_db\nOLD_VAR=previous_value\n"
+	if err := rig.fs.WriteFile(appEnvPath, []byte(prevAppEnv), 0o640, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
+		t.Fatalf("write initial app.env: %v", err)
+	}
+
+	routePath := filepath.Join(rig.deployer.traefikDir(), "demo-dev.yml")
+	prevRoute := []byte("# previous route\n")
+	if err := rig.fs.WriteFile(routePath, prevRoute, 0o640, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
+		t.Fatalf("write initial route: %v", err)
+	}
+
+	st := &state.State{
+		Instance: "demo-dev",
+		Status:   state.StatusOK,
+		Current:  &oldDesired,
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	finalOverridePath := filepath.Join(rig.instDir, "compose.cvctl.yml")
+	fofs := &failOnceFS{
+		FS:       rig.fs,
+		failPath: finalOverridePath,
+	}
+	rig.deployer.FS = fofs
+
+	want := defaultDesired()
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusFailed {
+		t.Fatalf("expected StatusFailed, got %v", res.Status)
+	}
+	if !strings.Contains(res.Detail, "promote override failed: override disk full") {
+		t.Fatalf("expected Detail to contain promote override failure, got %q", res.Detail)
+	}
+	if !strings.Contains(res.Detail, "restored to") {
+		t.Fatalf("expected Detail to confirm restore succeeded, got %q", res.Detail)
+	}
+
+	stAfter, _ := rig.store.Load("demo-dev")
+	if stAfter.FailedHash != want.Hash() {
+		t.Fatalf("expected FailedHash to be set, got %q", stAfter.FailedHash)
+	}
+	if stAfter.Status != state.StatusFailed {
+		t.Fatalf("expected store status FAILED, got %v", stAfter.Status)
+	}
+
+	// Verify app.env was restored to previous content
+	currAppEnvBytes, err := rig.fs.ReadFile(appEnvPath)
+	if err != nil {
+		t.Fatalf("read restored app.env: %v", err)
+	}
+	if !strings.Contains(string(currAppEnvBytes), "OLD_VAR=previous_value") {
+		t.Fatalf("expected app.env to be restored to previous content containing OLD_VAR=previous_value, got %q", string(currAppEnvBytes))
+	}
+
+	// Verify route was restored
+	currRouteBytes, err := rig.fs.ReadFile(routePath)
+	if err != nil {
+		t.Fatalf("read restored route: %v", err)
+	}
+	if len(currRouteBytes) == 0 {
+		t.Fatalf("expected route file to exist and have content after restore")
+	}
+
+	// Verify checkout restored to oldCommit
+	lastCheckout := rig.repo.checkouts[len(rig.repo.checkouts)-1]
+	if lastCheckout != oldCommit {
+		t.Fatalf("expected checkout restored to %s, got %s", oldCommit, lastCheckout)
+	}
+}
+
+
 
 
 

@@ -68,11 +68,11 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 		AppEnvPath:  finalAppEnvPath,
 	}
 
-	overrideBytes, err := render.Override(p, dec, cat, renderOpts)
+	overrideBytes, err := d.renderOverride(p, dec, cat, renderOpts)
 	if err != nil {
 		return err
 	}
-	routeBytes, err := render.Traefik(p, dec, renderOpts)
+	routeBytes, err := d.renderTraefik(p, dec, renderOpts)
 	if err != nil {
 		return err
 	}
@@ -83,6 +83,8 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 		if err := fsys.WriteFile(finalAppEnvPath, instance.FormatEnv(appEnv), 0o640, deployOwner); err != nil {
 			return err
 		}
+	} else {
+		_ = fsys.Remove(finalAppEnvPath)
 	}
 	if routeBytes != nil {
 		if err := fsys.WriteFile(finalRoutePath, routeBytes, 0o640, deployOwner); err != nil {
