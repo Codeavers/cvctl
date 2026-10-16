@@ -154,7 +154,7 @@ func sanitizeName(s string) string {
 	return strings.Trim(res, "-")
 }
 
-func validateInstance(deployRoot, stateRoot, inst, env string) error {
+func ValidateInstance(deployRoot, stateRoot, inst, env string) error {
 	if len(inst) == 0 || len(inst) > 63 || !instanceNameRe.MatchString(inst) || !strings.HasSuffix(inst, "-"+env) {
 		return &output.Error{
 			Code:    "E_PROJECT_NAME_INVALID",
@@ -179,6 +179,23 @@ func validateInstance(deployRoot, stateRoot, inst, env string) error {
 		}
 	}
 	return nil
+}
+
+func ValidateInstanceName(deployRoot, stateRoot, inst string) error {
+	envName := ""
+	if strings.HasSuffix(inst, "-dev") {
+		envName = "dev"
+	} else if strings.HasSuffix(inst, "-prod") {
+		envName = "prod"
+	}
+	if envName == "" {
+		return &output.Error{
+			Code:    "E_PROJECT_NAME_INVALID",
+			Message: fmt.Sprintf("invalid instance name %q: must end with -dev or -prod", inst),
+			Hint:    "use --name with letters, digits and '-'",
+		}
+	}
+	return ValidateInstance(deployRoot, stateRoot, inst, envName)
 }
 
 func repoURLErr(url string) error {
@@ -530,7 +547,7 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	}
 
 	inst := DeriveInstanceName(repoURL, opts.Project, envName)
-	if err := validateInstance(e.deployRoot(), e.stateRoot(), inst, envName); err != nil {
+	if err := ValidateInstance(e.deployRoot(), e.stateRoot(), inst, envName); err != nil {
 		return nil, err
 	}
 
@@ -718,20 +735,7 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 }
 
 func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
-	envName := ""
-	if strings.HasSuffix(inst, "-dev") {
-		envName = "dev"
-	} else if strings.HasSuffix(inst, "-prod") {
-		envName = "prod"
-	}
-	if envName == "" {
-		return nil, &output.Error{
-			Code:    "E_PROJECT_NAME_INVALID",
-			Message: fmt.Sprintf("invalid instance name %q: must end with -dev or -prod", inst),
-			Hint:    "use --name with letters, digits and '-'",
-		}
-	}
-	if err := validateInstance(e.deployRoot(), e.stateRoot(), inst, envName); err != nil {
+	if err := ValidateInstanceName(e.deployRoot(), e.stateRoot(), inst); err != nil {
 		return nil, err
 	}
 
