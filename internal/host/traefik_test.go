@@ -183,7 +183,7 @@ func TestTraefikSecretsNotInCompose(t *testing.T) {
 
 	r.On("docker network inspect cvctl-edge", sys.Result{Stdout: []byte("[{}]\n"), ExitCode: 0})
 	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml ps --format json", sys.Result{Stdout: []byte(""), ExitCode: 0})
-	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d", sys.Result{ExitCode: 0})
+	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d --force-recreate", sys.Result{ExitCode: 0})
 	r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik-traefik-1", sys.Result{Stdout: []byte("healthy\n"), ExitCode: 0})
 
 	step := TraefikStep{PollInterval: time.Millisecond, PollTimeout: 10 * time.Millisecond}
@@ -241,19 +241,203 @@ func TestTraefikSecretsNotInCompose(t *testing.T) {
 	if string(cfBytes) != "CF_DNS_API_TOKEN="+cfToken+"\n" {
 		t.Fatalf("cloudflare traefik.env mismatch: got %q", string(cfBytes))
 	}
+}
 
-	// Switching challenge to http removes stale traefik.env.
-	cfg.AcmeChallenge = "http"
-	planHTTP, err := step.Check(context.Background(), env)
+func TestTraefikSwitchDNSToHTTPRemovesEnvAndRecreates(t *testing.T) {
+	r := &systest.Runner{}
+	fs := systest.NewFS()
+	_, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 	if err != nil {
-		t.Fatalf("Check (http) error: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := step.Apply(context.Background(), env, planHTTP); err != nil {
-		t.Fatalf("Apply (http) error: %v", err)
+
+	// Start with files rendered for route53 on disk, including traefik.env.
+	dnsCfg := &hostcfg.Config{
+		EdgeMode:      "edge",
+		AcmeEmail:     "acme@example.com",
+		AcmeChallenge: "route53",
 	}
-	if _, err := fs.Stat(traefikSecretsPath); err == nil {
-		t.Fatal("expected stale traefik.env to be removed when switching to http challenge")
+	staticDNS, err := renderTraefikStatic(dnsCfg)
+	if err != nil {
+		t.Fatal(err)
 	}
+	dynDNS, err := renderTraefikDynamic(dnsCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	composeDNS, err := renderTraefikCompose(dnsCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = fs.MkdirAll(traefikDir, 0o750, rootDeployOwner)
+	_ = fs.MkdirAll("/etc/traefik", 0o755, rootOwner)
+	_ = fs.MkdirAll("/etc/traefik/dynamic", 0o2775, deployerOwner)
+	_ = fs.MkdirAll("/etc/cvctl/secrets", 0o750, rootDeployOwner)
+	_ = fs.WriteFile(traefikStaticPath, staticDNS, 0o640, rootDeployOwner)
+	_ = fs.WriteFile(traefikDynamicPath, dynDNS, 0o640, rootDeployOwner)
+	_ = fs.WriteFile(traefikComposePath, composeDNS, 0o640, rootDeployOwner)
+	_ = fs.WriteFile(traefikSecretsPath, []byte("AWS_ACCESS_KEY_ID=AKIA123\nAWS_REGION=us-east-1\nAWS_SECRET_ACCESS_KEY=secret\n"), 0o640, rootDeployOwner)
+
+	// Switch host config to HTTP challenge.
+	httpCfg := &hostcfg.Config{
+		EdgeMode:      "edge",
+		AcmeEmail:     "acme@example.com",
+		AcmeChallenge: "http",
+	}
+	env := &Env{Run: r, FS: fs, Cfg: httpCfg, Secrets: sec, EUID: 0}
+
+	r.On("docker network inspect cvctl-edge", sys.Result{Stdout: []byte("[{}]\n"), ExitCode: 0})
+	psJSON := `{"Service":"traefik","State":"running","Image":"` + traefikImage + `"}` + "\n"
+	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml ps --format json", sys.Result{
+		Stdout:   []byte(psJSON),
+		ExitCode: 0,
+	})
+	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d --force-recreate", sys.Result{ExitCode: 0})
+	r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik-traefik-1", sys.Result{Stdout: []byte("healthy\n"), ExitCode: 0})
+
+	step := TraefikStep{PollInterval: time.Millisecond, PollTimeout: 10 * time.Millisecond}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Check error: %v", err)
+	}
+	wantRemove := "remove " + traefikSecretsPath
+	foundRemove := false
+	for _, c := range plan.Changes {
+		if c == wantRemove {
+			foundRemove = true
+			break
+		}
+	}
+	if !foundRemove {
+		t.Fatalf("expected Check to report %q, got %v", wantRemove, plan.Changes)
+	}
+
+	if _, err := step.Apply(context.Background(), env, plan); err != nil {
+		t.Fatalf("Apply error: %v", err)
+	}
+	if _, err := fs.Stat(traefikSecretsPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected %s to be removed, stat err=%v", traefikSecretsPath, err)
+	}
+
+	recreated := false
+	for _, c := range r.Calls {
+		if c.String() == "docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d --force-recreate" {
+			recreated = true
+		}
+		if c.String() == "docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d" {
+			t.Fatal("expected --force-recreate when removing traefik.env, but plain up -d was called")
+		}
+	}
+	if !recreated {
+		t.Fatal("expected docker compose up -d --force-recreate to be called")
+	}
+}
+
+func TestTraefikRecreateOnlyWhenStaticOrEnvChanges(t *testing.T) {
+	cfg := &hostcfg.Config{
+		EdgeMode:      "edge",
+		AcmeEmail:     "acme@example.com",
+		AcmeChallenge: "http",
+	}
+	staticBytes, err := renderTraefikStatic(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dynBytes, err := renderTraefikDynamic(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	composeBytes, err := renderTraefikCompose(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	psJSON := `{"Service":"traefik","State":"running","Image":"` + traefikImage + `"}` + "\n"
+
+	t.Run("traefik.yml changed uses --force-recreate", func(t *testing.T) {
+		r := &systest.Runner{}
+		fs := systest.NewFS()
+		_, sec, _ := hostcfg.Load(fs, "/etc/cvctl")
+		env := &Env{Run: r, FS: fs, Cfg: cfg, Secrets: sec, EUID: 0}
+
+		_ = fs.MkdirAll(traefikDir, 0o750, rootDeployOwner)
+		_ = fs.MkdirAll("/etc/traefik", 0o755, rootOwner)
+		_ = fs.MkdirAll("/etc/traefik/dynamic", 0o2775, deployerOwner)
+		_ = fs.WriteFile(traefikStaticPath, []byte("# stale static config\n"), 0o640, rootDeployOwner)
+		_ = fs.WriteFile(traefikDynamicPath, dynBytes, 0o640, rootDeployOwner)
+		_ = fs.WriteFile(traefikComposePath, composeBytes, 0o640, rootDeployOwner)
+
+		r.On("docker network inspect cvctl-edge", sys.Result{Stdout: []byte("[{}]\n"), ExitCode: 0})
+		r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml ps --format json", sys.Result{Stdout: []byte(psJSON), ExitCode: 0})
+		r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d --force-recreate", sys.Result{ExitCode: 0})
+		r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik-traefik-1", sys.Result{Stdout: []byte("healthy\n"), ExitCode: 0})
+
+		step := TraefikStep{PollInterval: time.Millisecond, PollTimeout: 10 * time.Millisecond}
+		plan, err := step.Check(context.Background(), env)
+		if err != nil {
+			t.Fatalf("Check error: %v", err)
+		}
+		if len(plan.Changes) != 1 || plan.Changes[0] != "configure "+traefikStaticPath {
+			t.Fatalf("expected only static config change, got %v", plan.Changes)
+		}
+		if _, err := step.Apply(context.Background(), env, plan); err != nil {
+			t.Fatalf("Apply error: %v", err)
+		}
+		recreated := false
+		for _, c := range r.Calls {
+			if c.String() == "docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d --force-recreate" {
+				recreated = true
+			}
+			if c.String() == "docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d" {
+				t.Fatal("expected --force-recreate when traefik.yml changed, got plain up -d")
+			}
+		}
+		if !recreated {
+			t.Fatal("expected docker compose up -d --force-recreate to be called")
+		}
+	})
+
+	t.Run("only _cvctl.yml changed does not use --force-recreate", func(t *testing.T) {
+		r := &systest.Runner{}
+		fs := systest.NewFS()
+		_, sec, _ := hostcfg.Load(fs, "/etc/cvctl")
+		env := &Env{Run: r, FS: fs, Cfg: cfg, Secrets: sec, EUID: 0}
+
+		_ = fs.MkdirAll(traefikDir, 0o750, rootDeployOwner)
+		_ = fs.MkdirAll("/etc/traefik", 0o755, rootOwner)
+		_ = fs.MkdirAll("/etc/traefik/dynamic", 0o2775, deployerOwner)
+		_ = fs.WriteFile(traefikStaticPath, staticBytes, 0o640, rootDeployOwner)
+		_ = fs.WriteFile(traefikDynamicPath, []byte("# stale dynamic config\n"), 0o640, rootDeployOwner)
+		_ = fs.WriteFile(traefikComposePath, composeBytes, 0o640, rootDeployOwner)
+
+		r.On("docker network inspect cvctl-edge", sys.Result{Stdout: []byte("[{}]\n"), ExitCode: 0})
+		r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml ps --format json", sys.Result{Stdout: []byte(psJSON), ExitCode: 0})
+		r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d", sys.Result{ExitCode: 0})
+		r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik-traefik-1", sys.Result{Stdout: []byte("healthy\n"), ExitCode: 0})
+
+		step := TraefikStep{PollInterval: time.Millisecond, PollTimeout: 10 * time.Millisecond}
+		plan, err := step.Check(context.Background(), env)
+		if err != nil {
+			t.Fatalf("Check error: %v", err)
+		}
+		if len(plan.Changes) != 1 || plan.Changes[0] != "configure "+traefikDynamicPath {
+			t.Fatalf("expected only dynamic config change, got %v", plan.Changes)
+		}
+		if _, err := step.Apply(context.Background(), env, plan); err != nil {
+			t.Fatalf("Apply error: %v", err)
+		}
+		plainUp := false
+		for _, c := range r.Calls {
+			if c.String() == "docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d" {
+				plainUp = true
+			}
+			if c.String() == "docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d --force-recreate" {
+				t.Fatal("did not expect --force-recreate when only _cvctl.yml changed")
+			}
+		}
+		if !plainUp {
+			t.Fatal("expected plain docker compose up -d to be called")
+		}
+	})
 }
 
 func TestTraefikUnchanged(t *testing.T) {
@@ -329,6 +513,7 @@ func TestTraefikCreatesNetworkOnce(t *testing.T) {
 	r.On("docker network inspect cvctl-edge", sys.Result{ExitCode: 1, Stderr: []byte("Error: No such network: cvctl-edge\n")})
 	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml ps --format json", sys.Result{Stdout: []byte(""), ExitCode: 0})
 	r.On("docker network create cvctl-edge", sys.Result{Stdout: []byte("net-id\n"), ExitCode: 0})
+	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d --force-recreate", sys.Result{ExitCode: 0})
 	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d", sys.Result{ExitCode: 0})
 	r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik-traefik-1", sys.Result{Stdout: []byte("healthy\n"), ExitCode: 0})
 
@@ -399,7 +584,7 @@ func TestTraefikUnhealthy(t *testing.T) {
 
 	r.On("docker network inspect cvctl-edge", sys.Result{Stdout: []byte("[{}]\n"), ExitCode: 0})
 	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml ps --format json", sys.Result{Stdout: []byte(""), ExitCode: 0})
-	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d", sys.Result{ExitCode: 0})
+	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d --force-recreate", sys.Result{ExitCode: 0})
 	r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik-traefik-1", sys.Result{Stdout: []byte("starting\n"), ExitCode: 0})
 	r.On("docker logs --tail 20 cvctl-traefik-traefik-1", sys.Result{
 		Stderr:   []byte("ERR command traefik error: port 80 already in use\n"),
@@ -442,7 +627,7 @@ func TestTraefikCommandFailure(t *testing.T) {
 
 	r.On("docker network inspect cvctl-edge", sys.Result{Stdout: []byte("[{}]\n"), ExitCode: 0})
 	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml ps --format json", sys.Result{Stdout: []byte(""), ExitCode: 0})
-	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d", sys.Result{
+	r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d --force-recreate", sys.Result{
 		Stderr:   []byte("driver failed programming external connectivity\n"),
 		ExitCode: 1,
 	})
@@ -467,7 +652,7 @@ func TestTraefikCommandFailure(t *testing.T) {
 	if !strings.Contains(oe.Message, "driver failed programming external connectivity") {
 		t.Fatalf("expected stderr in message, got %q", oe.Message)
 	}
-	if !strings.Contains(oe.Hint, "docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d") {
+	if !strings.Contains(oe.Hint, "docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d --force-recreate") {
 		t.Fatalf("expected command in hint, got %q", oe.Hint)
 	}
 }

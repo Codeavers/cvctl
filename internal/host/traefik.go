@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"slices"
 	"strings"
 	"time"
 
@@ -152,7 +151,12 @@ func (s TraefikStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 		return "", err
 	}
 
-	if slices.Contains(p.Changes, "create network "+EdgeNetwork) {
+	changeSet := make(map[string]bool, len(p.Changes))
+	for _, c := range p.Changes {
+		changeSet[c] = true
+	}
+
+	if changeSet["create network "+EdgeNetwork] {
 		if err := runTraefikCmd(ctx, e, sys.Cmd{
 			Name: "docker",
 			Args: []string{"network", "create", EdgeNetwork},
@@ -161,41 +165,55 @@ func (s TraefikStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 		}
 	}
 
-	if err := e.FS.MkdirAll(traefikDir, 0o750, rootDeployOwner); err != nil {
-		return "", traefikFSErr(traefikDir, err)
+	if changeSet["configure "+traefikStaticPath] || changeSet["configure "+traefikComposePath] {
+		if err := e.FS.MkdirAll(traefikDir, 0o750, rootDeployOwner); err != nil {
+			return "", traefikFSErr(traefikDir, err)
+		}
 	}
-	if err := e.FS.WriteFile(traefikStaticPath, rf.staticBytes, 0o640, rootDeployOwner); err != nil {
-		return "", traefikFSErr(traefikStaticPath, err)
+	if changeSet["configure "+traefikStaticPath] {
+		if err := e.FS.WriteFile(traefikStaticPath, rf.staticBytes, 0o640, rootDeployOwner); err != nil {
+			return "", traefikFSErr(traefikStaticPath, err)
+		}
 	}
-	if err := e.FS.WriteFile(traefikComposePath, rf.composeBytes, 0o640, rootDeployOwner); err != nil {
-		return "", traefikFSErr(traefikComposePath, err)
-	}
-
-	// Ensure /etc/traefik is 0755 root:root so deployer can traverse into /etc/traefik/dynamic;
-	// do not touch /etc/traefik/dynamic itself (owned by deployer:deploy 02775 from accounts step).
-	if err := e.FS.MkdirAll("/etc/traefik", 0o755, rootOwner); err != nil {
-		return "", traefikFSErr("/etc/traefik", err)
-	}
-	if err := e.FS.WriteFile(traefikDynamicPath, rf.dynamicBytes, 0o640, rootDeployOwner); err != nil {
-		return "", traefikFSErr(traefikDynamicPath, err)
+	if changeSet["configure "+traefikComposePath] {
+		if err := e.FS.WriteFile(traefikComposePath, rf.composeBytes, 0o640, rootDeployOwner); err != nil {
+			return "", traefikFSErr(traefikComposePath, err)
+		}
 	}
 
-	if rf.hasEnv {
+	if changeSet["configure "+traefikDynamicPath] {
+		// Ensure /etc/traefik is 0755 root:root so deployer can traverse into /etc/traefik/dynamic;
+		// do not touch /etc/traefik/dynamic itself (owned by deployer:deploy 02775 from accounts step).
+		if err := e.FS.MkdirAll("/etc/traefik", 0o755, rootOwner); err != nil {
+			return "", traefikFSErr("/etc/traefik", err)
+		}
+		if err := e.FS.WriteFile(traefikDynamicPath, rf.dynamicBytes, 0o640, rootDeployOwner); err != nil {
+			return "", traefikFSErr(traefikDynamicPath, err)
+		}
+	}
+
+	if changeSet["configure "+traefikSecretsPath] {
 		if err := e.FS.MkdirAll("/etc/cvctl/secrets", 0o750, rootDeployOwner); err != nil {
 			return "", traefikFSErr("/etc/cvctl/secrets", err)
 		}
 		if err := e.FS.WriteFile(traefikSecretsPath, rf.envBytes, 0o640, rootDeployOwner); err != nil {
 			return "", traefikFSErr(traefikSecretsPath, err)
 		}
-	} else {
+	} else if changeSet["remove "+traefikSecretsPath] {
 		if err := e.FS.Remove(traefikSecretsPath); err != nil {
 			return "", traefikFSErr(traefikSecretsPath, err)
 		}
 	}
 
+	upArgs := []string{"compose", "-p", traefikProject, "-f", traefikComposePath, "up", "-d"}
+	// traefik.yml is bind-mounted as a single file (atomic replacement swaps its inode)
+	// and static config or env changes require restarting the container.
+	if changeSet["configure "+traefikStaticPath] || changeSet["configure "+traefikSecretsPath] || changeSet["remove "+traefikSecretsPath] {
+		upArgs = append(upArgs, "--force-recreate")
+	}
 	if err := runTraefikCmd(ctx, e, sys.Cmd{
 		Name: "docker",
-		Args: []string{"compose", "-p", traefikProject, "-f", traefikComposePath, "up", "-d"},
+		Args: upArgs,
 	}); err != nil {
 		return "", err
 	}
