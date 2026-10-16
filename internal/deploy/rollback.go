@@ -15,7 +15,7 @@ import (
 )
 
 // executeSwap performs checkout, render, promotion, Up, and health check for target state.
-func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.Desired, appEnv map[string]string) error {
+func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.Desired, appEnv map[string]string, appEnvAbsent bool) error {
 	if d.Repo != nil {
 		if err := d.Repo.Checkout(ctx, target.InfraCommit); err != nil {
 			return err
@@ -79,12 +79,12 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 
 	fsys := d.fs()
 	// Promote order: app.env -> route -> override
-	if len(appEnv) > 0 {
+	if appEnvAbsent {
+		_ = fsys.Remove(finalAppEnvPath)
+	} else if len(appEnv) > 0 {
 		if err := fsys.WriteFile(finalAppEnvPath, instance.FormatEnv(appEnv), 0o640, deployOwner); err != nil {
 			return err
 		}
-	} else {
-		_ = fsys.Remove(finalAppEnvPath)
 	}
 	if routeBytes != nil {
 		if err := fsys.WriteFile(finalRoutePath, routeBytes, 0o640, deployOwner); err != nil {
@@ -157,12 +157,12 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 
 	instDir := filepath.Join(d.deployRoot(), inst)
 	finalAppEnvPath := filepath.Join(instDir, "app.env")
-	existingEnv, err := d.readAppEnv(finalAppEnvPath)
+	existingEnv, _, err := d.readAppEnv(finalAppEnvPath)
 	if err != nil {
-		existingEnv = map[string]string{}
+		return Result{}, err
 	}
 
-	swapErr := d.executeSwap(ctx, inst, target, existingEnv)
+	swapErr := d.executeSwap(ctx, inst, target, existingEnv, false)
 	if swapErr != nil {
 		st.Status = state.StatusFailed
 		st.RollbackFailed = true

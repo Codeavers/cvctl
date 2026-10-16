@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1785,7 +1786,29 @@ func TestPromoteFailureOverrideWriteRestoresPreviousState(t *testing.T) {
 	}
 
 	routePath := filepath.Join(rig.deployer.traefikDir(), "demo-dev.yml")
-	prevRoute := []byte("# previous route\n")
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatalf("kinds.Load: %v", err)
+	}
+	p, err := contract.Load(rig.infraDir, cat)
+	if err != nil {
+		t.Fatalf("contract.Load: %v", err)
+	}
+	dec, err := instance.Read(filepath.Join(rig.instDir, "cvctl.env"), p)
+	if err != nil {
+		t.Fatalf("instance.Read: %v", err)
+	}
+	for k, v := range oldDesired.Digests {
+		dec.Digests[k] = v
+	}
+	prevRoute, err := render.Traefik(p, dec, render.Options{
+		InstanceDir: rig.instDir,
+		Edge:        "edge",
+		AppEnvPath:  appEnvPath,
+	})
+	if err != nil {
+		t.Fatalf("render.Traefik: %v", err)
+	}
 	if err := rig.fs.WriteFile(routePath, prevRoute, 0o640, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
 		t.Fatalf("write initial route: %v", err)
 	}
@@ -1838,18 +1861,397 @@ func TestPromoteFailureOverrideWriteRestoresPreviousState(t *testing.T) {
 		t.Fatalf("expected app.env to be restored to previous content containing OLD_VAR=previous_value, got %q", string(currAppEnvBytes))
 	}
 
-	// Verify route was restored
+	// Verify route was restored exactly
 	currRouteBytes, err := rig.fs.ReadFile(routePath)
 	if err != nil {
 		t.Fatalf("read restored route: %v", err)
 	}
-	if len(currRouteBytes) == 0 {
-		t.Fatalf("expected route file to exist and have content after restore")
+	if !bytes.Equal(currRouteBytes, prevRoute) {
+		t.Fatalf("expected route file content to equal previous route content exactly:\ngot:\n%s\nwant:\n%s", string(currRouteBytes), string(prevRoute))
+	}
+
+	// Verify executeSwap ran (e.g. compose fake saw an Up bound to the final override for the previous digests)
+	var foundSwapUp bool
+	for _, inv := range rig.compose.invocations {
+		if inv.op == "up" && inv.override == finalOverridePath {
+			foundSwapUp = true
+			break
+		}
+	}
+	if !foundSwapUp {
+		t.Fatalf("expected executeSwap to run Compose.Up on %s", finalOverridePath)
+	}
+
+	currOverrideBytes, err := rig.fs.ReadFile(finalOverridePath)
+	if err != nil {
+		t.Fatalf("read restored override: %v", err)
+	}
+	if !strings.Contains(string(currOverrideBytes), oldDesired.Digests["api"]) {
+		t.Fatalf("expected restored override to contain old digest %s, got %s", oldDesired.Digests["api"], string(currOverrideBytes))
 	}
 
 	// Verify checkout restored to oldCommit
 	lastCheckout := rig.repo.checkouts[len(rig.repo.checkouts)-1]
 	if lastCheckout != oldCommit {
 		t.Fatalf("expected checkout restored to %s, got %s", oldCommit, lastCheckout)
+	}
+}
+
+type failCountingFS struct {
+	sys.FS
+	targetPath  string
+	writeCount  int
+	failOnCount int
+}
+
+func (f *failCountingFS) WriteFile(path string, data []byte, mode os.FileMode, o sys.Owner) error {
+	if path == f.targetPath {
+		f.writeCount++
+		if f.writeCount == f.failOnCount {
+			return errors.New("state write error on auto-rollback save")
+		}
+	}
+	return f.FS.WriteFile(path, data, mode, o)
+}
+
+func TestRollbackAppEnvReadErrorAbortsTouchingNothing(t *testing.T) {
+	t.Run("permission error", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		oldDesired := state.Desired{
+			InfraCommit: "0000000000000000000000000000000000000000",
+			Digests: map[string]string{
+				"api": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+			},
+		}
+		st := &state.State{
+			Instance: "demo-dev",
+			Status:   state.StatusOK,
+			Current:  &oldDesired,
+			Previous: &oldDesired,
+		}
+		if err := rig.store.Save(st); err != nil {
+			t.Fatalf("store.Save: %v", err)
+		}
+
+		appEnvPath := filepath.Join(rig.instDir, "app.env")
+		efs := &errorFS{
+			FS: rig.fs,
+			failReadFile: map[string]error{
+				appEnvPath: errors.New("permission denied"),
+			},
+		}
+		rig.deployer.FS = efs
+
+		_, err := rig.deployer.Rollback(context.Background(), "demo-dev", nil, "operator")
+		if err == nil {
+			t.Fatalf("expected error from Rollback, got nil")
+		}
+		var outErr *output.Error
+		if !errors.As(err, &outErr) || outErr.Code != "E_APPENV_READ" {
+			t.Fatalf("expected E_APPENV_READ error, got %v", err)
+		}
+		if len(rig.repo.checkouts) > 0 {
+			t.Fatalf("expected no checkouts, got %v", rig.repo.checkouts)
+		}
+		if rig.compose.upCount > 0 {
+			t.Fatalf("expected no Up calls, got %d", rig.compose.upCount)
+		}
+		if len(rig.notifier.messages) > 0 {
+			t.Fatalf("expected no notifications, got %v", rig.notifier.messages)
+		}
+		stAfter, _ := rig.store.Load("demo-dev")
+		if stAfter.Status != state.StatusOK {
+			t.Fatalf("expected store status unchanged, got %v", stAfter.Status)
+		}
+	})
+
+	t.Run("parse error", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		oldDesired := state.Desired{
+			InfraCommit: "0000000000000000000000000000000000000000",
+			Digests: map[string]string{
+				"api": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+			},
+		}
+		st := &state.State{
+			Instance: "demo-dev",
+			Status:   state.StatusOK,
+			Current:  &oldDesired,
+			Previous: &oldDesired,
+		}
+		if err := rig.store.Save(st); err != nil {
+			t.Fatalf("store.Save: %v", err)
+		}
+
+		appEnvPath := filepath.Join(rig.instDir, "app.env")
+		if err := rig.fs.WriteFile(appEnvPath, []byte("FOO=\"unclosed quote\n"), 0o640, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
+			t.Fatalf("write invalid app.env: %v", err)
+		}
+
+		_, err := rig.deployer.Rollback(context.Background(), "demo-dev", nil, "operator")
+		if err == nil {
+			t.Fatalf("expected error from Rollback, got nil")
+		}
+		var outErr *output.Error
+		if !errors.As(err, &outErr) || outErr.Code != "E_APPENV_READ" {
+			t.Fatalf("expected E_APPENV_READ error, got %v", err)
+		}
+		if len(rig.repo.checkouts) > 0 {
+			t.Fatalf("expected no checkouts, got %v", rig.repo.checkouts)
+		}
+		if rig.compose.upCount > 0 {
+			t.Fatalf("expected no Up calls, got %d", rig.compose.upCount)
+		}
+		if len(rig.notifier.messages) > 0 {
+			t.Fatalf("expected no notifications, got %v", rig.notifier.messages)
+		}
+		stAfter, _ := rig.store.Load("demo-dev")
+		if stAfter.Status != state.StatusOK {
+			t.Fatalf("expected store status unchanged, got %v", stAfter.Status)
+		}
+	})
+}
+
+func TestExecuteSwapEmptyEnvAppEnvUntouched(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	target := &state.Desired{
+		InfraCommit: "0000000000000000000000000000000000000000",
+		Digests: map[string]string{
+			"api": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		},
+	}
+	appEnvPath := filepath.Join(rig.instDir, "app.env")
+	initialContent := "EXISTING_KEY=existing_val\n"
+	if err := rig.fs.WriteFile(appEnvPath, []byte(initialContent), 0o640, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
+		t.Fatalf("write app.env: %v", err)
+	}
+
+	err := rig.deployer.executeSwap(context.Background(), "demo-dev", target, map[string]string{}, false)
+	if err != nil {
+		t.Fatalf("executeSwap: %v", err)
+	}
+
+	content, err := rig.fs.ReadFile(appEnvPath)
+	if err != nil {
+		t.Fatalf("read app.env: %v", err)
+	}
+	if string(content) != initialContent {
+		t.Fatalf("expected app.env untouched (%q), got %q", initialContent, string(content))
+	}
+}
+
+func TestPromoteFailureNoPriorAppEnvRemovesAppEnv(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	oldCommit := "0000000000000000000000000000000000000000"
+	oldDesired := state.Desired{
+		InfraCommit: oldCommit,
+		Digests: map[string]string{
+			"api": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		},
+	}
+	st := &state.State{
+		Instance: "demo-dev",
+		Status:   state.StatusOK,
+		Current:  &oldDesired,
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	appEnvPath := filepath.Join(rig.instDir, "app.env")
+	_ = rig.fs.Remove(appEnvPath)
+
+	finalOverridePath := filepath.Join(rig.instDir, "compose.cvctl.yml")
+	fofs := &failOnceFS{
+		FS:       rig.fs,
+		failPath: finalOverridePath,
+	}
+	rig.deployer.FS = fofs
+
+	want := defaultDesired()
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusFailed {
+		t.Fatalf("expected StatusFailed, got %v", res.Status)
+	}
+
+	_, err = rig.fs.ReadFile(appEnvPath)
+	if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, filepath.SkipDir) && err == nil {
+		t.Fatalf("expected app.env to be removed when absent prior to deploy, but it exists")
+	}
+}
+
+func TestPromoteFailureWithPriorAppEnvRestoresPriorContent(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	oldCommit := "0000000000000000000000000000000000000000"
+	oldDesired := state.Desired{
+		InfraCommit: oldCommit,
+		Digests: map[string]string{
+			"api": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		},
+	}
+	st := &state.State{
+		Instance: "demo-dev",
+		Status:   state.StatusOK,
+		Current:  &oldDesired,
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	appEnvPath := filepath.Join(rig.instDir, "app.env")
+	priorContent := "PRIOR_KEY=prior_value_12345\nDATABASE_URL=postgres://main_db:secret@demo-dev-main-db:5432/main_db\n"
+	if err := rig.fs.WriteFile(appEnvPath, []byte(priorContent), 0o640, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
+		t.Fatalf("write initial app.env: %v", err)
+	}
+
+	finalOverridePath := filepath.Join(rig.instDir, "compose.cvctl.yml")
+	fofs := &failOnceFS{
+		FS:       rig.fs,
+		failPath: finalOverridePath,
+	}
+	rig.deployer.FS = fofs
+
+	want := defaultDesired()
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusFailed {
+		t.Fatalf("expected StatusFailed, got %v", res.Status)
+	}
+
+	currContent, err := rig.fs.ReadFile(appEnvPath)
+	if err != nil {
+		t.Fatalf("read restored app.env: %v", err)
+	}
+	if !strings.Contains(string(currContent), "PRIOR_KEY=prior_value_12345") {
+		t.Fatalf("expected app.env to be restored to prior content, got %q", string(currContent))
+	}
+}
+
+func TestHealthFailureRestoresPreDeployAppEnv(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	oldCommit := "0000000000000000000000000000000000000000"
+	oldDesired := state.Desired{
+		InfraCommit: oldCommit,
+		Digests: map[string]string{
+			"api": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		},
+	}
+	st := &state.State{
+		Instance: "demo-dev",
+		Status:   state.StatusOK,
+		Current:  &oldDesired,
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	appEnvPath := filepath.Join(rig.instDir, "app.env")
+	preDeployContent := "DATABASE_URL=postgres://main_db:secret@demo-dev-main-db:5432/main_db\nPRE_VAR=pre_value_12345\n"
+	if err := rig.fs.WriteFile(appEnvPath, []byte(preDeployContent), 0o640, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
+		t.Fatalf("write initial app.env: %v", err)
+	}
+
+	envSpecContent := `vars:
+  DATABASE_URL: { source: service, service: main-db }
+  NEW_VAR: { source: fixed, value: "resolved_new_val" }
+`
+	if err := os.WriteFile(filepath.Join(rig.infraDir, "env.spec.yml"), []byte(envSpecContent), 0o644); err != nil {
+		t.Fatalf("write env.spec.yml: %v", err)
+	}
+
+	cvctlEnvPath := filepath.Join(rig.instDir, "cvctl.env")
+	currCvctlEnv, _ := os.ReadFile(cvctlEnvPath)
+	_ = os.WriteFile(cvctlEnvPath, append(currCvctlEnv, []byte("CVCTL_ENV_NEW_VAR=resolved_new_val\n")...), 0o644)
+
+	rig.deployer.Health = func(ctx context.Context, inst, override, envFile string) error {
+		if rig.compose.upCount == 1 {
+			return errors.New("unhealthy container")
+		}
+		return nil
+	}
+
+	want := defaultDesired()
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusFailed {
+		t.Fatalf("expected StatusFailed after health failure, got %v", res.Status)
+	}
+
+	restoredAppEnvBytes, err := rig.fs.ReadFile(appEnvPath)
+	if err != nil {
+		t.Fatalf("read app.env after auto-rollback: %v", err)
+	}
+	restoredStr := string(restoredAppEnvBytes)
+	if !strings.Contains(restoredStr, "PRE_VAR=pre_value_12345") {
+		t.Fatalf("expected restored app.env to contain pre-deploy variable, got %q", restoredStr)
+	}
+	if strings.Contains(restoredStr, "NEW_VAR=resolved_new_val") {
+		t.Fatalf("expected restored app.env to NOT contain newly resolved variable, got %q", restoredStr)
+	}
+}
+
+func TestAutoRollbackSuccessSaveFailureStillNotifies(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	oldCommit := "0000000000000000000000000000000000000000"
+	oldDesired := state.Desired{
+		InfraCommit: oldCommit,
+		Digests: map[string]string{
+			"api": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		},
+	}
+	st := &state.State{
+		Instance: "demo-dev",
+		Status:   state.StatusOK,
+		Current:  &oldDesired,
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	rig.deployer.Health = func(ctx context.Context, inst, override, envFile string) error {
+		if rig.compose.upCount == 1 {
+			return errors.New("health check failure")
+		}
+		return nil
+	}
+
+	stateDir := filepath.Join(rig.tempDir, "state")
+	statePath := filepath.Join(stateDir, "demo-dev", "state.json")
+	fcfs := &failCountingFS{
+		FS:          rig.fs,
+		targetPath:  statePath,
+		failOnCount: 2, // 1st is DEPLOYING, 2nd is post-rollback save
+	}
+	rig.deployer.FS = fcfs
+	rig.deployer.Store = state.NewStore(fcfs, stateDir)
+
+	want := defaultDesired()
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err == nil {
+		t.Fatalf("expected error from Deploy when Save fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "state write error on auto-rollback save") {
+		t.Fatalf("expected error to contain state write error on auto-rollback save, got %v", err)
+	}
+	if res.Status != state.StatusFailed {
+		t.Fatalf("expected res.Status = StatusFailed, got %v", res.Status)
+	}
+
+	foundFailNotif := false
+	for _, m := range rig.notifier.messages {
+		if m.Level == "error" && strings.Contains(m.Title, "demo-dev deploy FAILED") {
+			foundFailNotif = true
+			break
+		}
+	}
+	if !foundFailNotif {
+		t.Fatalf("expected deploy FAILED notification sent, got %v", rig.notifier.messages)
 	}
 }

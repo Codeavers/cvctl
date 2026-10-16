@@ -162,13 +162,13 @@ func (d *Deployer) hostName() string {
 	return ""
 }
 
-func (d *Deployer) readAppEnv(appEnvPath string) (map[string]string, error) {
+func (d *Deployer) readAppEnv(appEnvPath string) (map[string]string, bool, error) {
 	data, err := d.fs().ReadFile(appEnvPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return map[string]string{}, nil
+			return map[string]string{}, true, nil
 		}
-		return nil, &output.Error{
+		return nil, false, &output.Error{
 			Code:    "E_APPENV_READ",
 			Message: fmt.Sprintf("cannot read %s: %v", appEnvPath, err),
 			Hint:    "check file permissions on app.env",
@@ -176,13 +176,13 @@ func (d *Deployer) readAppEnv(appEnvPath string) (map[string]string, error) {
 	}
 	vals, err := godotenv.Unmarshal(string(data))
 	if err != nil {
-		return nil, &output.Error{
+		return nil, false, &output.Error{
 			Code:    "E_APPENV_READ",
 			Message: fmt.Sprintf("cannot parse %s: %v", appEnvPath, err),
 			Hint:    "fix syntax in app.env",
 		}
 	}
-	return vals, nil
+	return vals, false, nil
 }
 
 func (d *Deployer) cleanupStaging(stagingDir, override, appEnv, route string) {
@@ -306,11 +306,11 @@ func (d *Deployer) failTransient(ctx context.Context, inst string, st *state.Sta
 	return res, errors.Join(errs...)
 }
 
-func (d *Deployer) handlePromoteFailure(ctx context.Context, inst string, st *state.State, want state.Desired, deployID, actor string, now time.Time, existingEnv, resEnvVals map[string]string, stagingDir, stagingOverride, stagingAppEnv, stagingRoute, failedMsg string) (Result, error) {
+func (d *Deployer) handlePromoteFailure(ctx context.Context, inst string, st *state.State, want state.Desired, deployID, actor string, now time.Time, existingEnv, resEnvVals map[string]string, appEnvAbsent bool, stagingDir, stagingOverride, stagingAppEnv, stagingRoute, failedMsg string) (Result, error) {
 	d.cleanupStaging(stagingDir, stagingOverride, stagingAppEnv, stagingRoute)
 	restoreMsg := ""
 	if st.Current != nil {
-		if rErr := d.executeSwap(ctx, inst, st.Current, existingEnv); rErr != nil {
+		if rErr := d.executeSwap(ctx, inst, st.Current, existingEnv, appEnvAbsent); rErr != nil {
 			restoreMsg = fmt.Sprintf("; restore to %s failed: %v", commitShort(st.Current.InfraCommit), rErr)
 		} else {
 			restoreMsg = fmt.Sprintf("; restored to %s", commitShort(st.Current.InfraCommit))
@@ -476,7 +476,7 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 
 	// Step 3: ServiceVars -> Resolve with current app.env
 	finalAppEnvPath := filepath.Join(instDir, "app.env")
-	existingEnv, err := d.readAppEnv(finalAppEnvPath)
+	existingEnv, appEnvAbsent, err := d.readAppEnv(finalAppEnvPath)
 	if err != nil {
 		return Result{}, err
 	}
@@ -661,17 +661,17 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 
 	// Step 8: Promote staging -> final (order: app.env -> route -> override)
 	if err := fsys.WriteFile(finalAppEnvPath, appEnvBytes, 0o640, deployOwner); err != nil {
-		return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, existingEnv, resEnv.Values, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote app.env failed: %v", err))
+		return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, existingEnv, resEnv.Values, appEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote app.env failed: %v", err))
 	}
 	if routeBytes != nil {
 		if err := fsys.WriteFile(finalRoutePath, routeBytes, 0o640, deployOwner); err != nil {
-			return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, existingEnv, resEnv.Values, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote route failed: %v", err))
+			return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, existingEnv, resEnv.Values, appEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote route failed: %v", err))
 		}
 	} else {
 		_ = fsys.Remove(finalRoutePath)
 	}
 	if err := fsys.WriteFile(finalOverridePath, finalOverrideBytes, 0o640, deployOwner); err != nil {
-		return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, existingEnv, resEnv.Values, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote override failed: %v", err))
+		return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, existingEnv, resEnv.Values, appEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote override failed: %v", err))
 	}
 	d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 	promoted = true
@@ -797,7 +797,7 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 	}
 
 	rollbackTarget := *st.Current
-	rollbackErr := d.executeSwap(ctx, inst, &rollbackTarget, resEnv.Values)
+	rollbackErr := d.executeSwap(ctx, inst, &rollbackTarget, existingEnv, false)
 
 	st.Status = state.StatusFailed
 	st.FailedHash = want.Hash()
@@ -840,9 +840,6 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 	}
 
 	st.RollbackFailed = false
-	if err := d.Store.Save(st); err != nil {
-		return Result{}, err
-	}
 
 	errText := redactedLogs
 	if preHooksRan && dec.Env == "prod" {
@@ -862,6 +859,23 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 		errText += fmt.Sprintf("\nmigrations ran; restore point %s: cvctl db restore %s %s --to %s", deployID, inst, dataSvc, deployID)
 	}
 
+	res = Result{
+		Status: state.StatusFailed,
+		ID:     deployID,
+		Detail: errText,
+	}
+
+	_ = d.notifier().Send(ctx, notify.Message{
+		Host:  d.hostName(),
+		Level: "error",
+		Title: fmt.Sprintf("%s deploy FAILED", inst),
+		Text:  errText,
+	})
+
+	var errs []error
+	if err := d.Store.Save(st); err != nil {
+		errs = append(errs, err)
+	}
 	if err := d.Store.Append(inst, state.Event{
 		ID:     deployID,
 		At:     now,
@@ -872,18 +886,8 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 		Detail: errText,
 		Actor:  actor,
 	}); err != nil {
-		return Result{}, err
+		errs = append(errs, err)
 	}
-	_ = d.notifier().Send(ctx, notify.Message{
-		Host:  d.hostName(),
-		Level: "error",
-		Title: fmt.Sprintf("%s deploy FAILED", inst),
-		Text:  errText,
-	})
 
-	return Result{
-		Status: state.StatusFailed,
-		ID:     deployID,
-		Detail: errText,
-	}, nil
+	return res, errors.Join(errs...)
 }
