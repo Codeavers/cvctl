@@ -76,6 +76,7 @@ func checkPackageInstalled(ctx context.Context, e *Env, pkg string) bool {
 
 func (PackagesStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	var changes []string
+	var actions []Action
 
 	resInfo, errInfo := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"info"}})
 	if errInfo == nil && resInfo.ExitCode == 0 {
@@ -107,26 +108,28 @@ func (PackagesStep) Check(ctx context.Context, e *Env) (Plan, error) {
 			}
 		}
 		changes = append(changes, "install docker")
+		actions = append(actions, Action{Kind: "install", Target: "docker"})
 	}
 
 	for _, pkg := range defaultOtherPackages {
 		if !checkPackageInstalled(ctx, e, pkg) {
 			changes = append(changes, "install package "+pkg)
+			actions = append(actions, Action{Kind: "install", Target: "package", Arg: pkg})
 		}
 	}
-	return Plan{Changes: changes}, nil
+	return Plan{Changes: changes, Actions: actions}, nil
 }
 
 func (PackagesStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 	var installDocker bool
 	var missingPkgs []string
 
-	for _, c := range p.Changes {
+	for _, a := range p.Actions {
 		switch {
-		case c == "install docker":
+		case a.Kind == "install" && a.Target == "docker":
 			installDocker = true
-		case strings.HasPrefix(c, "install package "):
-			missingPkgs = append(missingPkgs, strings.TrimPrefix(c, "install package "))
+		case a.Kind == "install" && a.Target == "package":
+			missingPkgs = append(missingPkgs, a.Arg)
 		}
 	}
 
@@ -172,16 +175,8 @@ func (PackagesStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 			return "", err
 		}
 		if res.ExitCode != 0 {
-			stderr := strings.TrimSpace(string(res.Stderr))
-			msg := fmt.Sprintf("dpkg --print-architecture failed (exit %d)", res.ExitCode)
-			if stderr != "" {
-				msg += ": " + stderr
-			}
-			return "", &output.Error{
-				Code:    "E_DOCKER_REPO",
-				Message: msg,
-				Hint:    "check network access to download.docker.com",
-			}
+			dpkgCmd := sys.Cmd{Name: "dpkg", Args: []string{"--print-architecture"}}
+			return "", sys.CmdErr("E_DOCKER_REPO", dpkgCmd, res, nil, "check network access to download.docker.com")
 		}
 		arch := strings.TrimSpace(string(res.Stdout))
 
@@ -219,16 +214,7 @@ func runAptCmd(ctx context.Context, e *Env, c sys.Cmd) error {
 		return err
 	}
 	if res.ExitCode != 0 {
-		stderr := strings.TrimSpace(string(res.Stderr))
-		msg := fmt.Sprintf("%s failed (exit %d)", c.String(), res.ExitCode)
-		if stderr != "" {
-			msg += ": " + stderr
-		}
-		return &output.Error{
-			Code:    "E_APT_FAILED",
-			Message: msg,
-			Hint:    "check apt sources and network, then re-run cvctl init",
-		}
+		return sys.CmdErr("E_APT_FAILED", c, res, nil, "check apt sources and network, then re-run cvctl init")
 	}
 	return nil
 }
@@ -239,16 +225,7 @@ func runRepoCmd(ctx context.Context, e *Env, c sys.Cmd) error {
 		return err
 	}
 	if res.ExitCode != 0 {
-		stderr := strings.TrimSpace(string(res.Stderr))
-		msg := fmt.Sprintf("%s failed (exit %d)", c.String(), res.ExitCode)
-		if stderr != "" {
-			msg += ": " + stderr
-		}
-		return &output.Error{
-			Code:    "E_DOCKER_REPO",
-			Message: msg,
-			Hint:    "check network access to download.docker.com",
-		}
+		return sys.CmdErr("E_DOCKER_REPO", c, res, nil, "check network access to download.docker.com")
 	}
 	return nil
 }

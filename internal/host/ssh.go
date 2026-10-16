@@ -72,11 +72,13 @@ func (SSHStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	}
 
 	var changes []string
+	var actions []Action
 
 	data, err := e.FS.ReadFile(sshDropInPath)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		changes = append(changes, "configure "+sshDropInPath)
+		actions = append(actions, Action{Kind: "configure", Target: sshDropInPath})
 	case err != nil:
 		return Plan{}, err
 	default:
@@ -87,6 +89,7 @@ func (SSHStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		if strings.TrimSpace(string(data)) != strings.TrimSpace(sshDropInContent) ||
 			fi.Mode != 0o644 || fi.User != "root" || fi.Group != "root" {
 			changes = append(changes, "configure "+sshDropInPath)
+			actions = append(actions, Action{Kind: "configure", Target: sshDropInPath})
 		}
 	}
 
@@ -97,18 +100,20 @@ func (SSHStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	})
 	if err != nil || res.ExitCode != 0 {
 		changes = append(changes, "enforce effective sshd config")
+		actions = append(actions, Action{Kind: "enforce", Target: "sshd"})
 	} else {
 		eff := parseSSHDEffective(res.Stdout)
 		if eff["passwordauthentication"] != "no" || eff["permitrootlogin"] != "no" {
 			changes = append(changes, "enforce effective sshd config")
+			actions = append(actions, Action{Kind: "enforce", Target: "sshd"})
 		}
 	}
 
-	return Plan{Changes: changes}, nil
+	return Plan{Changes: changes, Actions: actions}, nil
 }
 
 func (SSHStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
-	if len(p.Changes) == 0 {
+	if len(p.Actions) == 0 {
 		return "", nil
 	}
 
@@ -188,7 +193,6 @@ func (SSHStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 		}
 	}
 
-	rootOwner := sys.Owner{User: "root", Group: "root"}
 	if err := e.FS.MkdirAll(path.Dir(sshDropInPath), 0o755, rootOwner); err != nil {
 		return "", err
 	}
@@ -202,19 +206,8 @@ func (SSHStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 	}
 	if res.ExitCode != 0 {
 		rmErr := e.FS.Remove(sshDropInPath)
-		out := strings.TrimSpace(string(res.Stderr))
-		if out == "" {
-			out = strings.TrimSpace(string(res.Stdout))
-		}
-		msg := fmt.Sprintf("sshd -t failed (exit %d)", res.ExitCode)
-		if out != "" {
-			msg += ": " + out
-		}
-		return "", wrapRemoveErr(&output.Error{
-			Code:    "E_SSH_CONFIG",
-			Message: msg,
-			Hint:    "sshd -t output is in the message; fix sshd_config and re-run",
-		}, rmErr)
+		sshdCmd := sys.Cmd{Name: "sshd", Args: []string{"-t"}}
+		return "", wrapRemoveErr(sys.CmdErr("E_SSH_CONFIG", sshdCmd, res, nil, "sshd -t output is in the message; fix sshd_config and re-run"), rmErr)
 	}
 
 	connSpec := fmt.Sprintf("user=%s,host=localhost,addr=127.0.0.1", adminUser)
@@ -505,14 +498,5 @@ func runSSHCmd(ctx context.Context, e *Env, c sys.Cmd) error {
 }
 
 func sshCmdFailed(c sys.Cmd, res sys.Result) error {
-	stderr := strings.TrimSpace(string(res.Stderr))
-	msg := fmt.Sprintf("%s failed (exit %d)", c.String(), res.ExitCode)
-	if stderr != "" {
-		msg += ": " + stderr
-	}
-	return &output.Error{
-		Code:    "E_SSH_FAILED",
-		Message: msg,
-		Hint:    fmt.Sprintf("check `%s` output and sshd service status", c.String()),
-	}
+	return sys.CmdErr("E_SSH_FAILED", c, res, nil, fmt.Sprintf("check `%s` output and sshd service status", c.String()))
 }

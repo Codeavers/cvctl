@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -245,5 +246,24 @@ func TestInitLockedFailsWithEInitLocked(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "another cvctl init is running") {
 		t.Fatalf("expected errOut to contain hint 'another cvctl init is running', got: %s", errOut)
+	}
+}
+
+func TestInitLockPermissionNotLocked(t *testing.T) {
+	fs := seeded()
+	stubInit(t, fs, failPrompter{t}, false, stubStep{name: "a"})
+	sys.Lock = func(path string) (func(), error) {
+		return nil, os.ErrPermission
+	}
+
+	code, out, errOut := run(t, "init")
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d; out=%s err=%s", code, out, errOut)
+	}
+	if !strings.Contains(errOut, "E_INIT_LOCK_FAILED") {
+		t.Fatalf("expected errOut to contain E_INIT_LOCK_FAILED, got: %s", errOut)
+	}
+	if !strings.Contains(errOut, "run with sudo") {
+		t.Fatalf("expected errOut to contain hint 'run with sudo', got: %s", errOut)
 	}
 }

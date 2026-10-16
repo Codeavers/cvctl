@@ -253,7 +253,10 @@ func TestSSHSystemdRunFailureRollsBackWithoutReload(t *testing.T) {
 	})
 
 	step := SSHStep{}
-	_, err := step.Apply(context.Background(), env, Plan{Changes: []string{"configure " + sshDropInPath}})
+	_, err := step.Apply(context.Background(), env, Plan{
+		Changes: []string{"configure " + sshDropInPath},
+		Actions: []Action{{Kind: "configure", Target: sshDropInPath}},
+	})
 	if err == nil {
 		t.Fatal("expected E_SSH_FAILED when systemd-run fails, got nil")
 	}
@@ -333,7 +336,10 @@ func TestSSHInvalidConfigRollsBackRemoveError(t *testing.T) {
 	})
 
 	step := SSHStep{}
-	_, err := step.Apply(context.Background(), env, Plan{Changes: []string{"configure " + sshDropInPath}})
+	_, err := step.Apply(context.Background(), env, Plan{
+		Changes: []string{"configure " + sshDropInPath},
+		Actions: []Action{{Kind: "configure", Target: sshDropInPath}},
+	})
 	if err == nil {
 		t.Fatal("expected E_SSH_CONFIG error, got nil")
 	}
@@ -355,7 +361,10 @@ func TestSSHDropInNotEffectiveRollsBack(t *testing.T) {
 	})
 
 	step := SSHStep{}
-	_, err := step.Apply(context.Background(), env, Plan{Changes: []string{"configure " + sshDropInPath}})
+	_, err := step.Apply(context.Background(), env, Plan{
+		Changes: []string{"configure " + sshDropInPath},
+		Actions: []Action{{Kind: "configure", Target: sshDropInPath}},
+	})
 	if err == nil {
 		t.Fatal("expected E_SSH_CONFIG when drop-in is not effective, got nil")
 	}
@@ -582,7 +591,10 @@ func TestSSHStrictModesFixesPermAndOwner(t *testing.T) {
 	runner.On("systemctl try-reload-or-restart ssh", sys.Result{ExitCode: 0})
 
 	step := SSHStep{}
-	if _, err := step.Apply(context.Background(), env, Plan{Changes: []string{"configure " + sshDropInPath}}); err != nil {
+	if _, err := step.Apply(context.Background(), env, Plan{
+		Changes: []string{"configure " + sshDropInPath},
+		Actions: []Action{{Kind: "configure", Target: sshDropInPath}},
+	}); err != nil {
 		t.Fatalf("unexpected Apply error: %v", err)
 	}
 
@@ -609,7 +621,10 @@ func TestSSHStrictModesFixesPermAndOwner(t *testing.T) {
 	}
 
 	// Second apply when mode/owner already match must not rewrite authorized_keys.
-	if _, err := step.Apply(context.Background(), env, Plan{Changes: []string{"configure " + sshDropInPath}}); err != nil {
+	if _, err := step.Apply(context.Background(), env, Plan{
+		Changes: []string{"configure " + sshDropInPath},
+		Actions: []Action{{Kind: "configure", Target: sshDropInPath}},
+	}); err != nil {
 		t.Fatalf("unexpected second Apply error: %v", err)
 	}
 	if wfs.writes["/home/andres/.ssh/authorized_keys"] != 1 {
@@ -623,7 +638,10 @@ func TestSSHUnsafeHomeRejected(t *testing.T) {
 	_ = fs.MkdirAll("/home/andres", 0o775, sys.Owner{User: "andres", Group: "andres"})
 
 	step := SSHStep{}
-	_, err := step.Apply(context.Background(), env, Plan{Changes: []string{"configure " + sshDropInPath}})
+	_, err := step.Apply(context.Background(), env, Plan{
+		Changes: []string{"configure " + sshDropInPath},
+		Actions: []Action{{Kind: "configure", Target: sshDropInPath}},
+	})
 	if err == nil {
 		t.Fatal("expected E_SSH_UNSAFE_HOME error when home is group-writable, got nil")
 	}
@@ -775,7 +793,10 @@ func TestSSHErrorAfterTimerArmedIncludesRevertNotice(t *testing.T) {
 	})
 
 	step := SSHStep{}
-	_, err := step.Apply(context.Background(), env, Plan{Changes: []string{"configure " + sshDropInPath}})
+	_, err := step.Apply(context.Background(), env, Plan{
+		Changes: []string{"configure " + sshDropInPath},
+		Actions: []Action{{Kind: "configure", Target: sshDropInPath}},
+	})
 	if err == nil {
 		t.Fatal("expected E_SSH_FAILED when reload fails, got nil")
 	}
@@ -858,7 +879,10 @@ func TestSSHInvalidInteractivePubKeyRejected(t *testing.T) {
 			seedAdminWithKey(runner, fs, "andres", "/home/andres", "1000", "andres", "# comment only")
 
 			step := SSHStep{}
-			_, err := step.Apply(context.Background(), env, Plan{Changes: []string{"configure " + sshDropInPath}})
+			_, err := step.Apply(context.Background(), env, Plan{
+				Changes: []string{"configure " + sshDropInPath},
+				Actions: []Action{{Kind: "configure", Target: sshDropInPath}},
+			})
 			if err == nil {
 				t.Fatalf("expected E_SSH_NO_KEYS error for %s (%q), got nil", tc.name, tc.key)
 			}

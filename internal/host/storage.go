@@ -152,6 +152,7 @@ func (StorageStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	}
 
 	var changes []string
+	var actions []Action
 	if mode == "local" {
 		composeBytes, err := renderStorageCompose()
 		if err != nil {
@@ -163,10 +164,12 @@ func (StorageStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		}
 		if composeNeedsWrite {
 			changes = append(changes, "configure "+storageComposePath)
+			actions = append(actions, Action{Kind: "configure", Target: storageComposePath})
 		}
 
 		if ak == "" || sk == "" {
 			changes = append(changes, "configure "+storageSecretsPath)
+			actions = append(actions, Action{Kind: "configure", Target: storageSecretsPath})
 		} else {
 			envBytes := renderStorageEnv(ak, sk)
 			envNeedsWrite, err := fileNeedsWrite(e.FS, storageSecretsPath, envBytes, 0o640, rootDeployOwner)
@@ -175,31 +178,35 @@ func (StorageStep) Check(ctx context.Context, e *Env) (Plan, error) {
 			}
 			if envNeedsWrite {
 				changes = append(changes, "configure "+storageSecretsPath)
+				actions = append(actions, Action{Kind: "configure", Target: storageSecretsPath})
 			}
 		}
 
 		if e.Cfg == nil || e.Cfg.S3Endpoint == "" || e.Cfg.S3Bucket == "" || e.Cfg.S3Region == "" {
 			if !slices.Contains(changes, "configure "+storageSecretsPath) {
 				changes = append(changes, "configure local storage settings")
+				actions = append(actions, Action{Kind: "configure", Target: "local storage settings"})
 			}
 		}
 
 		if ak == "" || sk == "" {
 			changes = append(changes, "verify storage")
-			return Plan{Changes: changes}, nil
+			actions = append(actions, Action{Kind: "verify", Target: "storage"})
+			return Plan{Changes: changes, Actions: actions}, nil
 		}
 	}
 
 	store, err := newStore(storageConfigFor(e.Cfg, mode, ak, sk))
 	if err != nil || objstore.Probe(ctx, store) != nil {
 		changes = append(changes, "verify storage")
+		actions = append(actions, Action{Kind: "verify", Target: "storage"})
 	}
 
-	return Plan{Changes: changes}, nil
+	return Plan{Changes: changes, Actions: actions}, nil
 }
 
 func (s StorageStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
-	if len(p.Changes) == 0 {
+	if len(p.Actions) == 0 {
 		return "", nil
 	}
 
@@ -420,16 +427,7 @@ func runStorageCmd(ctx context.Context, e *Env, c sys.Cmd) error {
 		return err
 	}
 	if res.ExitCode != 0 {
-		stderr := strings.TrimSpace(string(res.Stderr))
-		msg := fmt.Sprintf("%s failed (exit %d)", c.String(), res.ExitCode)
-		if stderr != "" {
-			msg += ": " + stderr
-		}
-		return &output.Error{
-			Code:    "E_STORAGE_FAILED",
-			Message: msg,
-			Hint:    fmt.Sprintf("check `%s` output and docker status", c.String()),
-		}
+		return sys.CmdErr("E_STORAGE_FAILED", c, res, nil, fmt.Sprintf("check `%s` output and docker status", c.String()))
 	}
 	return nil
 }

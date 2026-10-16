@@ -25,10 +25,17 @@ type Env struct {
 	Out         io.Writer
 }
 
+type Action struct {
+	Kind   string
+	Target string
+	Arg    string
+}
+
 // Plan is what Check found. No Changes and no Skip means the step is already
 // in the desired state. Pending is something only a person can do.
 type Plan struct {
 	Changes []string
+	Actions []Action
 	Skip    string
 	Pending string
 }

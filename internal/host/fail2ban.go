@@ -2,10 +2,7 @@ package host
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"path"
 	"strings"
 
@@ -33,14 +30,13 @@ func resolveFail2banPorts(ctx context.Context, e *Env) string {
 	return "ssh"
 }
 
-var rootOwner = sys.Owner{User: "root", Group: "root"}
-
 type Fail2banStep struct{}
 
 func (Fail2banStep) Name() string { return "fail2ban" }
 
 func (Fail2banStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	var changes []string
+	var actions []Action
 
 	portStr := resolveFail2banPorts(ctx, e)
 	content := fail2banJailContent(portStr)
@@ -51,6 +47,7 @@ func (Fail2banStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	}
 	if fileChanged {
 		changes = append(changes, fmt.Sprintf("configure %s (port=%s)", fail2banJailPath, portStr))
+		actions = append(actions, Action{Kind: "configure", Target: fail2banJailPath, Arg: portStr})
 	}
 
 	enabledRes, errEnabled := e.Run.Run(ctx, sys.Cmd{Name: "systemctl", Args: []string{"is-enabled", "fail2ban"}})
@@ -70,86 +67,44 @@ func (Fail2banStep) Check(ctx context.Context, e *Env) (Plan, error) {
 
 	if !enabled || !active {
 		changes = append(changes, "enable fail2ban")
+		actions = append(actions, Action{Kind: "enable", Target: "fail2ban"})
 	}
 	// Reload is only needed when the service was already active before; otherwise enable --now starts it with the new jail.
 	if fileChanged && active {
 		changes = append(changes, "reload fail2ban")
+		actions = append(actions, Action{Kind: "reload", Target: "fail2ban"})
 	}
 
-	return Plan{Changes: changes}, nil
-}
-
-func parseJailPort(change string) string {
-	const prefix = "configure " + fail2banJailPath
-	if !strings.HasPrefix(change, prefix) {
-		return ""
-	}
-	rest := strings.TrimSpace(strings.TrimPrefix(change, prefix))
-	if strings.HasPrefix(rest, "(port=") && strings.HasSuffix(rest, ")") {
-		return strings.TrimSuffix(strings.TrimPrefix(rest, "(port="), ")")
-	}
-	return "ssh"
+	return Plan{Changes: changes, Actions: actions}, nil
 }
 
 func (Fail2banStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
-	if len(p.Changes) == 0 {
-		return "", nil
-	}
-
-	changeSet := make(map[string]bool, len(p.Changes))
-	var configureJail bool
-	jailPort := "ssh"
-	for _, c := range p.Changes {
-		changeSet[c] = true
-		if strings.HasPrefix(c, "configure "+fail2banJailPath) {
-			configureJail = true
-			if p := parseJailPort(c); p != "" {
-				jailPort = p
+	for _, a := range p.Actions {
+		switch {
+		case a.Kind == "configure" && a.Target == fail2banJailPath:
+			jailPort := a.Arg
+			if jailPort == "" {
+				jailPort = "ssh"
+			}
+			content := fail2banJailContent(jailPort)
+			if err := e.FS.MkdirAll(path.Dir(fail2banJailPath), 0o755, rootOwner); err != nil {
+				return "", fail2banFSErr(fail2banJailPath, err)
+			}
+			if err := e.FS.WriteFile(fail2banJailPath, []byte(content), 0o644, rootOwner); err != nil {
+				return "", fail2banFSErr(fail2banJailPath, err)
+			}
+		case a.Kind == "enable" && a.Target == "fail2ban":
+			if err := runFail2banCmd(ctx, e, sys.Cmd{Name: "systemctl", Args: []string{"enable", "--now", "fail2ban"}}); err != nil {
+				return "", err
+			}
+		case a.Kind == "reload" && a.Target == "fail2ban":
+			if err := runFail2banCmd(ctx, e, sys.Cmd{Name: "systemctl", Args: []string{"try-reload-or-restart", "fail2ban"}}); err != nil {
+				return "", err
 			}
 		}
 	}
 
-	if configureJail {
-		content := fail2banJailContent(jailPort)
-		if err := e.FS.MkdirAll(path.Dir(fail2banJailPath), 0o755, rootOwner); err != nil {
-			return "", fail2banFSErr(fail2banJailPath, err)
-		}
-		if err := e.FS.WriteFile(fail2banJailPath, []byte(content), 0o644, rootOwner); err != nil {
-			return "", fail2banFSErr(fail2banJailPath, err)
-		}
-	}
-
-	if changeSet["enable fail2ban"] {
-		if err := runFail2banCmd(ctx, e, sys.Cmd{Name: "systemctl", Args: []string{"enable", "--now", "fail2ban"}}); err != nil {
-			return "", err
-		}
-	}
-
-	if changeSet["reload fail2ban"] {
-		if err := runFail2banCmd(ctx, e, sys.Cmd{Name: "systemctl", Args: []string{"try-reload-or-restart", "fail2ban"}}); err != nil {
-			return "", err
-		}
-	}
-
 	return "", nil
-}
-
-func fileNeedsWrite(fsys sys.FS, p string, want []byte, mode os.FileMode, owner sys.Owner) (bool, error) {
-	data, err := fsys.ReadFile(p)
-	if errors.Is(err, fs.ErrNotExist) {
-		return true, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	fi, err := fsys.Stat(p)
-	if err != nil {
-		return false, err
-	}
-	if fi.IsDir || fi.Mode != mode || fi.User != owner.User || fi.Group != owner.Group || string(data) != string(want) {
-		return true, nil
-	}
-	return false, nil
 }
 
 func runFail2banCmd(ctx context.Context, e *Env, c sys.Cmd) error {
@@ -158,16 +113,7 @@ func runFail2banCmd(ctx context.Context, e *Env, c sys.Cmd) error {
 		return err
 	}
 	if res.ExitCode != 0 {
-		stderr := strings.TrimSpace(string(res.Stderr))
-		msg := fmt.Sprintf("%s failed (exit %d)", c.String(), res.ExitCode)
-		if stderr != "" {
-			msg += ": " + stderr
-		}
-		return &output.Error{
-			Code:    "E_FAIL2BAN_FAILED",
-			Message: msg,
-			Hint:    fmt.Sprintf("check `%s` and `systemctl status fail2ban`", c.String()),
-		}
+		return sys.CmdErr("E_FAIL2BAN_FAILED", c, res, nil, fmt.Sprintf("check `%s` and `systemctl status fail2ban`", c.String()))
 	}
 	return nil
 }

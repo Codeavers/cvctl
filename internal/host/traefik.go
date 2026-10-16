@@ -82,6 +82,7 @@ func (TraefikStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	}
 
 	var changes []string
+	var actions []Action
 	for _, spec := range []struct {
 		path string
 		data []byte
@@ -96,6 +97,7 @@ func (TraefikStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		}
 		if needsWrite {
 			changes = append(changes, "configure "+spec.path)
+			actions = append(actions, Action{Kind: "configure", Target: spec.path})
 		}
 	}
 
@@ -106,11 +108,13 @@ func (TraefikStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		}
 		if needsWrite {
 			changes = append(changes, "configure "+traefikSecretsPath)
+			actions = append(actions, Action{Kind: "configure", Target: traefikSecretsPath})
 		}
 	} else {
 		_, err := e.FS.Stat(traefikSecretsPath)
 		if err == nil {
 			changes = append(changes, "remove "+traefikSecretsPath)
+			actions = append(actions, Action{Kind: "remove", Target: traefikSecretsPath})
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return Plan{}, traefikFSErr(traefikSecretsPath, err)
 		}
@@ -122,6 +126,7 @@ func (TraefikStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	})
 	if err != nil || netRes.ExitCode != 0 {
 		changes = append(changes, "create network "+EdgeNetwork)
+		actions = append(actions, Action{Kind: "network-create", Target: EdgeNetwork})
 	}
 
 	psRes, err := e.Run.Run(ctx, sys.Cmd{
@@ -130,13 +135,14 @@ func (TraefikStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	})
 	if err != nil || psRes.ExitCode != 0 || !isTraefikRunningWithImage(psRes.Stdout, traefikImage) {
 		changes = append(changes, "start traefik")
+		actions = append(actions, Action{Kind: "start", Target: "traefik"})
 	}
 
-	return Plan{Changes: changes}, nil
+	return Plan{Changes: changes, Actions: actions}, nil
 }
 
 func (s TraefikStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
-	if len(p.Changes) == 0 {
+	if len(p.Actions) == 0 {
 		return "", nil
 	}
 
@@ -145,12 +151,25 @@ func (s TraefikStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 		return "", err
 	}
 
-	changeSet := make(map[string]bool, len(p.Changes))
-	for _, c := range p.Changes {
-		changeSet[c] = true
+	var hasNetwork, hasStatic, hasCompose, hasDynamic, hasSecrets, hasRemoveSecrets bool
+	for _, a := range p.Actions {
+		switch {
+		case a.Kind == "network-create" && a.Target == EdgeNetwork:
+			hasNetwork = true
+		case a.Kind == "configure" && a.Target == traefikStaticPath:
+			hasStatic = true
+		case a.Kind == "configure" && a.Target == traefikComposePath:
+			hasCompose = true
+		case a.Kind == "configure" && a.Target == traefikDynamicPath:
+			hasDynamic = true
+		case a.Kind == "configure" && a.Target == traefikSecretsPath:
+			hasSecrets = true
+		case a.Kind == "remove" && a.Target == traefikSecretsPath:
+			hasRemoveSecrets = true
+		}
 	}
 
-	if changeSet["create network "+EdgeNetwork] {
+	if hasNetwork {
 		if err := runTraefikCmd(ctx, e, sys.Cmd{
 			Name: "docker",
 			Args: []string{"network", "create", EdgeNetwork},
@@ -159,23 +178,23 @@ func (s TraefikStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 		}
 	}
 
-	if changeSet["configure "+traefikStaticPath] || changeSet["configure "+traefikComposePath] {
+	if hasStatic || hasCompose {
 		if err := e.FS.MkdirAll(traefikDir, 0o750, rootDeployOwner); err != nil {
 			return "", traefikFSErr(traefikDir, err)
 		}
 	}
-	if changeSet["configure "+traefikStaticPath] {
+	if hasStatic {
 		if err := e.FS.WriteFile(traefikStaticPath, rf.staticBytes, 0o640, rootDeployOwner); err != nil {
 			return "", traefikFSErr(traefikStaticPath, err)
 		}
 	}
-	if changeSet["configure "+traefikComposePath] {
+	if hasCompose {
 		if err := e.FS.WriteFile(traefikComposePath, rf.composeBytes, 0o640, rootDeployOwner); err != nil {
 			return "", traefikFSErr(traefikComposePath, err)
 		}
 	}
 
-	if changeSet["configure "+traefikDynamicPath] {
+	if hasDynamic {
 		// Ensure /etc/traefik is 0755 root:root so deployer can traverse into /etc/traefik/dynamic;
 		// do not touch /etc/traefik/dynamic itself (owned by deployer:deploy 02775 from accounts step).
 		if err := e.FS.MkdirAll("/etc/traefik", 0o755, rootOwner); err != nil {
@@ -186,14 +205,14 @@ func (s TraefikStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 		}
 	}
 
-	if changeSet["configure "+traefikSecretsPath] {
+	if hasSecrets {
 		if err := e.FS.MkdirAll("/etc/cvctl/secrets", 0o750, rootDeployOwner); err != nil {
 			return "", traefikFSErr("/etc/cvctl/secrets", err)
 		}
 		if err := e.FS.WriteFile(traefikSecretsPath, rf.envBytes, 0o640, rootDeployOwner); err != nil {
 			return "", traefikFSErr(traefikSecretsPath, err)
 		}
-	} else if changeSet["remove "+traefikSecretsPath] {
+	} else if hasRemoveSecrets {
 		if err := e.FS.Remove(traefikSecretsPath); err != nil {
 			return "", traefikFSErr(traefikSecretsPath, err)
 		}
@@ -202,7 +221,7 @@ func (s TraefikStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 	upArgs := []string{"compose", "-p", traefikProject, "-f", traefikComposePath, "up", "-d"}
 	// traefik.yml is bind-mounted as a single file (atomic replacement swaps its inode)
 	// and static config or env changes require restarting the container.
-	if changeSet["configure "+traefikStaticPath] || changeSet["configure "+traefikSecretsPath] || changeSet["remove "+traefikSecretsPath] {
+	if hasStatic || hasSecrets || hasRemoveSecrets {
 		upArgs = append(upArgs, "--force-recreate")
 	}
 	if err := runTraefikCmd(ctx, e, sys.Cmd{
@@ -333,16 +352,7 @@ func runTraefikCmd(ctx context.Context, e *Env, c sys.Cmd) error {
 }
 
 func traefikCmdFailed(c sys.Cmd, res sys.Result) error {
-	stderr := strings.TrimSpace(string(res.Stderr))
-	msg := fmt.Sprintf("%s failed (exit %d)", c.String(), res.ExitCode)
-	if stderr != "" {
-		msg += ": " + stderr
-	}
-	return &output.Error{
-		Code:    "E_TRAEFIK_FAILED",
-		Message: msg,
-		Hint:    fmt.Sprintf("check `%s` output and docker status", c.String()),
-	}
+	return sys.CmdErr("E_TRAEFIK_FAILED", c, res, nil, fmt.Sprintf("check `%s` output and docker status", c.String()))
 }
 
 func traefikFSErr(p string, err error) error {

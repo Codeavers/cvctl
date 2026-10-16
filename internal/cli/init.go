@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -65,10 +66,17 @@ func newInitCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			unlock, err := sys.Lock("/run/cvctl-init.lock")
 			if err != nil {
+				if errors.Is(err, sys.ErrLocked) {
+					return &output.Error{
+						Code:    "E_INIT_LOCKED",
+						Message: "cannot acquire /run/cvctl-init.lock",
+						Hint:    "another cvctl init is running",
+					}
+				}
 				return &output.Error{
-					Code:    "E_INIT_LOCKED",
-					Message: "cannot acquire /run/cvctl-init.lock",
-					Hint:    "another cvctl init is running",
+					Code:    "E_INIT_LOCK_FAILED",
+					Message: fmt.Sprintf("cannot lock /run/cvctl-init.lock: %v", err),
+					Hint:    "run with sudo",
 				}
 			}
 			defer unlock()

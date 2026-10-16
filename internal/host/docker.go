@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io/fs"
 	"strings"
 
@@ -41,12 +40,18 @@ func (DockerDaemonStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	data, err := e.FS.ReadFile(dockerDaemonConfigPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return Plan{Changes: []string{"configure /etc/docker/daemon.json"}}, nil
+			return Plan{
+				Changes: []string{"configure /etc/docker/daemon.json"},
+				Actions: []Action{{Kind: "configure", Target: dockerDaemonConfigPath}},
+			}, nil
 		}
 		return Plan{}, err
 	}
 	if len(strings.TrimSpace(string(data))) == 0 {
-		return Plan{Changes: []string{"configure /etc/docker/daemon.json"}}, nil
+		return Plan{
+			Changes: []string{"configure /etc/docker/daemon.json"},
+			Actions: []Action{{Kind: "configure", Target: dockerDaemonConfigPath}},
+		}, nil
 	}
 
 	var m map[string]any
@@ -69,11 +74,14 @@ func (DockerDaemonStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		return Plan{}, nil
 	}
 
-	return Plan{Changes: []string{"configure /etc/docker/daemon.json"}}, nil
+	return Plan{
+		Changes: []string{"configure /etc/docker/daemon.json"},
+		Actions: []Action{{Kind: "configure", Target: dockerDaemonConfigPath}},
+	}, nil
 }
 
 func (DockerDaemonStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
-	if len(p.Changes) == 0 {
+	if len(p.Actions) == 0 {
 		return "", nil
 	}
 
@@ -119,21 +127,13 @@ func (DockerDaemonStep) Apply(ctx context.Context, e *Env, p Plan) (string, erro
 		return "", err
 	}
 
-	res, err := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"ps", "-q"}})
+	dockerPsCmd := sys.Cmd{Name: "docker", Args: []string{"ps", "-q"}}
+	res, err := e.Run.Run(ctx, dockerPsCmd)
 	if err != nil {
 		return "", err
 	}
 	if res.ExitCode != 0 {
-		stderr := strings.TrimSpace(string(res.Stderr))
-		msg := fmt.Sprintf("docker ps failed (exit %d)", res.ExitCode)
-		if stderr != "" {
-			msg += ": " + stderr
-		}
-		return "", &output.Error{
-			Code:    "E_DOCKER_PS_FAILED",
-			Message: msg,
-			Hint:    "systemctl status docker",
-		}
+		return "", sys.CmdErr("E_DOCKER_PS_FAILED", dockerPsCmd, res, nil, "systemctl status docker")
 	}
 
 	hasContainers := strings.TrimSpace(string(res.Stdout)) != ""
@@ -167,21 +167,13 @@ func (DockerDaemonStep) Apply(ctx context.Context, e *Env, p Plan) (string, erro
 }
 
 func restartDocker(ctx context.Context, e *Env) error {
-	res, err := e.Run.Run(ctx, sys.Cmd{Name: "systemctl", Args: []string{"restart", "docker"}})
+	systemctlCmd := sys.Cmd{Name: "systemctl", Args: []string{"restart", "docker"}}
+	res, err := e.Run.Run(ctx, systemctlCmd)
 	if err != nil {
 		return err
 	}
 	if res.ExitCode != 0 {
-		stderr := strings.TrimSpace(string(res.Stderr))
-		msg := fmt.Sprintf("systemctl restart docker failed (exit %d)", res.ExitCode)
-		if stderr != "" {
-			msg += ": " + stderr
-		}
-		return &output.Error{
-			Code:    "E_DOCKER_RESTART_FAILED",
-			Message: msg,
-			Hint:    "check systemctl status docker",
-		}
+		return sys.CmdErr("E_DOCKER_RESTART_FAILED", systemctlCmd, res, nil, "check systemctl status docker")
 	}
 	return nil
 }

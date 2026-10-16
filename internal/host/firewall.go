@@ -79,6 +79,7 @@ func (FirewallStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	}
 
 	var changes []string
+	var actions []Action
 	if !denyIncoming {
 		changes = append(changes, "ufw default deny incoming")
 	}
@@ -88,46 +89,38 @@ func (FirewallStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	for _, r := range rules {
 		if !presentRules[r] {
 			changes = append(changes, "ufw allow "+r)
+			actions = append(actions, Action{Kind: "allow", Target: r})
 		}
+	}
+	if !denyIncoming {
+		actions = append(actions, Action{Kind: "default", Target: "deny", Arg: "incoming"})
+	}
+	if !allowOutgoing {
+		actions = append(actions, Action{Kind: "default", Target: "allow", Arg: "outgoing"})
 	}
 	if !active {
 		changes = append(changes, "ufw --force enable")
+		actions = append(actions, Action{Kind: "enable", Target: "ufw"})
 	}
 
-	return Plan{Changes: changes}, nil
+	return Plan{Changes: changes, Actions: actions}, nil
 }
 
 func (FirewallStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
-	if len(p.Changes) == 0 {
-		return "", nil
-	}
-
-	changeSet := make(map[string]bool, len(p.Changes))
-	for _, c := range p.Changes {
-		changeSet[c] = true
-	}
-
-	// Allow rules (especially the SSH port) must be added first before setting default policies or enabling ufw so an active firewall or default-deny policy never locks out SSH.
-	for _, ch := range p.Changes {
-		if r, ok := strings.CutPrefix(ch, "ufw allow "); ok {
-			if err := runFirewallCmd(ctx, e, sys.Cmd{Name: "ufw", Args: []string{"allow", r}}); err != nil {
+	for _, a := range p.Actions {
+		switch a.Kind {
+		case "allow":
+			if err := runFirewallCmd(ctx, e, sys.Cmd{Name: "ufw", Args: []string{"allow", a.Target}}); err != nil {
 				return "", err
 			}
-		}
-	}
-	if changeSet["ufw default deny incoming"] {
-		if err := runFirewallCmd(ctx, e, sys.Cmd{Name: "ufw", Args: []string{"default", "deny", "incoming"}}); err != nil {
-			return "", err
-		}
-	}
-	if changeSet["ufw default allow outgoing"] {
-		if err := runFirewallCmd(ctx, e, sys.Cmd{Name: "ufw", Args: []string{"default", "allow", "outgoing"}}); err != nil {
-			return "", err
-		}
-	}
-	if changeSet["ufw --force enable"] {
-		if err := runFirewallCmd(ctx, e, sys.Cmd{Name: "ufw", Args: []string{"--force", "enable"}}); err != nil {
-			return "", err
+		case "default":
+			if err := runFirewallCmd(ctx, e, sys.Cmd{Name: "ufw", Args: []string{"default", a.Target, a.Arg}}); err != nil {
+				return "", err
+			}
+		case "enable":
+			if err := runFirewallCmd(ctx, e, sys.Cmd{Name: "ufw", Args: []string{"--force", "enable"}}); err != nil {
+				return "", err
+			}
 		}
 	}
 
@@ -223,14 +216,5 @@ func runFirewallCmd(ctx context.Context, e *Env, c sys.Cmd) error {
 }
 
 func firewallCmdFailed(c sys.Cmd, res sys.Result) error {
-	stderr := strings.TrimSpace(string(res.Stderr))
-	msg := fmt.Sprintf("%s failed (exit %d)", c.String(), res.ExitCode)
-	if stderr != "" {
-		msg += ": " + stderr
-	}
-	return &output.Error{
-		Code:    "E_FIREWALL_FAILED",
-		Message: msg,
-		Hint:    fmt.Sprintf("check `%s` output and ufw status", c.String()),
-	}
+	return sys.CmdErr("E_FIREWALL_FAILED", c, res, nil, fmt.Sprintf("check `%s` output and ufw status", c.String()))
 }

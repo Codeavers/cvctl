@@ -43,11 +43,14 @@ func (NotifierStep) Check(_ context.Context, e *Env) (Plan, error) {
 		return Plan{}, notifyFSErr(notifyMarkerPath, err)
 	}
 
-	return Plan{Changes: []string{"send test notification and write " + notifyMarkerPath}}, nil
+	return Plan{
+		Changes: []string{"send test notification and write " + notifyMarkerPath},
+		Actions: []Action{{Kind: "notify", Target: notifyMarkerPath}},
+	}, nil
 }
 
 func (NotifierStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
-	if len(p.Changes) == 0 {
+	if len(p.Actions) == 0 {
 		return "", nil
 	}
 
