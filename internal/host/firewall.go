@@ -98,7 +98,14 @@ func (FirewallStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 		changeSet[c] = true
 	}
 
-	// Allow rules (especially the SSH port) must be added before enabling ufw so a default-deny policy never locks out SSH.
+	// Allow rules (especially the SSH port) must be added first before setting default policies or enabling ufw so an active firewall or default-deny policy never locks out SSH.
+	for _, ch := range p.Changes {
+		if r, ok := strings.CutPrefix(ch, "ufw allow "); ok {
+			if err := runFirewallCmd(ctx, e, sys.Cmd{Name: "ufw", Args: []string{"allow", r}}); err != nil {
+				return "", err
+			}
+		}
+	}
 	if changeSet["ufw default deny incoming"] {
 		if err := runFirewallCmd(ctx, e, sys.Cmd{Name: "ufw", Args: []string{"default", "deny", "incoming"}}); err != nil {
 			return "", err
@@ -107,13 +114,6 @@ func (FirewallStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 	if changeSet["ufw default allow outgoing"] {
 		if err := runFirewallCmd(ctx, e, sys.Cmd{Name: "ufw", Args: []string{"default", "allow", "outgoing"}}); err != nil {
 			return "", err
-		}
-	}
-	for _, ch := range p.Changes {
-		if r, ok := strings.CutPrefix(ch, "ufw allow "); ok {
-			if err := runFirewallCmd(ctx, e, sys.Cmd{Name: "ufw", Args: []string{"allow", r}}); err != nil {
-				return "", err
-			}
 		}
 	}
 	if changeSet["ufw --force enable"] {

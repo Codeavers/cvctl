@@ -60,11 +60,11 @@ func TestFirewallRulesBeforeEnable(t *testing.T) {
 
 	applyCalls := runner.Calls[callsBeforeApply:]
 	wantCmds := []string{
-		"ufw default deny incoming",
-		"ufw default allow outgoing",
 		"ufw allow 22/tcp",
 		"ufw allow 80/tcp",
 		"ufw allow 443/tcp",
+		"ufw default deny incoming",
+		"ufw default allow outgoing",
 		"ufw --force enable",
 	}
 	if len(applyCalls) != len(wantCmds) {
@@ -83,11 +83,14 @@ func TestFirewallRulesBeforeEnable(t *testing.T) {
 	allow22Idx := slices.IndexFunc(runner.Calls, func(c sys.Cmd) bool {
 		return c.String() == "ufw allow 22/tcp"
 	})
+	denyIdx := slices.IndexFunc(runner.Calls, func(c sys.Cmd) bool {
+		return c.String() == "ufw default deny incoming"
+	})
 	enableIdx := slices.IndexFunc(runner.Calls, func(c sys.Cmd) bool {
 		return c.String() == "ufw --force enable"
 	})
-	if allow22Idx == -1 || enableIdx == -1 || allow22Idx >= enableIdx {
-		t.Fatalf("expected ufw allow 22/tcp (idx %d) before ufw --force enable (idx %d)", allow22Idx, enableIdx)
+	if allow22Idx == -1 || denyIdx == -1 || enableIdx == -1 || allow22Idx >= denyIdx || denyIdx >= enableIdx {
+		t.Fatalf("expected ufw allow 22/tcp (idx %d) before ufw default deny incoming (idx %d) before ufw --force enable (idx %d)", allow22Idx, denyIdx, enableIdx)
 	}
 }
 
@@ -97,9 +100,9 @@ func TestFirewallBehindProxyOnly22(t *testing.T) {
 		Stdout:   []byte("Status: inactive\n"),
 		ExitCode: 0,
 	})
+	runner.On("ufw allow 22/tcp", sys.Result{ExitCode: 0})
 	runner.On("ufw default deny incoming", sys.Result{ExitCode: 0})
 	runner.On("ufw default allow outgoing", sys.Result{ExitCode: 0})
-	runner.On("ufw allow 22/tcp", sys.Result{ExitCode: 0})
 	runner.On("ufw --force enable", sys.Result{ExitCode: 0})
 
 	step := FirewallStep{}
@@ -118,9 +121,9 @@ func TestFirewallBehindProxyOnly22(t *testing.T) {
 
 	applyCalls := runner.Calls[callsBeforeApply:]
 	wantCmds := []string{
+		"ufw allow 22/tcp",
 		"ufw default deny incoming",
 		"ufw default allow outgoing",
-		"ufw allow 22/tcp",
 		"ufw --force enable",
 	}
 	if len(applyCalls) != len(wantCmds) {
@@ -245,7 +248,7 @@ func TestFirewallCommandFailure(t *testing.T) {
 		Stdout:   []byte("Status: inactive\n"),
 		ExitCode: 0,
 	})
-	runner.On("ufw default deny incoming", sys.Result{
+	runner.On("ufw allow 22/tcp", sys.Result{
 		ExitCode: 1,
 		Stderr:   []byte("ERROR: problem running ufw-init\n"),
 	})
@@ -267,7 +270,7 @@ func TestFirewallCommandFailure(t *testing.T) {
 	if !strings.Contains(oe.Message, "ERROR: problem running ufw-init") {
 		t.Fatalf("expected stderr in error message, got %q", oe.Message)
 	}
-	if !strings.Contains(oe.Hint, "ufw default deny incoming") {
+	if !strings.Contains(oe.Hint, "ufw allow 22/tcp") {
 		t.Fatalf("expected command in hint, got %q", oe.Hint)
 	}
 }
@@ -282,11 +285,11 @@ func TestFirewallCustomSSHPort2228(t *testing.T) {
 		Stdout:   []byte("Status: inactive\n"),
 		ExitCode: 0,
 	})
-	runner.On("ufw default deny incoming", sys.Result{ExitCode: 0})
-	runner.On("ufw default allow outgoing", sys.Result{ExitCode: 0})
 	runner.On("ufw allow 2228/tcp", sys.Result{ExitCode: 0})
 	runner.On("ufw allow 80/tcp", sys.Result{ExitCode: 0})
 	runner.On("ufw allow 443/tcp", sys.Result{ExitCode: 0})
+	runner.On("ufw default deny incoming", sys.Result{ExitCode: 0})
+	runner.On("ufw default allow outgoing", sys.Result{ExitCode: 0})
 	runner.On("ufw --force enable", sys.Result{ExitCode: 0})
 
 	step := FirewallStep{}
@@ -308,11 +311,11 @@ func TestFirewallCustomSSHPort2228(t *testing.T) {
 
 	applyCalls := runner.Calls[callsBeforeApply:]
 	wantCmds := []string{
-		"ufw default deny incoming",
-		"ufw default allow outgoing",
 		"ufw allow 2228/tcp",
 		"ufw allow 80/tcp",
 		"ufw allow 443/tcp",
+		"ufw default deny incoming",
+		"ufw default allow outgoing",
 		"ufw --force enable",
 	}
 	if len(applyCalls) != len(wantCmds) {
@@ -349,10 +352,10 @@ func TestFirewallMultipleSSHPorts(t *testing.T) {
 		Stdout:   []byte("Status: inactive\n"),
 		ExitCode: 0,
 	})
-	runner.On("ufw default deny incoming", sys.Result{ExitCode: 0})
-	runner.On("ufw default allow outgoing", sys.Result{ExitCode: 0})
 	runner.On("ufw allow 22/tcp", sys.Result{ExitCode: 0})
 	runner.On("ufw allow 2228/tcp", sys.Result{ExitCode: 0})
+	runner.On("ufw default deny incoming", sys.Result{ExitCode: 0})
+	runner.On("ufw default allow outgoing", sys.Result{ExitCode: 0})
 	runner.On("ufw --force enable", sys.Result{ExitCode: 0})
 
 	step := FirewallStep{}
@@ -368,10 +371,10 @@ func TestFirewallMultipleSSHPorts(t *testing.T) {
 
 	applyCalls := runner.Calls[callsBeforeApply:]
 	wantCmds := []string{
-		"ufw default deny incoming",
-		"ufw default allow outgoing",
 		"ufw allow 22/tcp",
 		"ufw allow 2228/tcp",
+		"ufw default deny incoming",
+		"ufw default allow outgoing",
 		"ufw --force enable",
 	}
 	if len(applyCalls) != len(wantCmds) {
