@@ -2255,3 +2255,32 @@ func TestAutoRollbackSuccessSaveFailureStillNotifies(t *testing.T) {
 		t.Fatalf("expected deploy FAILED notification sent, got %v", rig.notifier.messages)
 	}
 }
+
+func TestDeployAppEnvMalformedHidesSecrets(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	want := defaultDesired()
+
+	appEnvPath := filepath.Join(rig.instDir, "app.env")
+	if err := rig.fs.WriteFile(appEnvPath, []byte("SECRET=\"topsecretvalue\n"), 0o640, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
+		t.Fatalf("write invalid app.env: %v", err)
+	}
+
+	_, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err == nil {
+		t.Fatal("expected error from Deploy, got nil")
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_APPENV_READ" {
+		t.Fatalf("expected E_APPENV_READ error, got %v", err)
+	}
+	if strings.Contains(oe.Message, "topsecretvalue") {
+		t.Errorf("error message leaked secret: %s", oe.Message)
+	}
+	if strings.Contains(oe.Hint, "topsecretvalue") {
+		t.Errorf("error hint leaked secret: %s", oe.Hint)
+	}
+	expectedMsg := fmt.Sprintf("%s is malformed (details hidden: the file holds secrets)", appEnvPath)
+	if oe.Message != expectedMsg {
+		t.Errorf("expected message %q, got %q", expectedMsg, oe.Message)
+	}
+}

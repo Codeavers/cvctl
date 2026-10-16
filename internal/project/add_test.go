@@ -3,6 +3,7 @@ package project
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1132,5 +1133,63 @@ vars:
 	}
 	if !strings.Contains(mergedContent, "NEW_PROMPT_VAR=added_value") {
 		t.Errorf("expected NEW_PROMPT_VAR added, got:\n%s", mergedContent)
+	}
+}
+
+func TestUpdateAppEnvMalformedHidesSecrets(t *testing.T) {
+	tmp := t.TempDir()
+	inst := "my-service-dev"
+	instDir := filepath.Join(tmp, inst)
+	if err := os.MkdirAll(instDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	infraDir := filepath.Join(instDir, "infra")
+	cat := testCatalog(t)
+	stub := &stubRepo{}
+
+	existingCvctlEnv := `CVCTL_INSTANCE=my-service-dev
+CVCTL_ENV=dev
+CVCTL_INFRA_BRANCH=develop
+CVCTL_TRACK_TAG=develop
+CVCTL_INFRA_PATH=.
+CVCTL_STRATEGY=recreate
+CVCTL_DOMAIN_WEB=web.example.com
+`
+	writeTestInfra(t, infraDir, validCompose, validSpec)
+	if err := os.WriteFile(filepath.Join(instDir, "cvctl.env"), []byte(existingCvctlEnv), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	appEnvPath := filepath.Join(instDir, "app.env")
+	if err := os.WriteFile(appEnvPath, []byte("SECRET=\"topsecretvalue\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	e := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "var-lib-cvctl"),
+		Interactive: false,
+		Catalog:     cat,
+		RepoFactory: func(_, _ string) RepoLike { return stub },
+	}
+
+	_, err := Update(context.Background(), e, inst)
+	if err == nil {
+		t.Fatal("expected error for malformed app.env, got nil")
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_APPENV_READ" {
+		t.Fatalf("expected E_APPENV_READ, got %v", err)
+	}
+	if strings.Contains(oe.Message, "topsecretvalue") {
+		t.Errorf("error message leaked secret: %s", oe.Message)
+	}
+	if strings.Contains(oe.Hint, "topsecretvalue") {
+		t.Errorf("error hint leaked secret: %s", oe.Hint)
+	}
+	expectedMsg := fmt.Sprintf("%s is malformed (details hidden: the file holds secrets)", appEnvPath)
+	if oe.Message != expectedMsg {
+		t.Errorf("expected message %q, got %q", expectedMsg, oe.Message)
 	}
 }

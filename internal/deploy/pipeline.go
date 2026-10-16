@@ -178,7 +178,7 @@ func (d *Deployer) readAppEnv(appEnvPath string) (map[string]string, bool, error
 	if err != nil {
 		return nil, false, &output.Error{
 			Code:    "E_APPENV_READ",
-			Message: fmt.Sprintf("cannot parse %s: %v", appEnvPath, err),
+			Message: fmt.Sprintf("%s is malformed (details hidden: the file holds secrets)", appEnvPath),
 			Hint:    "fix syntax in app.env",
 		}
 	}

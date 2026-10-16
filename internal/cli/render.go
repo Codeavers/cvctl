@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -138,9 +139,14 @@ func renderInstance(dir, edge string) (renderResult, error) {
 	var existing map[string]string
 	if _, statErr := os.Stat(appEnvPath); statErr == nil {
 		if existing, err = godotenv.Read(appEnvPath); err != nil {
+			msg := fmt.Sprintf("%s is malformed (details hidden: the file holds secrets)", appEnvPath)
+			var pe *fs.PathError
+			if errors.As(err, &pe) {
+				msg = fmt.Sprintf("cannot read %s: %v", appEnvPath, err)
+			}
 			return renderResult{}, &output.Error{
 				Code:    "E_APPENV_READ",
-				Message: fmt.Sprintf("cannot read %s: %v", appEnvPath, err),
+				Message: msg,
 				Hint:    "fix or remove the file; values set with cvctl set-env live there",
 			}
 		}

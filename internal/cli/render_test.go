@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -225,5 +226,47 @@ func TestDemoWorkerRole(t *testing.T) {
 	j := strings.Index(string(b), "  main-db:")
 	if !strings.Contains(string(b)[i:j], "cvctl.role: worker") {
 		t.Fatal("demo worker must use cvctl.role: worker")
+	}
+}
+
+func TestRenderAppEnvMalformedHidesSecrets(t *testing.T) {
+	inst := copyDemo(t, demoDecisions)
+	appEnvPath := filepath.Join(inst, "app.env")
+	if err := os.WriteFile(appEnvPath, []byte("SECRET=\"topsecretvalue\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errs := run(t, "render", "--instance-dir", inst, "--json")
+	if code == 0 {
+		t.Fatalf("expected render to fail, got exit 0; out=%s", out)
+	}
+	if strings.Contains(out, "topsecretvalue") {
+		t.Errorf("stdout JSON leaked secret: %s", out)
+	}
+	if strings.Contains(errs, "topsecretvalue") {
+		t.Errorf("stderr leaked secret: %s", errs)
+	}
+	var errResp struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+			Hint    string `json:"hint"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(out), &errResp); err != nil {
+		t.Fatalf("failed to parse json output: %v (out: %s)", err, out)
+	}
+	if errResp.Error.Code != "E_APPENV_READ" {
+		t.Errorf("expected code E_APPENV_READ, got %s", errResp.Error.Code)
+	}
+	if strings.Contains(errResp.Error.Message, "topsecretvalue") {
+		t.Errorf("error in json leaked secret: %s", errResp.Error.Message)
+	}
+	if strings.Contains(errResp.Error.Hint, "topsecretvalue") {
+		t.Errorf("hint in json leaked secret: %s", errResp.Error.Hint)
+	}
+	expectedMsg := fmt.Sprintf("%s is malformed (details hidden: the file holds secrets)", appEnvPath)
+	if errResp.Error.Message != expectedMsg {
+		t.Errorf("expected error %q, got %q", expectedMsg, errResp.Error.Message)
 	}
 }

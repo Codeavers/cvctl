@@ -780,7 +780,7 @@ func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
 		if pErr != nil {
 			return nil, &output.Error{
 				Code:    "E_APPENV_READ",
-				Message: fmt.Sprintf("parsing app.env: %v", pErr),
+				Message: fmt.Sprintf("%s is malformed (details hidden: the file holds secrets)", appEnvPath),
 				Hint:    "fix syntax in app.env or remove the file",
 			}
 		}
