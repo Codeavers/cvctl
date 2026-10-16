@@ -3,6 +3,8 @@ package gitrepo_test
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,8 +17,17 @@ import (
 const (
 	testDir     = "/srv/deploy/myproject"
 	testKeyPath = "/etc/cvctl/keys/deploy.key"
-	testSSHCmd  = "GIT_SSH_COMMAND=ssh -i /etc/cvctl/keys/deploy.key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+	testSSHCmd  = "GIT_SSH_COMMAND=ssh -i /etc/cvctl/keys/deploy.key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/etc/cvctl/keys/known_hosts"
 )
+
+var defaultExpectedEnv = []string{"LC_ALL=C", testSSHCmd}
+
+func assertEnv(t *testing.T, got, want []string) {
+	t.Helper()
+	if !slices.Equal(got, want) {
+		t.Errorf("expected env %v, got %v", want, got)
+	}
+}
 
 func TestCloneArgsAndEnv(t *testing.T) {
 	run := &systest.Runner{}
@@ -28,7 +39,7 @@ func TestCloneArgsAndEnv(t *testing.T) {
 
 	url := "git@github.com:codeavers/infra.git"
 	branch := "main"
-	expectedCmd := "git clone --branch main --single-branch git@github.com:codeavers/infra.git " + testDir
+	expectedCmd := "git clone --branch main --single-branch -- git@github.com:codeavers/infra.git " + testDir
 	run.On(expectedCmd, sys.Result{ExitCode: 0})
 
 	ctx := context.Background()
@@ -44,9 +55,7 @@ func TestCloneArgsAndEnv(t *testing.T) {
 	if call.String() != expectedCmd {
 		t.Errorf("expected command %q, got %q", expectedCmd, call.String())
 	}
-	if len(call.Env) != 1 || call.Env[0] != testSSHCmd {
-		t.Errorf("expected env [%s], got %v", testSSHCmd, call.Env)
-	}
+	assertEnv(t, call.Env, defaultExpectedEnv)
 }
 
 func TestCloneNoKeyPath(t *testing.T) {
@@ -59,7 +68,7 @@ func TestCloneNoKeyPath(t *testing.T) {
 
 	url := "file:///tmp/repo.git"
 	branch := "main"
-	expectedCmd := "git clone --branch main --single-branch file:///tmp/repo.git " + testDir
+	expectedCmd := "git clone --branch main --single-branch -- file:///tmp/repo.git " + testDir
 	run.On(expectedCmd, sys.Result{ExitCode: 0})
 
 	ctx := context.Background()
@@ -72,9 +81,7 @@ func TestCloneNoKeyPath(t *testing.T) {
 		t.Fatalf("expected 1 call, got %d", len(run.Calls))
 	}
 	call := run.Calls[0]
-	if len(call.Env) != 0 {
-		t.Errorf("expected empty env when KeyPath is empty, got %v", call.Env)
-	}
+	assertEnv(t, call.Env, []string{"LC_ALL=C"})
 }
 
 func TestFetchReturnsCommit(t *testing.T) {
@@ -105,9 +112,8 @@ func TestFetchReturnsCommit(t *testing.T) {
 		t.Fatalf("expected 2 calls, got %d", len(run.Calls))
 	}
 	for i, call := range run.Calls {
-		if len(call.Env) != 1 || call.Env[0] != testSSHCmd {
-			t.Errorf("call %d: expected env [%s], got %v", i, testSSHCmd, call.Env)
-		}
+		assertEnv(t, call.Env, defaultExpectedEnv)
+		_ = i
 	}
 }
 
@@ -155,7 +161,7 @@ func TestCheckout(t *testing.T) {
 	}
 
 	commit := "a1b2c3d4"
-	expectedCmd := "git -C " + testDir + " checkout --detach " + commit
+	expectedCmd := "git -C " + testDir + " checkout --detach " + commit + " --"
 	run.On(expectedCmd, sys.Result{ExitCode: 0})
 
 	ctx := context.Background()
@@ -171,9 +177,7 @@ func TestCheckout(t *testing.T) {
 	if call.String() != expectedCmd {
 		t.Errorf("expected command %q, got %q", expectedCmd, call.String())
 	}
-	if len(call.Env) != 1 || call.Env[0] != testSSHCmd {
-		t.Errorf("expected env [%s], got %v", testSSHCmd, call.Env)
-	}
+	assertEnv(t, call.Env, defaultExpectedEnv)
 }
 
 func TestShowSuccess(t *testing.T) {
@@ -199,6 +203,10 @@ func TestShowSuccess(t *testing.T) {
 	if string(data) != string(expectedContent) {
 		t.Fatalf("expected %q, got %q", string(expectedContent), string(data))
 	}
+	if len(run.Calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(run.Calls))
+	}
+	assertEnv(t, run.Calls[0].Env, defaultExpectedEnv)
 }
 
 func TestShowMissingFile(t *testing.T) {
@@ -349,7 +357,7 @@ func TestLsRemote(t *testing.T) {
 	}
 
 	url := "git@github.com:codeavers/infra.git"
-	expectedCmd := "git ls-remote " + url + " HEAD"
+	expectedCmd := "git ls-remote -- " + url + " HEAD"
 	run.On(expectedCmd, sys.Result{
 		ExitCode: 0,
 		Stdout:   []byte("a1b2c3d4e5f6\tHEAD\n"),
@@ -368,9 +376,7 @@ func TestLsRemote(t *testing.T) {
 	if call.String() != expectedCmd {
 		t.Errorf("expected command %q, got %q", expectedCmd, call.String())
 	}
-	if len(call.Env) != 1 || call.Env[0] != testSSHCmd {
-		t.Errorf("expected env [%s], got %v", testSSHCmd, call.Env)
-	}
+	assertEnv(t, call.Env, defaultExpectedEnv)
 }
 
 func TestLsRemoteFailure(t *testing.T) {
@@ -382,7 +388,7 @@ func TestLsRemoteFailure(t *testing.T) {
 	}
 
 	url := "git@github.com:codeavers/infra.git"
-	expectedCmd := "git ls-remote " + url + " HEAD"
+	expectedCmd := "git ls-remote -- " + url + " HEAD"
 	run.On(expectedCmd, sys.Result{
 		ExitCode: 128,
 		Stderr:   []byte("Permission denied (publickey)"),
@@ -403,5 +409,194 @@ func TestLsRemoteFailure(t *testing.T) {
 	}
 	if oe.Hint != "check the deploy key is added to the repo with read access" {
 		t.Errorf("expected hint 'check the deploy key is added to the repo with read access', got %q", oe.Hint)
+	}
+}
+
+func assertBadRef(t *testing.T, err error, run *systest.Runner) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) {
+		t.Fatalf("expected *output.Error, got %T: %v", err, err)
+	}
+	if oe.Code != "E_GIT_BAD_REF" {
+		t.Errorf("expected code E_GIT_BAD_REF, got %s", oe.Code)
+	}
+	if oe.Hint != "refs and URLs cannot start with '-'" {
+		t.Errorf("expected hint \"refs and URLs cannot start with '-'\", got %q", oe.Hint)
+	}
+	if len(run.Calls) != 0 {
+		t.Errorf("expected no runner calls, got %d", len(run.Calls))
+	}
+}
+
+func TestArgumentInjectionRejectsDash(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Clone bad URL", func(t *testing.T) {
+		run := &systest.Runner{}
+		repo := &gitrepo.Repo{Run: run, Dir: testDir, KeyPath: testKeyPath}
+		err := repo.Clone(ctx, "-u", "main")
+		assertBadRef(t, err, run)
+	})
+
+	t.Run("Clone bad branch", func(t *testing.T) {
+		run := &systest.Runner{}
+		repo := &gitrepo.Repo{Run: run, Dir: testDir, KeyPath: testKeyPath}
+		err := repo.Clone(ctx, "git@github.com:foo/bar.git", "--branch-option")
+		assertBadRef(t, err, run)
+	})
+
+	t.Run("Fetch bad branch", func(t *testing.T) {
+		run := &systest.Runner{}
+		repo := &gitrepo.Repo{Run: run, Dir: testDir, KeyPath: testKeyPath}
+		_, err := repo.Fetch(ctx, "-v")
+		assertBadRef(t, err, run)
+	})
+
+	t.Run("Checkout bad commit", func(t *testing.T) {
+		run := &systest.Runner{}
+		repo := &gitrepo.Repo{Run: run, Dir: testDir, KeyPath: testKeyPath}
+		err := repo.Checkout(ctx, "--detach")
+		assertBadRef(t, err, run)
+	})
+
+	t.Run("Show bad commit", func(t *testing.T) {
+		run := &systest.Runner{}
+		repo := &gitrepo.Repo{Run: run, Dir: testDir, KeyPath: testKeyPath}
+		_, err := repo.Show(ctx, "-badcommit", "file.txt")
+		assertBadRef(t, err, run)
+	})
+
+	t.Run("IsAncestor bad commit", func(t *testing.T) {
+		run := &systest.Runner{}
+		repo := &gitrepo.Repo{Run: run, Dir: testDir, KeyPath: testKeyPath}
+		_, err := repo.IsAncestor(ctx, "-badcommit", "main")
+		assertBadRef(t, err, run)
+	})
+
+	t.Run("IsAncestor bad branch", func(t *testing.T) {
+		run := &systest.Runner{}
+		repo := &gitrepo.Repo{Run: run, Dir: testDir, KeyPath: testKeyPath}
+		_, err := repo.IsAncestor(ctx, "abcdef1", "-badbranch")
+		assertBadRef(t, err, run)
+	})
+
+	t.Run("LsRemote bad URL", func(t *testing.T) {
+		run := &systest.Runner{}
+		repo := &gitrepo.Repo{Run: run, Dir: testDir, KeyPath: testKeyPath}
+		err := repo.LsRemote(ctx, "--upload-pack=echo pwn")
+		assertBadRef(t, err, run)
+	})
+}
+
+func TestRejectBadKeyPath(t *testing.T) {
+	ctx := context.Background()
+	badPaths := []struct {
+		name string
+		path string
+	}{
+		{"space", "/etc/cvctl/keys/deploy key"},
+		{"tab", "/etc/cvctl/keys/deploy\tkey"},
+		{"newline", "/etc/cvctl/keys/deploy\nkey"},
+		{"single quote", "/etc/cvctl/keys/deploy'key"},
+		{"double quote", "/etc/cvctl/keys/deploy\"key"},
+		{"dollar", "/etc/cvctl/keys/$key"},
+		{"backslash", "/etc/cvctl/keys/deploy\\key"},
+		{"backtick", "/etc/cvctl/keys/`key`"},
+		{"semicolon", "/etc/cvctl/keys/key;rm"},
+		{"ampersand", "/etc/cvctl/keys/key&echo"},
+		{"pipe", "/etc/cvctl/keys/key|cat"},
+		{"less than", "/etc/cvctl/keys/key<input"},
+		{"greater than", "/etc/cvctl/keys/key>output"},
+		{"open paren", "/etc/cvctl/keys/key(1)"},
+		{"close paren", "/etc/cvctl/keys/key)1("},
+	}
+
+	for _, tc := range badPaths {
+		t.Run(tc.name, func(t *testing.T) {
+			run := &systest.Runner{}
+			repo := &gitrepo.Repo{Run: run, Dir: testDir, KeyPath: tc.path}
+
+			err := repo.Clone(ctx, "git@github.com:codeavers/infra.git", "main")
+			if err == nil {
+				t.Fatalf("expected error for path %q, got nil", tc.path)
+			}
+			var oe *output.Error
+			if !errors.As(err, &oe) {
+				t.Fatalf("expected *output.Error, got %T: %v", err, err)
+			}
+			if oe.Code != "E_GIT_BAD_KEYPATH" {
+				t.Errorf("expected code E_GIT_BAD_KEYPATH, got %s", oe.Code)
+			}
+			if len(run.Calls) != 0 {
+				t.Errorf("expected no runner calls, got %d", len(run.Calls))
+			}
+		})
+	}
+}
+
+func TestSSHCommandEnvExact(t *testing.T) {
+	keyPath := "/var/lib/cvctl/instances/proj-dev/deploy.key"
+	expectedKnownHosts := filepath.Join("/var/lib/cvctl/instances/proj-dev", "known_hosts")
+	expectedSSHCmd := "GIT_SSH_COMMAND=ssh -i " + keyPath + " -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=" + expectedKnownHosts
+
+	run := &systest.Runner{}
+	repo := &gitrepo.Repo{
+		Run:     run,
+		Dir:     testDir,
+		KeyPath: keyPath,
+	}
+
+	expectedCmd := "git ls-remote -- git@github.com:codeavers/infra.git HEAD"
+	run.On(expectedCmd, sys.Result{ExitCode: 0})
+
+	err := repo.LsRemote(context.Background(), "git@github.com:codeavers/infra.git")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(run.Calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(run.Calls))
+	}
+	assertEnv(t, run.Calls[0].Env, []string{"LC_ALL=C", expectedSSHCmd})
+}
+
+func TestCloneDirNotEmpty(t *testing.T) {
+	run := &systest.Runner{}
+	repo := &gitrepo.Repo{
+		Run:     run,
+		Dir:     testDir,
+		KeyPath: testKeyPath,
+	}
+
+	url := "git@github.com:codeavers/infra.git"
+	branch := "main"
+	expectedCmd := "git clone --branch main --single-branch -- git@github.com:codeavers/infra.git " + testDir
+	run.On(expectedCmd, sys.Result{
+		ExitCode: 128,
+		Stderr:   []byte("fatal: destination path '" + testDir + "' already exists and is not an empty directory.\n"),
+	})
+
+	ctx := context.Background()
+	err := repo.Clone(ctx, url, branch)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+
+	var oe *output.Error
+	if !errors.As(err, &oe) {
+		t.Fatalf("expected *output.Error, got %T: %v", err, err)
+	}
+	if oe.Code != "E_GIT_DIR_NOT_EMPTY" {
+		t.Errorf("expected code E_GIT_DIR_NOT_EMPTY, got %s", oe.Code)
+	}
+	if !strings.Contains(oe.Message, testDir) {
+		t.Errorf("expected message to name dir %q, got %q", testDir, oe.Message)
+	}
+	if oe.Hint != "remove it or run cvctl project update" {
+		t.Errorf("expected hint 'remove it or run cvctl project update', got %q", oe.Hint)
 	}
 }
