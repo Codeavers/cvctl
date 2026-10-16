@@ -105,7 +105,9 @@ func (DockerDaemonStep) Apply(ctx context.Context, e *Env, p Plan) (string, erro
 	}
 	out = append(out, '\n')
 
-	_ = e.FS.MkdirAll("/etc/docker", 0o755, sys.Owner{User: "root", Group: "root"})
+	if err := e.FS.MkdirAll("/etc/docker", 0o755, sys.Owner{User: "root", Group: "root"}); err != nil {
+		return "", err
+	}
 	if err := e.FS.WriteFile(dockerDaemonConfigPath, out, 0o644, sys.Owner{User: "root", Group: "root"}); err != nil {
 		return "", err
 	}
@@ -115,34 +117,64 @@ func (DockerDaemonStep) Apply(ctx context.Context, e *Env, p Plan) (string, erro
 		return "", err
 	}
 	if res.ExitCode != 0 {
-		return "", fmt.Errorf("docker ps failed (exit %d): %s", res.ExitCode, strings.TrimSpace(string(res.Stderr)))
+		stderr := strings.TrimSpace(string(res.Stderr))
+		msg := fmt.Sprintf("docker ps failed (exit %d)", res.ExitCode)
+		if stderr != "" {
+			msg += ": " + stderr
+		}
+		return "", &output.Error{
+			Code:    "E_DOCKER_PS_FAILED",
+			Message: msg,
+			Hint:    "systemctl status docker",
+		}
 	}
 
 	hasContainers := strings.TrimSpace(string(res.Stdout)) != ""
-	if !hasContainers {
-		if err := runCmd(ctx, e, sys.Cmd{Name: "systemctl", Args: []string{"restart", "docker"}}); err != nil {
-			return "", err
-		}
-		return "", nil
-	}
-
-	if e.Interactive && e.Prompt != nil {
-		ans, err := e.Prompt.Ask(hostcfg.Question{
-			Key:     "confirm_docker_restart",
-			Prompt:  "Restart Docker daemon now?",
-			Help:    "Running containers will restart.",
-			Options: []string{"yes", "no"},
-		}, "no")
-		if err != nil {
-			return "", err
-		}
-		if ans == "yes" {
-			if err := runCmd(ctx, e, sys.Cmd{Name: "systemctl", Args: []string{"restart", "docker"}}); err != nil {
+	// On an adopted host, or when containers are running, restarting Docker always requires confirmation.
+	needsConfirm := hasContainers || e.Adopt
+	if needsConfirm {
+		if e.Interactive && e.Prompt != nil {
+			ans, err := e.Prompt.Ask(hostcfg.Question{
+				Key:     "confirm_docker_restart",
+				Prompt:  "Restart Docker daemon now?",
+				Help:    "Running containers will restart.",
+				Options: []string{"yes", "no"},
+			}, "no")
+			if err != nil {
 				return "", err
 			}
-			return "", nil
+			if ans == "yes" {
+				if err := restartDocker(ctx, e); err != nil {
+					return "", err
+				}
+				return "", nil
+			}
 		}
+		return dockerRestartPendingMsg, nil
 	}
 
-	return dockerRestartPendingMsg, nil
+	if err := restartDocker(ctx, e); err != nil {
+		return "", err
+	}
+	return "", nil
+}
+
+func restartDocker(ctx context.Context, e *Env) error {
+	res, err := e.Run.Run(ctx, sys.Cmd{Name: "systemctl", Args: []string{"restart", "docker"}})
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		stderr := strings.TrimSpace(string(res.Stderr))
+		msg := fmt.Sprintf("systemctl restart docker failed (exit %d)", res.ExitCode)
+		if stderr != "" {
+			msg += ": " + stderr
+		}
+		return &output.Error{
+			Code:    "E_SYSTEMCTL_FAILED",
+			Message: msg,
+			Hint:    "check systemctl status docker",
+		}
+	}
+	return nil
 }

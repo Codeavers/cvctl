@@ -3,10 +3,13 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/codeavers/cvctl/internal/hostcfg/hostcfgtest"
+	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/internal/sys/systest"
 )
@@ -239,6 +242,122 @@ func TestDaemonInteractiveRestartNo(t *testing.T) {
 
 	if slices.ContainsFunc(runner.Calls, func(c sys.Cmd) bool { return c.String() == "systemctl restart docker" }) {
 		t.Fatal("systemctl restart docker should not be called when user answers no")
+	}
+}
+
+func TestDaemonAdoptNoContainersNonInteractive(t *testing.T) {
+	env, runner, _ := newDockerTestEnv()
+	env.Adopt = true
+	env.Interactive = false
+	runner.On("docker ps -q", sys.Result{Stdout: []byte(""), ExitCode: 0})
+
+	step := DockerDaemonStep{}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected Check error: %v", err)
+	}
+
+	pending, err := step.Apply(context.Background(), env, plan)
+	if err != nil {
+		t.Fatalf("unexpected Apply error: %v", err)
+	}
+	wantPending := "daemon.json updated; run: systemctl restart docker (running containers will restart)"
+	if pending != wantPending {
+		t.Fatalf("got pending %q, want %q", pending, wantPending)
+	}
+
+	for _, c := range runner.Calls {
+		if c.String() == "systemctl restart docker" {
+			t.Fatal("systemctl restart docker should NOT be called on adopted host non-interactively")
+		}
+	}
+}
+
+func TestDaemonAdoptInteractiveRestartYes(t *testing.T) {
+	env, runner, _ := newDockerTestEnv()
+	env.Adopt = true
+	env.Interactive = true
+	env.Prompt = hostcfgtest.NewPrompter(t, map[string]string{
+		"confirm_docker_restart": "yes",
+	})
+	runner.On("docker ps -q", sys.Result{Stdout: []byte(""), ExitCode: 0})
+	runner.On("systemctl restart docker", sys.Result{ExitCode: 0})
+
+	step := DockerDaemonStep{}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected Check error: %v", err)
+	}
+
+	pending, err := step.Apply(context.Background(), env, plan)
+	if err != nil {
+		t.Fatalf("unexpected Apply error: %v", err)
+	}
+	if pending != "" {
+		t.Fatalf("expected empty pending on confirmation, got %q", pending)
+	}
+
+	if !slices.ContainsFunc(runner.Calls, func(c sys.Cmd) bool { return c.String() == "systemctl restart docker" }) {
+		t.Fatal("expected systemctl restart docker to be called on adopted host when confirmed")
+	}
+}
+
+func TestDaemonDockerPsFailure(t *testing.T) {
+	env, runner, _ := newDockerTestEnv()
+	runner.On("docker ps -q", sys.Result{
+		ExitCode: 1,
+		Stderr:   []byte("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n"),
+	})
+
+	step := DockerDaemonStep{}
+	plan, _ := step.Check(context.Background(), env)
+	_, err := step.Apply(context.Background(), env, plan)
+	if err == nil {
+		t.Fatal("expected error on docker ps failure, got nil")
+	}
+
+	var oe *output.Error
+	if !errors.As(err, &oe) {
+		t.Fatalf("want output.Error, got %v", err)
+	}
+	if oe.Code != "E_DOCKER_PS_FAILED" {
+		t.Errorf("got code %q, want E_DOCKER_PS_FAILED", oe.Code)
+	}
+	if oe.Hint != "systemctl status docker" {
+		t.Errorf("got hint %q, want 'systemctl status docker'", oe.Hint)
+	}
+	if !strings.Contains(oe.Message, "Cannot connect to the Docker daemon") {
+		t.Errorf("expected stderr in message, got %q", oe.Message)
+	}
+}
+
+func TestDaemonSystemctlFailure(t *testing.T) {
+	env, runner, _ := newDockerTestEnv()
+	runner.On("docker ps -q", sys.Result{Stdout: []byte(""), ExitCode: 0})
+	runner.On("systemctl restart docker", sys.Result{
+		ExitCode: 1,
+		Stderr:   []byte("Job for docker.service failed because the control process exited with error code.\n"),
+	})
+
+	step := DockerDaemonStep{}
+	plan, _ := step.Check(context.Background(), env)
+	_, err := step.Apply(context.Background(), env, plan)
+	if err == nil {
+		t.Fatal("expected error on systemctl failure, got nil")
+	}
+
+	var oe *output.Error
+	if !errors.As(err, &oe) {
+		t.Fatalf("want output.Error, got %v", err)
+	}
+	if oe.Code != "E_SYSTEMCTL_FAILED" {
+		t.Errorf("got code %q, want E_SYSTEMCTL_FAILED", oe.Code)
+	}
+	if oe.Hint != "check systemctl status docker" {
+		t.Errorf("got hint %q, want 'check systemctl status docker'", oe.Hint)
+	}
+	if !strings.Contains(oe.Message, "Job for docker.service failed") {
+		t.Errorf("expected stderr in message, got %q", oe.Message)
 	}
 }
 

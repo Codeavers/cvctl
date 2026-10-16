@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/sys"
 )
 
@@ -62,22 +63,10 @@ func isComposeSatisfied(versionStr string) bool {
 	return false
 }
 
-func checkDockerSatisfied(ctx context.Context, e *Env) bool {
-	res, err := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"compose", "version", "--short"}})
-	if err != nil || res.ExitCode != 0 || !isComposeSatisfied(string(res.Stdout)) {
-		return false
-	}
-	res, err = e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"info"}})
-	if err != nil || res.ExitCode != 0 {
-		return false
-	}
-	return true
-}
-
 func checkPackageInstalled(ctx context.Context, e *Env, pkg string) bool {
 	res, err := e.Run.Run(ctx, sys.Cmd{
 		Name: "dpkg-query",
-		Args: []string{"-W", "-f='${Status}'", pkg},
+		Args: []string{"-W", "-f=${Status}", pkg},
 	})
 	if err != nil || res.ExitCode != 0 {
 		return false
@@ -87,9 +76,22 @@ func checkPackageInstalled(ctx context.Context, e *Env, pkg string) bool {
 
 func (PackagesStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	var changes []string
-	if !checkDockerSatisfied(ctx, e) {
+
+	res, err := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"compose", "version", "--short"}})
+	if err == nil && res.ExitCode == 0 && isComposeSatisfied(string(res.Stdout)) {
+		// Compose is installed and version is >= 2.24.0. Check daemon responsiveness.
+		resInfo, errInfo := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"info"}})
+		if errInfo != nil || resInfo.ExitCode != 0 {
+			return Plan{}, &output.Error{
+				Code:    "E_DOCKER_DAEMON_DOWN",
+				Message: "docker is installed but the daemon is not responding",
+				Hint:    "systemctl start docker",
+			}
+		}
+	} else {
 		changes = append(changes, "install docker")
 	}
+
 	for _, pkg := range defaultOtherPackages {
 		if !checkPackageInstalled(ctx, e, pkg) {
 			changes = append(changes, "install package "+pkg)
@@ -111,15 +113,27 @@ func (PackagesStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 		}
 	}
 
+	// Base packages must be installed before adding the Docker repo because Docker repo setup requires curl.
+	if len(missingPkgs) > 0 {
+		args := append([]string{"install", "-y"}, missingPkgs...)
+		if err := runAptCmd(ctx, e, sys.Cmd{
+			Name: "apt-get",
+			Args: args,
+			Env:  []string{"DEBIAN_FRONTEND=noninteractive"},
+		}); err != nil {
+			return "", err
+		}
+	}
+
 	if installDocker {
-		if err := runCmd(ctx, e, sys.Cmd{
+		if err := runRepoCmd(ctx, e, sys.Cmd{
 			Name: "install",
 			Args: []string{"-m", "0755", "-d", "/etc/apt/keyrings"},
 		}); err != nil {
 			return "", err
 		}
 
-		if err := runCmd(ctx, e, sys.Cmd{
+		if err := runRepoCmd(ctx, e, sys.Cmd{
 			Name: "curl",
 			Args: []string{"-fsSL", "https://download.docker.com/linux/ubuntu/gpg", "-o", "/etc/apt/keyrings/docker.asc"},
 		}); err != nil {
@@ -134,17 +148,28 @@ func (PackagesStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 			return "", err
 		}
 		if res.ExitCode != 0 {
-			return "", fmt.Errorf("dpkg --print-architecture failed (exit %d): %s", res.ExitCode, strings.TrimSpace(string(res.Stderr)))
+			stderr := strings.TrimSpace(string(res.Stderr))
+			msg := fmt.Sprintf("dpkg --print-architecture failed (exit %d)", res.ExitCode)
+			if stderr != "" {
+				msg += ": " + stderr
+			}
+			return "", &output.Error{
+				Code:    "E_DOCKER_REPO",
+				Message: msg,
+				Hint:    "check network access to download.docker.com",
+			}
 		}
 		arch := strings.TrimSpace(string(res.Stdout))
 
 		dockerListContent := fmt.Sprintf("deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable\n", arch)
-		_ = e.FS.MkdirAll("/etc/apt/sources.list.d", 0o755, sys.Owner{User: "root", Group: "root"})
+		if err := e.FS.MkdirAll("/etc/apt/sources.list.d", 0o755, sys.Owner{User: "root", Group: "root"}); err != nil {
+			return "", err
+		}
 		if err := e.FS.WriteFile("/etc/apt/sources.list.d/docker.list", []byte(dockerListContent), 0o644, sys.Owner{User: "root", Group: "root"}); err != nil {
 			return "", err
 		}
 
-		if err := runCmd(ctx, e, sys.Cmd{
+		if err := runAptCmd(ctx, e, sys.Cmd{
 			Name: "apt-get",
 			Args: []string{"update"},
 			Env:  []string{"DEBIAN_FRONTEND=noninteractive"},
@@ -152,20 +177,9 @@ func (PackagesStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 			return "", err
 		}
 
-		if err := runCmd(ctx, e, sys.Cmd{
+		if err := runAptCmd(ctx, e, sys.Cmd{
 			Name: "apt-get",
 			Args: []string{"install", "-y", "docker-ce", "docker-ce-cli", "containerd.io", "docker-buildx-plugin", "docker-compose-plugin"},
-			Env:  []string{"DEBIAN_FRONTEND=noninteractive"},
-		}); err != nil {
-			return "", err
-		}
-	}
-
-	if len(missingPkgs) > 0 {
-		args := append([]string{"install", "-y"}, missingPkgs...)
-		if err := runCmd(ctx, e, sys.Cmd{
-			Name: "apt-get",
-			Args: args,
 			Env:  []string{"DEBIAN_FRONTEND=noninteractive"},
 		}); err != nil {
 			return "", err
@@ -175,13 +189,42 @@ func (PackagesStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 	return "", nil
 }
 
-func runCmd(ctx context.Context, e *Env, c sys.Cmd) error {
+func runAptCmd(ctx context.Context, e *Env, c sys.Cmd) error {
 	res, err := e.Run.Run(ctx, c)
 	if err != nil {
 		return err
 	}
 	if res.ExitCode != 0 {
-		return fmt.Errorf("%s failed (exit %d): %s", c.String(), res.ExitCode, strings.TrimSpace(string(res.Stderr)))
+		stderr := strings.TrimSpace(string(res.Stderr))
+		msg := fmt.Sprintf("%s failed (exit %d)", c.String(), res.ExitCode)
+		if stderr != "" {
+			msg += ": " + stderr
+		}
+		return &output.Error{
+			Code:    "E_APT_FAILED",
+			Message: msg,
+			Hint:    "check apt sources and network, then re-run cvctl init",
+		}
+	}
+	return nil
+}
+
+func runRepoCmd(ctx context.Context, e *Env, c sys.Cmd) error {
+	res, err := e.Run.Run(ctx, c)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		stderr := strings.TrimSpace(string(res.Stderr))
+		msg := fmt.Sprintf("%s failed (exit %d)", c.String(), res.ExitCode)
+		if stderr != "" {
+			msg += ": " + stderr
+		}
+		return &output.Error{
+			Code:    "E_DOCKER_REPO",
+			Message: msg,
+			Hint:    "check network access to download.docker.com",
+		}
 	}
 	return nil
 }
