@@ -1853,8 +1853,3 @@ func TestPromoteFailureOverrideWriteRestoresPreviousState(t *testing.T) {
 		t.Fatalf("expected checkout restored to %s, got %s", oldCommit, lastCheckout)
 	}
 }
-
-
-
-
-

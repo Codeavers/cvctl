@@ -69,15 +69,15 @@ type Result struct {
 
 // Deployer coordinates instance deployment, promotion, health checks, and rollback.
 type Deployer struct {
-	DeployRoot string
-	TraefikDir string
-	FS         sys.FS
-	Store      *state.Store
-	Compose    func(override, envFile string) ComposeAPI
-	Repo       CheckoutAPI
-	Notify     notify.Notifier
-	Restore    RestorePointer
-	Host       *hostcfg.Config
+	DeployRoot     string
+	TraefikDir     string
+	FS             sys.FS
+	Store          *state.Store
+	Compose        func(override, envFile string) ComposeAPI
+	Repo           CheckoutAPI
+	Notify         notify.Notifier
+	Restore        RestorePointer
+	Host           *hostcfg.Config
 	Catalog        kinds.Catalog
 	Clock          func() time.Time
 	Health         func(ctx context.Context, inst, override, envFile string) error
