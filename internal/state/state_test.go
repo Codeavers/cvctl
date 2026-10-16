@@ -82,6 +82,7 @@ func TestStoreRoundTrip(t *testing.T) {
 		FailedHash:     "failedhash123",
 		Blocked:        []string{"MISSING_KEY", "ANOTHER_KEY"},
 		PausedReason:   "maintenance in progress",
+		PausedWantHash: "hash-to-skip",
 		RollbackFailed: false,
 		UpdatedAt:      now,
 	}
@@ -132,6 +133,9 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 	if loaded.PausedReason != st.PausedReason {
 		t.Errorf("PausedReason: got %q, want %q", loaded.PausedReason, st.PausedReason)
+	}
+	if loaded.PausedWantHash != st.PausedWantHash {
+		t.Errorf("PausedWantHash: got %q, want %q", loaded.PausedWantHash, st.PausedWantHash)
 	}
 	if loaded.RollbackFailed != st.RollbackFailed {
 		t.Errorf("RollbackFailed: got %v, want %v", loaded.RollbackFailed, st.RollbackFailed)

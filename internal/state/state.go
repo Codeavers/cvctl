@@ -64,6 +64,7 @@ type State struct {
 	FailedHash     string    `json:"failed_hash,omitempty"`
 	Blocked        []string  `json:"blocked,omitempty"`
 	PausedReason   string    `json:"paused_reason,omitempty"`
+	PausedWantHash string    `json:"paused_want_hash,omitempty"`
 	RollbackFailed bool      `json:"rollback_failed,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
