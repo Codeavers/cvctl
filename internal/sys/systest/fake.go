@@ -211,10 +211,17 @@ func (f *FS) Files() map[string]sys.FileInfo {
 	return out
 }
 
-// FakeLocker simulates mutual exclusion on file locks.
+type LockCall struct {
+	Path  string
+	Mode  os.FileMode
+	Owner sys.Owner
+}
+
+// FakeLocker simulates mutual exclusion on file locks and records requests.
 type FakeLocker struct {
 	mu     sync.Mutex
 	locked map[string]bool
+	Calls  []LockCall
 }
 
 func NewFakeLocker() *FakeLocker {
@@ -222,9 +229,14 @@ func NewFakeLocker() *FakeLocker {
 }
 
 func (fl *FakeLocker) Lock(p string) (func(), error) {
+	return fl.LockFile(p, 0o600, sys.Owner{})
+}
+
+func (fl *FakeLocker) LockFile(p string, mode os.FileMode, o sys.Owner) (func(), error) {
 	fl.mu.Lock()
 	defer fl.mu.Unlock()
 	cleanPath := path.Clean(p)
+	fl.Calls = append(fl.Calls, LockCall{Path: cleanPath, Mode: mode, Owner: o})
 	if fl.locked[cleanPath] {
 		return nil, sys.ErrLocked
 	}
@@ -238,5 +250,10 @@ func (fl *FakeLocker) Lock(p string) (func(), error) {
 
 // NoopLock is a Lock function that always succeeds with a no-op unlock func.
 func NoopLock(_ string) (func(), error) {
+	return func() {}, nil
+}
+
+// NoopLockFile is a LockFile function that always succeeds with a no-op unlock func.
+func NoopLockFile(_ string, _ os.FileMode, _ sys.Owner) (func(), error) {
 	return func() {}, nil
 }

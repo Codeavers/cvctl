@@ -269,24 +269,7 @@ func (s *Store) Lock(inst string) (func(), error) {
 		}
 	}
 	lockPath := filepath.Join(instDir, "lock")
-	if _, err := s.fs.Stat(lockPath); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			if err := s.fs.WriteFile(lockPath, nil, 0o660, deployOwner); err != nil {
-				return nil, &output.Error{
-					Code:    "E_INSTANCE_LOCK_FAILED",
-					Message: fmt.Sprintf("cannot create lock file %s: %v", lockPath, err),
-					Hint:    "check permissions on " + s.root,
-				}
-			}
-		} else {
-			return nil, &output.Error{
-				Code:    "E_INSTANCE_LOCK_FAILED",
-				Message: fmt.Sprintf("cannot stat lock file %s: %v", lockPath, err),
-				Hint:    "check permissions on " + s.root,
-			}
-		}
-	}
-	unlock, err := sys.Lock(lockPath)
+	unlock, err := sys.LockFile(lockPath, 0o660, deployOwner)
 	if err != nil {
 		if errors.Is(err, sys.ErrLocked) {
 			return nil, &output.Error{

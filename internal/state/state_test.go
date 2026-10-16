@@ -197,9 +197,9 @@ func TestLockHeldReturnsInstanceLocked(t *testing.T) {
 	store := NewStore(fs, "/var/lib/cvctl")
 
 	fl := systest.NewFakeLocker()
-	oldLock := sys.Lock
-	t.Cleanup(func() { sys.Lock = oldLock })
-	sys.Lock = fl.Lock
+	oldLockFile := sys.LockFile
+	t.Cleanup(func() { sys.LockFile = oldLockFile })
+	sys.LockFile = fl.LockFile
 
 	unlock1, err := store.Lock("my-app")
 	if err != nil {
@@ -291,9 +291,9 @@ func TestLockOtherErrorReturnsLockFailed(t *testing.T) {
 	fs := systest.NewFS()
 	store := NewStore(fs, "/var/lib/cvctl")
 
-	oldLock := sys.Lock
-	t.Cleanup(func() { sys.Lock = oldLock })
-	sys.Lock = func(p string) (func(), error) {
+	oldLockFile := sys.LockFile
+	t.Cleanup(func() { sys.LockFile = oldLockFile })
+	sys.LockFile = func(p string, mode os.FileMode, o sys.Owner) (func(), error) {
 		return nil, errors.New("permission denied")
 	}
 
@@ -353,9 +353,9 @@ func TestLockFileOwnershipDeployer(t *testing.T) {
 	store := NewStore(fs, "/var/lib/cvctl")
 
 	fl := systest.NewFakeLocker()
-	oldLock := sys.Lock
-	t.Cleanup(func() { sys.Lock = oldLock })
-	sys.Lock = fl.Lock
+	oldLockFile := sys.LockFile
+	t.Cleanup(func() { sys.LockFile = oldLockFile })
+	sys.LockFile = fl.LockFile
 
 	unlock, err := store.Lock("my-app")
 	if err != nil {
@@ -363,19 +363,18 @@ func TestLockFileOwnershipDeployer(t *testing.T) {
 	}
 	defer unlock()
 
-	files := fs.Files()
-	lockInfo, ok := files["/var/lib/cvctl/my-app/lock"]
-	if !ok {
-		t.Fatalf("expected lock file /var/lib/cvctl/my-app/lock to exist")
+	if len(fl.Calls) != 1 {
+		t.Fatalf("expected 1 call to LockFile, got %d", len(fl.Calls))
 	}
-	if lockInfo.IsDir {
-		t.Fatalf("lock file should not be a directory")
+	call := fl.Calls[0]
+	if call.Path != "/var/lib/cvctl/my-app/lock" {
+		t.Errorf("expected path /var/lib/cvctl/my-app/lock, got %s", call.Path)
 	}
-	if lockInfo.User != "deployer" || lockInfo.Group != "deploy" {
-		t.Errorf("lock file owner: got %s:%s, want deployer:deploy", lockInfo.User, lockInfo.Group)
+	if call.Mode != 0o660 {
+		t.Errorf("expected mode 0660, got %o", call.Mode)
 	}
-	if lockInfo.Mode != 0o660 {
-		t.Errorf("lock file mode: got %o, want 0660", lockInfo.Mode)
+	if call.Owner.User != "deployer" || call.Owner.Group != "deploy" {
+		t.Errorf("expected owner deployer:deploy, got %s:%s", call.Owner.User, call.Owner.Group)
 	}
 }
 
