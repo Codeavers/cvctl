@@ -660,6 +660,52 @@ func TestConfirmSSHAlreadyReverted(t *testing.T) {
 	}
 }
 
+type callbackRunner struct {
+	*systest.Runner
+	onRun func(c sys.Cmd)
+}
+
+func (c *callbackRunner) Run(ctx context.Context, cmd sys.Cmd) (sys.Result, error) {
+	if c.onRun != nil {
+		c.onRun(cmd)
+	}
+	return c.Runner.Run(ctx, cmd)
+}
+
+func TestConfirmSSHRevertedWhileStoppingTimer(t *testing.T) {
+	env, baseRunner, fs := newSSHTestEnv("andres", true, false)
+	_ = fs.WriteFile(sshDropInPath, []byte(sshDropInContent), 0o644, sys.Owner{User: "root", Group: "root"})
+	baseRunner.On("systemctl stop cvctl-ssh-revert.timer cvctl-ssh-revert.service", sys.Result{
+		ExitCode: 0,
+	})
+	baseRunner.On("systemctl is-active cvctl-ssh-revert.timer", sys.Result{
+		Stdout:   []byte("inactive\n"),
+		ExitCode: 3,
+	})
+	runner := &callbackRunner{
+		Runner: baseRunner,
+		onRun: func(c sys.Cmd) {
+			if strings.HasPrefix(c.String(), "systemctl stop cvctl-ssh-revert.timer") {
+				_ = fs.Remove(sshDropInPath)
+			}
+		},
+	}
+	env.Run = runner
+
+	err := ConfirmSSH(context.Background(), env)
+	if err == nil {
+		t.Fatal("expected E_SSH_NOT_CONFIRMED when drop-in is removed during stop, got nil")
+	}
+	if got := code(t, err); got != "E_SSH_NOT_CONFIRMED" {
+		t.Fatalf("got error code %q, want E_SSH_NOT_CONFIRMED", got)
+	}
+	var oe *output.Error
+	errors.As(err, &oe)
+	if oe.Message != "the change was already reverted" {
+		t.Fatalf("got message %q, want %q", oe.Message, "the change was already reverted")
+	}
+}
+
 func TestConfirmSSHStopFailure(t *testing.T) {
 	t.Run("stop command fails with real error", func(t *testing.T) {
 		env, runner, fs := newSSHTestEnv("andres", true, false)

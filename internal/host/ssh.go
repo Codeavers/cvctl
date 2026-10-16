@@ -317,7 +317,20 @@ func ConfirmSSH(ctx context.Context, e *Env) error {
 		}
 		return err
 	}
-	return stopRevertTimer(ctx, e)
+	if err := stopRevertTimer(ctx, e); err != nil {
+		return err
+	}
+	if _, err := e.FS.Stat(sshDropInPath); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &output.Error{
+				Code:    "E_SSH_NOT_CONFIRMED",
+				Message: "the change was already reverted",
+				Hint:    "run cvctl init again",
+			}
+		}
+		return err
+	}
+	return nil
 }
 
 func stopRevertTimer(ctx context.Context, e *Env) error {
