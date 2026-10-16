@@ -54,4 +54,5 @@ type FS interface {
 	Stat(path string) (FileInfo, error)
 	// Remove treats a missing path as success.
 	Remove(path string) error
+	ReadDir(path string) ([]os.DirEntry, error)
 }

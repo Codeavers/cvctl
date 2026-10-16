@@ -6,8 +6,10 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/codeavers/cvctl/internal/sys"
 )
@@ -151,6 +153,51 @@ func (f *FS) Remove(p string) error {
 	defer f.mu.Unlock()
 	delete(f.m, path.Clean(p))
 	return nil
+}
+
+type fakeDirEntry struct {
+	name  string
+	isDir bool
+	mode  os.FileMode
+}
+
+func (e fakeDirEntry) Name() string               { return e.name }
+func (e fakeDirEntry) IsDir() bool                { return e.isDir }
+func (e fakeDirEntry) Type() os.FileMode          { return e.mode.Type() }
+func (e fakeDirEntry) Info() (os.FileInfo, error) { return nil, nil }
+
+func (f *FS) ReadDir(p string) ([]os.DirEntry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p = path.Clean(p)
+	if p != "/" && p != "." {
+		e, ok := f.m[p]
+		if !ok {
+			return nil, &fs.PathError{Op: "readdir", Path: p, Err: fs.ErrNotExist}
+		}
+		if !e.info.IsDir {
+			return nil, &fs.PathError{Op: "readdir", Path: p, Err: syscall.ENOTDIR}
+		}
+	}
+	var entries []os.DirEntry
+	seen := map[string]bool{}
+	for k, ent := range f.m {
+		if k != p && path.Dir(k) == p {
+			name := path.Base(k)
+			if !seen[name] {
+				seen[name] = true
+				entries = append(entries, fakeDirEntry{
+					name:  name,
+					isDir: ent.info.IsDir,
+					mode:  ent.info.Mode,
+				})
+			}
+		}
+	}
+	slices.SortFunc(entries, func(a, b os.DirEntry) int {
+		return strings.Compare(a.Name(), b.Name())
+	})
+	return entries, nil
 }
 
 // Files returns a snapshot of every file and directory, for assertions.

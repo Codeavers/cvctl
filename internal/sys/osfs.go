@@ -25,6 +25,10 @@ func (osFS) Remove(path string) error {
 	return nil
 }
 
+func (osFS) ReadDir(path string) ([]os.DirEntry, error) {
+	return os.ReadDir(path)
+}
+
 func (osFS) Stat(path string) (FileInfo, error) {
 	var st syscall.Stat_t
 	if err := syscall.Stat(path, &st); err != nil {
