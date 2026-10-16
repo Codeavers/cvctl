@@ -61,6 +61,12 @@ type UsageError struct {
 func (e *UsageError) Error() string { return e.Err.Error() }
 func (e *UsageError) Unwrap() error { return e.Err }
 
+// ReportedError means the command already printed its full result (including
+// the failure); Fail only maps it to exit 1 without printing a second document.
+type ReportedError struct{ Msg string }
+
+func (e *ReportedError) Error() string { return e.Msg }
+
 type Printer struct {
 	JSON bool
 	Out  io.Writer
@@ -91,6 +97,10 @@ func (p *Printer) Result(v any, human func(io.Writer)) {
 
 // Fail prints err and returns the process exit code.
 func (p *Printer) Fail(err error) int {
+	var rep *ReportedError
+	if errors.As(err, &rep) {
+		return ExitError
+	}
 	code := ExitError
 	var usage *UsageError
 	if errors.As(err, &usage) {
