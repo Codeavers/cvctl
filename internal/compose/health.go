@@ -27,6 +27,17 @@ func WithHealthInterval(ctx context.Context, d time.Duration) context.Context {
 	return context.WithValue(ctx, intervalKey{}, d)
 }
 
+func normalizeProject(instance string) string {
+	lower := strings.ToLower(instance)
+	var sb strings.Builder
+	for _, r := range lower {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
+}
+
 func Health(ctx context.Context, run sys.Runner, p Project, h contract.HealthSpec, port int, client *http.Client) error {
 	if run == nil {
 		run = p.Run
@@ -35,7 +46,12 @@ func Health(ctx context.Context, run sys.Runner, p Project, h contract.HealthSpe
 		p.Run = run
 	}
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{
+			Timeout: 3 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 	}
 
 	containers, err := p.PS(ctx)
@@ -78,7 +94,7 @@ func Health(ctx context.Context, run sys.Runner, p Project, h contract.HealthSpe
 		}
 	}
 
-	netName := p.Instance + "_app"
+	netName := normalizeProject(p.Instance) + "_app"
 	netSetting, ok := networks[netName]
 	ip := strings.TrimSpace(netSetting.IPAddress)
 	if !ok || ip == "" {
@@ -113,20 +129,22 @@ func Health(ctx context.Context, run sys.Runner, p Project, h contract.HealthSpe
 		Args: []string{"inspect", "-f", "{{.RestartCount}}", target.Name},
 	}
 
-	checkRestarts := func() error {
+	type restartInfo struct {
+		count int
+		known bool
+	}
+
+	getRestarts := func() (restartInfo, error) {
 		res, err := run.Run(ctx, inspectRestartCmd)
 		if err != nil || res.ExitCode != 0 {
-			return sys.CmdErr("E_HEALTH_FAILED", inspectRestartCmd, res, err, "check container status")
+			return restartInfo{}, sys.CmdErr("E_HEALTH_FAILED", inspectRestartCmd, res, err, "check container status")
 		}
-		count, _ := strconv.Atoi(strings.TrimSpace(string(res.Stdout)))
-		if count > 0 {
-			return &output.Error{
-				Code:    "E_HEALTH_FAILED",
-				Message: fmt.Sprintf("container %s restarted", target.Name),
-				Hint:    fmt.Sprintf("check logs with `cvctl logs %s %s`", p.Instance, h.Service),
-			}
+		raw := strings.TrimSpace(string(res.Stdout))
+		count, err := strconv.Atoi(raw)
+		if err != nil {
+			return restartInfo{known: false}, nil
 		}
-		return nil
+		return restartInfo{count: count, known: true}, nil
 	}
 
 	ctxTimeout, cancel := context.WithTimeout(ctx, timeout)
@@ -134,8 +152,19 @@ func Health(ctx context.Context, run sys.Runner, p Project, h contract.HealthSpe
 
 	var lastErr string
 	for {
-		if err := checkRestarts(); err != nil {
+		restarts, err := getRestarts()
+		if err != nil {
 			return err
+		}
+		if restarts.known && restarts.count > 0 {
+			return &output.Error{
+				Code:    "E_HEALTH_FAILED",
+				Message: fmt.Sprintf("container %s restarted", target.Name),
+				Hint:    fmt.Sprintf("check logs with `cvctl logs %s %s`", p.Instance, h.Service),
+			}
+		}
+		if !restarts.known {
+			lastErr = fmt.Sprintf("container %s restart count is unknown", target.Name)
 		}
 
 		req, err := http.NewRequestWithContext(ctxTimeout, http.MethodGet, healthURL, nil)
@@ -152,12 +181,25 @@ func Health(ctx context.Context, run sys.Runner, p Project, h contract.HealthSpe
 			status := resp.StatusCode
 			_ = resp.Body.Close()
 			if status >= 200 && status < 300 {
-				if err := checkRestarts(); err != nil {
+				afterRestarts, err := getRestarts()
+				if err != nil {
 					return err
 				}
-				return nil
+				if afterRestarts.known && afterRestarts.count > 0 {
+					return &output.Error{
+						Code:    "E_HEALTH_FAILED",
+						Message: fmt.Sprintf("container %s restarted", target.Name),
+						Hint:    fmt.Sprintf("check logs with `cvctl logs %s %s`", p.Instance, h.Service),
+					}
+				}
+				if !afterRestarts.known {
+					lastErr = fmt.Sprintf("container %s restart count is unknown", target.Name)
+				} else {
+					return nil
+				}
+			} else {
+				lastErr = fmt.Sprintf("HTTP status %d", status)
 			}
-			lastErr = fmt.Sprintf("HTTP status %d", status)
 		} else {
 			lastErr = err.Error()
 		}
