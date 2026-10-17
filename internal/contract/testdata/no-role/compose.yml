@@ -1,0 +1,36 @@
+x-cvctl:
+  health:
+    service: api
+    http: /health
+    timeout: 30s
+  verify:
+    service: db
+    sql: select 1
+  hooks:
+    pre-deploy:
+      - service: api
+        run: migrate
+services:
+  api:
+    image: ghcr.io/x/api:1
+    labels:
+      cvctl.role: app
+      cvctl.expose: "3000"
+    environment:
+      DATABASE_URL: ${DB_URL}
+      JWT: $JWT
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+  db:
+    labels:
+      cvctl.kind: postgres
+      cvctl.version: "16"
+      cvctl.env: DB
+  cron:
+    image: x/cron:1
+    deploy:
+      resources:
+        limits:
+          memory: 64M

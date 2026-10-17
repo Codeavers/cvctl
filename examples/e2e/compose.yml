@@ -1,0 +1,34 @@
+x-cvctl:
+  health: { service: api, http: /health, timeout: 60s }
+  hooks:
+    pre-deploy:
+      - { service: api, run: "/app migrate" }
+
+services:
+  api:
+    image: localhost:5000/e2e/api
+    labels:
+      cvctl.role: app
+      cvctl.expose: "8080"
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    environment:
+      REDIS_URL: ${REDIS_URL}
+      DATABASE_URL: ${DATABASE_URL}
+      APP_SECRET: ${APP_SECRET}
+      GREETING: ${GREETING}
+      PUBLIC_URL: ${PUBLIC_URL}
+  cache:
+    labels:
+      cvctl.kind: redis
+      cvctl.env: REDIS
+  db:
+    labels:
+      cvctl.kind: postgres
+      cvctl.env: DATABASE
+    deploy:
+      resources:
+        limits:
+          memory: 256m

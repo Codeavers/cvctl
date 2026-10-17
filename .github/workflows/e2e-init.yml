@@ -1,0 +1,83 @@
+name: e2e-init
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'internal/host/**'
+      - 'internal/sys/**'
+      - 'internal/hostcfg/**'
+      - 'internal/objstore/**'
+      - 'internal/notify/**'
+      - '.github/workflows/e2e-init.yml'
+      - 'scripts/e2e/**'
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build cvctl
+        run: CGO_ENABLED=0 go build -o cvctl ./cmd/cvctl
+
+      - name: Configure /etc/cvctl
+        run: |
+          sudo install -d -m 0700 /etc/cvctl
+          sudo cp scripts/e2e/init-host.env /etc/cvctl/host.env
+
+      - name: First cvctl init run
+        run: |
+          set +e
+          sudo ./cvctl init --non-interactive --json > run1.json
+          echo $? > run1.code
+          set -e
+          cat run1.json
+          test "$(cat run1.code)" -eq 0
+          jq -e '.ok == true' run1.json
+          jq -e '[.data.steps[] | select(.status == "failed")] | length == 0' run1.json
+
+      - name: Second cvctl init run (idempotency)
+        run: |
+          set +e
+          sudo ./cvctl init --non-interactive --json > run2.json
+          echo $? > run2.code
+          set -e
+          cat run2.json
+          test "$(cat run2.code)" -eq 0
+          jq -e '.ok == true' run2.json
+          jq -e 'all(.data.steps[]; .status == "unchanged" or .status == "skipped")' run2.json
+          jq -e '[.data.steps[] | select(.status != "unchanged" and .status != "skipped")] | length == 0' run2.json
+
+      - name: Verify Traefik 404
+        run: |
+          code=$(curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1/)
+          echo "HTTP response: $code"
+          [ "$code" = "404" ]
+
+      - name: Verify Traefik has no docker.sock mount
+        run: |
+          test "$(docker inspect cvctl-traefik | jq '[.[0].Mounts[] | select(.Source | contains("docker.sock"))] | length')" -eq 0
+
+      - name: Verify /srv/deploy permissions
+        run: |
+          test "$(stat -c '%a %U:%G' /srv/deploy)" = "2750 deployer:deploy"
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          mkdir -p /tmp/e2e-logs
+          cp run1.json run1.code run2.json run2.code /tmp/e2e-logs/ 2>/dev/null || true
+          docker logs cvctl-traefik > /tmp/e2e-logs/traefik.log 2>&1 || true
+          docker logs cvctl-storage-s3-1 > /tmp/e2e-logs/storage.log 2>&1 || true
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-init-artifacts
+          path: /tmp/e2e-logs

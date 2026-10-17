@@ -1,0 +1,22 @@
+x-cvctl:
+  health: { service: api, http: /health, timeout: 90s }
+  verify: { service: main-db, sql: "select count(*) from users" }
+  hooks:
+    pre-deploy:  [{ service: api, run: "node dist/migrate.js" }]
+    post-deploy: [{ service: api, run: "node dist/warmup.js" }]
+
+services:
+  api:
+    image: ghcr.io/org/project-api
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+    labels:
+      cvctl.role: svc
+      cvctl.expose: "3000"
+    deploy: { resources: { limits: { memory: 512m } } }
+  main-db:
+    labels: { cvctl.kind: postgres, cvctl.version: "16", cvctl.env: DATABASE }
+  cache:
+    labels: { cvctl.kind: redis, cvctl.env: REDIS, cvctl.external: allowed }
+  media:
+    labels: { cvctl.kind: s3, cvctl.env: S3, cvctl.external: allowed }

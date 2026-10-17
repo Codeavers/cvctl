@@ -1,0 +1,20 @@
+api:
+  dashboard: false
+accessLog: {}
+log:
+  level: INFO
+ping:
+  entryPoint: ping
+entryPoints:
+  ping:
+    address: :8082
+  web:
+    address: :80
+    forwardedHeaders:
+      trustedIPs:
+        - 127.0.0.1/32
+        - 172.16.0.0/12
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true

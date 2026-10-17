@@ -1,0 +1,14 @@
+http:
+  routers:
+    proj-dev-api:
+      entryPoints:
+        - web
+      middlewares:
+        - cvctl-default@file
+      rule: Host(`api.example.com`)
+      service: proj-dev-api
+  services:
+    proj-dev-api:
+      loadBalancer:
+        servers:
+          - url: http://proj-dev-api:3000

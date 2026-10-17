@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: vet
+        run: go vet ./...
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - name: test
+        run: go test ./...
+      - name: build linux/amd64
+        run: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/cvctl
+      - name: build linux/arm64
+        run: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/cvctl

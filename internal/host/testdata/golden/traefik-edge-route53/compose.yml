@@ -1,0 +1,28 @@
+services:
+  traefik:
+    container_name: cvctl-traefik
+    image: traefik:v3.7.15
+    restart: unless-stopped
+    ports:
+      - 80:80
+      - 443:443
+      - 443:443/udp
+    env_file:
+      - /etc/cvctl/secrets/traefik.env
+    volumes:
+      - /etc/cvctl/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - /etc/traefik/dynamic:/etc/traefik/dynamic:ro
+      - cvctl-traefik-acme:/acme
+    networks:
+      - cvctl-edge
+    healthcheck:
+      test:
+        - CMD
+        - traefik
+        - healthcheck
+        - --ping
+networks:
+  cvctl-edge:
+    external: true
+volumes:
+  cvctl-traefik-acme: {}
