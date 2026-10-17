@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -18,11 +19,15 @@ import (
 )
 
 type ServiceDecision struct {
-	Mode     string // local | external
-	Version  string
-	Volume   string // named docker volume; empty means <instance>_<service>-data
-	Creds    kinds.Credentials
-	External map[string]string
+	Mode    string // local | external
+	Version string
+	Volume  string // named docker volume; empty means <instance>_<service>-data
+	// BackupGen selects the WAL archive generation (0 is the legacy prefix);
+	// BackupGenMax is the highest generation ever used so it is never reused.
+	BackupGen    int
+	BackupGenMax int
+	Creds        kinds.Credentials
+	External     map[string]string
 }
 
 type Decisions struct {
@@ -110,6 +115,10 @@ func Read(path string, p *contract.Project) (*Decisions, error) {
 				sd.Version = v
 			case rest == "VOLUME":
 				sd.Volume = v
+			case rest == "BACKUP_GEN":
+				sd.BackupGen = atoiNonNeg(v)
+			case rest == "BACKUP_GEN_MAX":
+				sd.BackupGenMax = atoiNonNeg(v)
 			case rest == "USER":
 				sd.Creds.User = v
 			case rest == "PASSWORD":
@@ -133,6 +142,14 @@ func Read(path string, p *contract.Project) (*Decisions, error) {
 	return d, nil
 }
 
+func atoiNonNeg(v string) int {
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
 func (d *Decisions) Entries() map[string]string {
 	m := map[string]string{}
 	set := func(k, v string) {
@@ -151,6 +168,12 @@ func (d *Decisions) Entries() map[string]string {
 		set(pre+"MODE", s.Mode)
 		set(pre+"VERSION", s.Version)
 		set(pre+"VOLUME", s.Volume)
+		if s.BackupGen > 0 {
+			set(pre+"BACKUP_GEN", strconv.Itoa(s.BackupGen))
+		}
+		if s.BackupGenMax > 0 {
+			set(pre+"BACKUP_GEN_MAX", strconv.Itoa(s.BackupGenMax))
+		}
 		set(pre+"USER", s.Creds.User)
 		set(pre+"PASSWORD", s.Creds.Password)
 		set(pre+"DB", s.Creds.DB)

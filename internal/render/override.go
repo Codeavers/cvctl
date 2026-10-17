@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -42,10 +43,22 @@ func BackupEnvPath(dir, service string) string {
 	return filepath.Join(dir, "backup-"+service+".env")
 }
 
+// Prefix is the WAL-G archive of one generation. A restored cluster starts a
+// new timeline, so it archives into its own generation instead of mixing
+// timelines in one prefix; generation 0 is the legacy location.
+func (b *BackupTarget) Prefix(inst, svc string, gen int) string {
+	p := "s3://" + b.Bucket + "/" + b.Host + "/" + inst + "/" + svc
+	if gen > 0 {
+		p += "/g" + strconv.Itoa(gen)
+	}
+	return p
+}
+
 // Env returns the wal-g environment of service svc of instance inst.
-func (b *BackupTarget) Env(inst, svc string) map[string]string {
+func (b *BackupTarget) Env(inst, svc string, gen int) map[string]string {
 	return map[string]string{
-		"WALG_S3_PREFIX":               "s3://" + b.Bucket + "/" + b.Host + "/" + inst + "/" + svc,
+		"WALG_S3_PREFIX":               b.Prefix(inst, svc, gen),
+		"WALG_PREVENT_WAL_OVERWRITE":   "true",
 		"AWS_ACCESS_KEY_ID":            b.AccessKey,
 		"AWS_SECRET_ACCESS_KEY":        b.SecretKey,
 		"AWS_ENDPOINT":                 b.Endpoint,
@@ -66,7 +79,7 @@ func BackupEnvs(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o
 	}
 	for _, ds := range p.Data {
 		if d.Services[ds.Name].Mode == "local" && cat[ds.Kind].Backup == "wal-g" {
-			out[ds.Name] = o.Backup.Env(d.Instance, ds.Name)
+			out[ds.Name] = o.Backup.Env(d.Instance, ds.Name, d.Services[ds.Name].BackupGen)
 		}
 	}
 	return out

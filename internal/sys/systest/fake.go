@@ -11,6 +11,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/sys"
 )
 
@@ -99,9 +100,27 @@ type entry struct {
 type FS struct {
 	mu sync.Mutex
 	m  map[string]*entry
+	// Users and Groups are the names LookupOwner accepts.
+	Users, Groups map[string]bool
 }
 
-func NewFS() *FS { return &FS{m: map[string]*entry{}} }
+func NewFS() *FS {
+	return &FS{
+		m:      map[string]*entry{},
+		Users:  map[string]bool{"root": true, "deployer": true},
+		Groups: map[string]bool{"root": true, "deploy": true},
+	}
+}
+
+func (f *FS) LookupOwner(o sys.Owner) error {
+	if o.User != "" && !f.Users[o.User] {
+		return &output.Error{Code: "E_SYS_OWNER_LOOKUP", Message: "user " + o.User + " not found", Hint: "create the user first"}
+	}
+	if o.Group != "" && !f.Groups[o.Group] {
+		return &output.Error{Code: "E_SYS_OWNER_LOOKUP", Message: "group " + o.Group + " not found", Hint: "create the group first"}
+	}
+	return nil
+}
 
 func (f *FS) ReadFile(p string) ([]byte, error) {
 	f.mu.Lock()

@@ -120,6 +120,22 @@ func (osFS) MkdirAll(path string, mode os.FileMode, o Owner) error {
 
 // resolveOwner returns -1 for parts to leave unchanged. Unprivileged callers
 // cannot chown, so lookups are skipped entirely (tests run unprivileged).
+// LookupOwner checks the names even when unprivileged, where WriteFile would
+// skip chown, so an import fails identically for every caller.
+func (osFS) LookupOwner(o Owner) error {
+	if o.User != "" {
+		if _, err := user.Lookup(o.User); err != nil {
+			return ownerErr("user", o.User, err)
+		}
+	}
+	if o.Group != "" {
+		if _, err := user.LookupGroup(o.Group); err != nil {
+			return ownerErr("group", o.Group, err)
+		}
+	}
+	return nil
+}
+
 func resolveOwner(o Owner) (uid, gid int, err error) {
 	uid, gid = -1, -1
 	if os.Geteuid() != 0 {

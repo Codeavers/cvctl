@@ -33,6 +33,8 @@ const (
 	// exhaust memory.
 	maxEntrySize = 4 << 20
 	maxEntries   = 4096
+	// maxTotalSize bounds the whole decrypted bundle.
+	maxTotalSize = 64 << 20
 )
 
 var (
@@ -129,7 +131,22 @@ func (c *collector) file(p string) {
 		c.fail(p, err)
 		return
 	}
+	if numeric(fi.User) || numeric(fi.Group) {
+		c.warns = append(c.warns, p+": owner has no name on this host (numeric id); it may not resolve on import")
+	}
 	c.entries = append(c.entries, Entry{Path: p, Mode: fi.Mode, User: fi.User, Group: fi.Group, Data: data})
+}
+
+func numeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *collector) readDir(dir string) []os.DirEntry {
@@ -263,6 +280,7 @@ func Decrypt(r io.Reader, passphrase string) ([]Entry, error) {
 	tr := tar.NewReader(dr)
 	var out []Entry
 	seen := map[string]bool{}
+	total := 0
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
@@ -287,6 +305,14 @@ func Decrypt(r io.Reader, passphrase string) ([]Entry, error) {
 		data, err := io.ReadAll(io.LimitReader(tr, maxEntrySize+1))
 		if err != nil || len(data) > maxEntrySize {
 			return nil, corrupt()
+		}
+		total += len(data)
+		if total > maxTotalSize {
+			return nil, &output.Error{
+				Code:    "E_SECRETS_TOO_LARGE",
+				Message: "the bundle content exceeds the size limit",
+				Hint:    "a cvctl secrets bundle is far smaller; check the file",
+			}
 		}
 		out = append(out, Entry{
 			Path: h.Name, Mode: os.FileMode(h.Mode & 0o777),
@@ -335,6 +361,18 @@ func Restore(fsys sys.FS, root string, entries []Entry, force bool) ([]string, e
 			Hint:    "re-run with --force to overwrite them",
 		}
 	}
+	owners := map[sys.Owner]bool{}
+	for _, e := range entries {
+		owners[sys.Owner{User: e.User, Group: e.Group}] = true
+		if err := checkParents(fsys, root, e.Path); err != nil {
+			return nil, err
+		}
+	}
+	for o := range owners {
+		if err := fsys.LookupOwner(o); err != nil {
+			return nil, err
+		}
+	}
 	paths := make([]string, 0, len(entries))
 	for _, e := range entries {
 		dir := root + path.Dir(e.Path)
@@ -352,6 +390,39 @@ func Restore(fsys sys.FS, root string, entries []Entry, force bool) ([]string, e
 		paths = append(paths, e.Path)
 	}
 	return paths, nil
+}
+
+// checkParents refuses a symlink anywhere between the allowed root and the
+// file, which would redirect the write outside the intended tree.
+func checkParents(fsys sys.FS, root, p string) error {
+	var top string
+	for _, r := range []string{"/etc/cvctl", deployDir, stateDir} {
+		if strings.HasPrefix(p, r+"/") {
+			top = r
+		}
+	}
+	dir := path.Dir(p)
+	var chain []string
+	for d := dir; len(d) >= len(top) && d != "/" && d != "."; d = path.Dir(d) {
+		chain = append(chain, d)
+	}
+	for i := len(chain) - 1; i >= 0; i-- {
+		fi, err := fsys.Lstat(root + chain[i])
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return writeErr(chain[i], err)
+		}
+		if fi.IsSymlink {
+			return &output.Error{
+				Code:    "E_SECRETS_UNSAFE_PATH",
+				Message: "directory " + chain[i] + " is a symlink",
+				Hint:    "replace the symlink with a real directory; nothing was written",
+			}
+		}
+	}
+	return nil
 }
 
 func writeErr(p string, err error) error {

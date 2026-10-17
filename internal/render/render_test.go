@@ -326,6 +326,7 @@ func TestBackupEnvs(t *testing.T) {
 	got := envs["main-db"]
 	want := map[string]string{
 		"WALG_S3_PREFIX":               "s3://cvctl/h1/proj-dev/main-db",
+		"WALG_PREVENT_WAL_OVERWRITE":   "true",
 		"AWS_ACCESS_KEY_ID":            "AKIDSECRET1",
 		"AWS_SECRET_ACCESS_KEY":        "SKSECRETVALUE",
 		"AWS_ENDPOINT":                 "http://cvctl-storage:9000",
@@ -426,5 +427,18 @@ func TestPostgresConnectsAsClusterRole(t *testing.T) {
 		if !strings.Contains(string(out), s) {
 			t.Fatalf("%q missing", s)
 		}
+	}
+}
+
+func TestBackupPrefixPerGeneration(t *testing.T) {
+	b := testBackup()
+	if got := b.Prefix("proj-dev", "main-db", 0); got != "s3://cvctl/h1/proj-dev/main-db" {
+		t.Fatal(got)
+	}
+	if got := b.Prefix("proj-dev", "main-db", 3); got != "s3://cvctl/h1/proj-dev/main-db/g3" {
+		t.Fatal(got)
+	}
+	if b.Env("proj-dev", "main-db", 3)["WALG_S3_PREFIX"] != "s3://cvctl/h1/proj-dev/main-db/g3" {
+		t.Fatal("env prefix")
 	}
 }

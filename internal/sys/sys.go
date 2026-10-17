@@ -60,6 +60,9 @@ type FS interface {
 	MkdirAll(path string, mode os.FileMode, o Owner) error
 	Stat(path string) (FileInfo, error)
 	Lstat(path string) (FileInfo, error)
+	// LookupOwner fails with E_SYS_OWNER_LOOKUP when a named user or group does
+	// not exist on this host, so callers can check before writing anything.
+	LookupOwner(o Owner) error
 	// Remove treats a missing path as success.
 	Remove(path string) error
 	ReadDir(path string) ([]os.DirEntry, error)

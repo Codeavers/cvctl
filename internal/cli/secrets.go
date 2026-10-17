@@ -36,8 +36,9 @@ var (
 )
 
 type secretsExportReport struct {
-	Output string `json:"output"`
-	Files  int    `json:"files,omitempty"`
+	Output   string   `json:"output"`
+	Files    int      `json:"files,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 type secretsImportReport struct {
@@ -122,7 +123,7 @@ write the (ASCII-armored) bundle to stdout.`,
 					Hint: "choose a writable output path",
 				}
 			}
-			printerFrom(cmd).Result(secretsExportReport{Output: out, Files: len(entries)}, func(w io.Writer) {
+			printerFrom(cmd).Result(secretsExportReport{Output: out, Files: len(entries), Warnings: warns}, func(w io.Writer) {
 				fmt.Fprintf(w, "wrote %d files to %s\n", len(entries), out)
 			})
 			return nil

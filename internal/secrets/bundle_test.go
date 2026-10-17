@@ -221,3 +221,55 @@ func TestDearmorStripsPtyNoise(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRestoreUnknownOwnerWritesNothing(t *testing.T) {
+	entries := []Entry{
+		{Path: "/etc/cvctl/host.env", Mode: 0o600, User: "root", Group: "deploy", Data: []byte("x")},
+		{Path: "/etc/cvctl/secrets/a", Mode: 0o600, User: "ghost", Group: "deploy", Data: []byte("y")},
+	}
+	dst := systest.NewFS()
+	_, err := Restore(dst, "", entries, false)
+	if code(err) != "E_SYS_OWNER_LOOKUP" || !strings.Contains(err.Error(), "ghost") {
+		t.Fatalf("%v", err)
+	}
+	if n := len(dst.Files()); n != 0 {
+		t.Fatalf("wrote %d paths", n)
+	}
+}
+
+func TestCollectWarnsOnNumericOwner(t *testing.T) {
+	f := systest.NewFS()
+	_ = f.MkdirAll("/etc/cvctl", 0o750, sys.Owner{})
+	_ = f.WriteFile("/etc/cvctl/host.env", []byte("x"), 0o600, sys.Owner{User: "1001", Group: "deploy"})
+	_, warns, err := Collect(f, "")
+	if err != nil || len(warns) != 1 || !strings.Contains(warns[0], "/etc/cvctl/host.env") {
+		t.Fatal(err, warns)
+	}
+}
+
+func TestDecryptCapsTotalSize(t *testing.T) {
+	var hdrs []*tar.Header
+	for i := 0; i < 17; i++ {
+		hdrs = append(hdrs, &tar.Header{Typeflag: tar.TypeReg, Name: "/etc/cvctl/secrets/f" + string(rune('a'+i)), Mode: 0o600, Size: 4 << 20})
+	}
+	_, err := Decrypt(bytes.NewReader(encryptRaw(t, hdrs)), "pass")
+	if code(err) != "E_SECRETS_TOO_LARGE" {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestRestoreRefusesSymlinkedParent(t *testing.T) {
+	base := seed(t)
+	f := symlinkFS{FS: base, links: map[string]bool{"/srv/deploy/shop-prod": true}}
+	entries := []Entry{
+		{Path: "/etc/cvctl/host.env", Mode: 0o600, Data: []byte("x")},
+		{Path: "/srv/deploy/shop-prod/app.env", Mode: 0o600, Data: []byte("y")},
+	}
+	_, err := Restore(f, "", entries, true)
+	if code(err) != "E_SECRETS_UNSAFE_PATH" {
+		t.Fatalf("%v", err)
+	}
+	if b, _ := base.ReadFile("/etc/cvctl/host.env"); string(b) != "HOST=a\n" {
+		t.Fatal("wrote before refusing")
+	}
+}
