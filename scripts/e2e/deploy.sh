@@ -8,7 +8,7 @@ export PATH="/usr/local/bin:$PWD:$PATH"
 jqs() {
   local filter="$1"
   local inst="${2:-demo-dev}"
-  cvctl status "$inst" --json | jq -r "$filter"
+  cvctl status --json | jq -r --arg i "$inst" ".data.instances[] | select(.instance==\$i) | $filter"
 }
 
 echo "=== 1. Build and push good image ==="
@@ -33,7 +33,7 @@ add_res=$(cvctl project add file:///tmp/infra.git --name demo --env dev --non-in
 echo "$add_res"
 test "$(echo "$add_res" | jq -r '.ok')" = "true"
 test "$(echo "$add_res" | jq -r '.data.status')" = "OK"
-test "$(jqs '.data.status')" = "OK"
+test "$(jqs '.status')" = "OK"
 
 greeting=""
 for i in $(seq 1 15); do
@@ -52,7 +52,7 @@ docker build --build-arg MIGRATE_FAIL=1 -t localhost:5000/e2e/api:develop exampl
 docker push localhost:5000/e2e/api:develop
 
 cvctl agent --once --json || true
-test "$(jqs '.data.status')" = "FAILED"
+test "$(jqs '.status')" = "FAILED"
 
 greeting=$(curl -sk --resolve api.e2e.local:443:127.0.0.1 https://api.e2e.local/health)
 echo "Health response after failed migration: $greeting"
@@ -75,7 +75,7 @@ docker build --build-arg BUILD_ID=2 -t localhost:5000/e2e/api:develop examples/e
 docker push localhost:5000/e2e/api:develop
 
 cvctl agent --once --json
-test "$(jqs '.data.status')" = "OK"
+test "$(jqs '.status')" = "OK"
 
 greeting=$(curl -sk --resolve api.e2e.local:443:127.0.0.1 https://api.e2e.local/health)
 echo "Health response after fix: $greeting"
@@ -91,19 +91,19 @@ git -C /tmp/infra-work commit -m "add prompt var NEWVAR"
 git -C /tmp/infra-work push origin develop
 
 cvctl agent --once --json || true
-test "$(jqs '.data.status')" = "BLOCKED"
+test "$(jqs '.status')" = "BLOCKED"
 
 cvctl set-env demo-dev NEWVAR x --json
 cvctl agent --once --json
-test "$(jqs '.data.status')" = "OK"
+test "$(jqs '.status')" = "OK"
 echo "Assert 7: blocked on missing prompt var, then resumed after set-env"
 
 echo "=== 8. Rollback -> PAUSED, Resume -> OK ==="
 cvctl rollback demo-dev --json
-test "$(jqs '.data.status')" = "PAUSED"
+test "$(jqs '.status')" = "PAUSED"
 
 cvctl resume demo-dev --json
-test "$(jqs '.data.status')" = "OK"
+test "$(jqs '.status')" = "OK"
 
 greeting=$(curl -sk --resolve api.e2e.local:443:127.0.0.1 https://api.e2e.local/health)
 echo "Health response after resume: $greeting"
