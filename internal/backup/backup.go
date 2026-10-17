@@ -4,6 +4,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -119,6 +120,43 @@ type Runner struct {
 	Clock      func() time.Time
 	DeployRoot string
 	HostName   string
+	// Lock retry: deploys hold the instance lock for minutes, so a status
+	// write waits for them instead of losing the record.
+	LockInterval time.Duration
+	LockTimeout  time.Duration
+	Sleep        func(time.Duration)
+}
+
+const (
+	defaultLockInterval = 15 * time.Second
+	defaultLockTimeout  = 30 * time.Minute
+)
+
+func (r *Runner) lock(inst string) (func(), error) {
+	interval, timeout := r.LockInterval, r.LockTimeout
+	if interval <= 0 {
+		interval = defaultLockInterval
+	}
+	if timeout <= 0 {
+		timeout = defaultLockTimeout
+	}
+	sleep := r.Sleep
+	if sleep == nil {
+		sleep = time.Sleep
+	}
+	var waited time.Duration
+	for {
+		unlock, err := r.Store.Lock(inst)
+		if err == nil {
+			return unlock, nil
+		}
+		var oe *output.Error
+		if !errors.As(err, &oe) || oe.Code != "E_INSTANCE_LOCKED" || waited >= timeout {
+			return nil, err
+		}
+		sleep(interval)
+		waited += interval
+	}
 }
 
 func (r *Runner) now() time.Time {
@@ -218,7 +256,7 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 		return nil, err
 	}
 	var results []Result
-	var failed []string
+	var failed, statusErrs []string
 	for _, t := range ts {
 		var runErr error
 		switch t.Strategy {
@@ -234,7 +272,7 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 		}
 		results = append(results, res)
 		if err := r.record(ctx, inst, t.Service, res); err != nil {
-			return results, err
+			statusErrs = append(statusErrs, fmt.Sprintf("%s: %s", t.Service, r.redact(err.Error())))
 		}
 	}
 	if len(failed) > 0 {
@@ -242,6 +280,13 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 			Code:    "E_BACKUP_FAILED",
 			Message: fmt.Sprintf("backup of %s failed for: %s", inst, strings.Join(failed, ", ")),
 			Hint:    "see cvctl backup list and the per-service error; fix the storage or service and retry",
+		}
+	}
+	if len(statusErrs) > 0 {
+		return results, &output.Error{
+			Code:    "E_BACKUP_STATUS_WRITE",
+			Message: fmt.Sprintf("backups of %s ran but the status could not be recorded: %s", inst, strings.Join(statusErrs, "; ")),
+			Hint:    "the instance stayed locked (deploy in progress?); the backups themselves succeeded",
 		}
 	}
 	return results, nil
@@ -280,7 +325,7 @@ func (r *Runner) record(ctx context.Context, inst, svc string, res Result) error
 	if r.Store == nil {
 		return nil
 	}
-	unlock, err := r.Store.Lock(inst)
+	unlock, err := r.lock(inst)
 	if err != nil {
 		return err
 	}

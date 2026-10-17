@@ -2,6 +2,7 @@ package backup_test
 
 import (
 	"context"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -276,5 +277,54 @@ func TestListParsesWalgAndRestic(t *testing.T) {
 	}
 	if !strings.HasSuffix(g.calls()[0], "wal-g backup-list --json") {
 		t.Fatalf("calls %v", g.calls())
+	}
+}
+
+type busyLocker struct{ busy int }
+
+func (b *busyLocker) lockFile(string, os.FileMode, sys.Owner) (func(), error) {
+	if b.busy != 0 {
+		if b.busy > 0 {
+			b.busy--
+		}
+		return nil, sys.ErrLocked
+	}
+	return func() {}, nil
+}
+
+func TestStatusWriteRetriesWhileLocked(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+	b := &busyLocker{busy: 3}
+	sys.LockFile = b.lockFile
+	var slept []time.Duration
+	g.r.LockInterval, g.r.LockTimeout = 15*time.Second, 30*time.Minute
+	g.r.Sleep = func(d time.Duration) { slept = append(slept, d) }
+	if _, err := g.r.BackupNow(context.Background(), "app-prod", "db"); err != nil {
+		t.Fatal(err)
+	}
+	if len(slept) != 3 || slept[0] != 15*time.Second {
+		t.Fatalf("slept %v", slept)
+	}
+	st, _ := g.store.Load("app-prod")
+	if st.Backups["db"].LastOK.IsZero() {
+		t.Fatalf("status not recorded: %+v", st.Backups)
+	}
+}
+
+func TestStatusWriteFailureDoesNotAbortBackups(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+	sys.LockFile = (&busyLocker{busy: -1}).lockFile
+	g.r.Sleep = func(time.Duration) {}
+	res, err := g.r.BackupNow(context.Background(), "app-prod", "")
+	if err == nil || !strings.Contains(err.Error(), "E_BACKUP_STATUS_WRITE") || strings.Contains(err.Error(), "E_BACKUP_FAILED") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(res) != 2 || !res[0].OK || !res[1].OK {
+		t.Fatalf("all targets must still run: %+v", res)
+	}
+	if len(g.run.Calls) < 3 {
+		t.Fatalf("calls: %v", g.calls())
 	}
 }

@@ -2,13 +2,13 @@ package deploy_test
 
 import (
 	"context"
-	"github.com/codeavers/cvctl/internal/backup"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/codeavers/cvctl/internal/backup"
 	"github.com/codeavers/cvctl/internal/compose"
 	"github.com/codeavers/cvctl/internal/deploy"
 	"github.com/codeavers/cvctl/internal/gitrepo"

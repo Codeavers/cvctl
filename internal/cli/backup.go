@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"text/tabwriter"
@@ -14,7 +15,13 @@ import (
 )
 
 type backupResultsReport struct {
-	Results []backup.Result `json:"results"`
+	Results  []backup.Result `json:"results"`
+	Warnings []string        `json:"warnings,omitempty"`
+}
+
+func isStatusWrite(err error) bool {
+	var oe *output.Error
+	return errors.As(err, &oe) && oe.Code == "E_BACKUP_STATUS_WRITE"
 }
 
 type backupListReport struct {
@@ -60,8 +67,11 @@ func backupEnv(cmd *cobra.Command) (*OpsEnv, error) {
 	return newOpsEnv(opsOpts{NonInteractive: asJSON, In: cmd.InOrStdin(), Out: cmd.ErrOrStderr()})
 }
 
-func printBackupResults(cmd *cobra.Command, results []backup.Result) {
-	printerFrom(cmd).Result(backupResultsReport{Results: results}, func(w io.Writer) {
+func printBackupResults(cmd *cobra.Command, results []backup.Result, warnings []string) {
+	printerFrom(cmd).Result(backupResultsReport{Results: results, Warnings: warnings}, func(w io.Writer) {
+		for _, warn := range warnings {
+			fmt.Fprintf(w, "warning: %s\n", warn)
+		}
 		tw := tabwriter.NewWriter(w, 0, 8, 2, ' ', 0)
 		fmt.Fprintln(tw, "INSTANCE\tSERVICE\tSTRATEGY\tRESULT")
 		for _, r := range results {
@@ -102,7 +112,7 @@ func newBackupNowCmd() *cobra.Command {
 				}
 				return err
 			}
-			printBackupResults(cmd, results)
+			printBackupResults(cmd, results, nil)
 			return nil
 		},
 	}
@@ -126,11 +136,14 @@ func newBackupRunCmd() *cobra.Command {
 			}
 			r := e.backupRunner()
 			var all []backup.Result
+			var warnings []string
 			failed := 0
 			for _, inst := range insts {
 				results, err := r.BackupNow(cmd.Context(), inst, "")
 				all = append(all, results...)
-				if err != nil {
+				if isStatusWrite(err) {
+					warnings = append(warnings, err.Error())
+				} else if err != nil {
 					failed++
 					if len(results) == 0 {
 						all = append(all, backup.Result{Instance: inst, Error: err.Error()})
@@ -144,10 +157,10 @@ func newBackupRunCmd() *cobra.Command {
 						Message: fmt.Sprintf("backup failed for %d instance(s)", failed),
 						Hint:    "see the per-service errors with cvctl backup run --json",
 					},
-					Data: backupResultsReport{Results: all},
+					Data: backupResultsReport{Results: all, Warnings: warnings},
 				}
 			}
-			printBackupResults(cmd, all)
+			printBackupResults(cmd, all, warnings)
 			return nil
 		},
 	}

@@ -402,7 +402,7 @@ func TestArchiveFlagsOnlyWhenBackupWired(t *testing.T) {
 			t.Fatalf("%q rendered without a backup target", s)
 		}
 	}
-	if !strings.Contains(string(off), "wal_level=replica") || strings.Contains(string(off), "PGDATA") {
+	if !strings.Contains(string(off), "wal_level=replica") || strings.Contains(string(off), "PGDATA:") {
 		t.Fatalf("base command or PGDATA wrong:\n%s", off)
 	}
 	on, err := Override(p, d, cat, Options{InstanceDir: "/i", Edge: "edge", Backup: testBackup()})
@@ -412,6 +412,19 @@ func TestArchiveFlagsOnlyWhenBackupWired(t *testing.T) {
 	for _, s := range []string{"archive_mode=on", "archive_command=wal-g wal-push %p", "archive_timeout=60", "/i/backup-main-db.env"} {
 		if !strings.Contains(string(on), s) {
 			t.Fatalf("%q missing with a backup target", s)
+		}
+	}
+}
+
+func TestPostgresConnectsAsClusterRole(t *testing.T) {
+	p, d, cat := setup(t)
+	out, err := Override(p, d, cat, Options{InstanceDir: "/i", Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"PGUSER: u", "PGDATABASE: d", "PGHOST: /var/run/postgresql"} {
+		if !strings.Contains(string(out), s) {
+			t.Fatalf("%q missing", s)
 		}
 	}
 }
