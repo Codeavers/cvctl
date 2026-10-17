@@ -1,0 +1,108 @@
+name: e2e-dr
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'internal/**'
+      - 'examples/e2e/**'
+      - 'images/postgres/**'
+      - 'kinds/**'
+      - 'scripts/e2e/**'
+      - '.github/workflows/e2e-dr.yml'
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build cvctl
+        run: CGO_ENABLED=0 go build -o cvctl ./cmd/cvctl
+
+      - name: Build cvctl-postgres
+        run: |
+          docker build -t cvctl-postgres:16 --build-arg PG_MAJOR=16 images/postgres
+          docker tag cvctl-postgres:16 ghcr.io/codeavers/cvctl-postgres:16
+
+      - name: Start external S3 (MinIO)
+        run: |
+          # The docker0 gateway is reachable from the runner and from containers on user networks.
+          S3_IP=$(ip -4 -o addr show docker0 | awk '{print $4}' | cut -d/ -f1)
+          test -n "$S3_IP"
+          S3_ACCESS=e2eaccess$(openssl rand -hex 4)
+          S3_SECRET=$(openssl rand -hex 16)
+          echo "::add-mask::$S3_SECRET"
+          {
+            echo "S3_IP=$S3_IP"
+            echo "S3_ACCESS=$S3_ACCESS"
+            echo "S3_SECRET=$S3_SECRET"
+          } >> "$GITHUB_ENV"
+          docker run -d --name ext-s3 --restart unless-stopped -p 9000:9000 \
+            -e MINIO_ROOT_USER="$S3_ACCESS" -e MINIO_ROOT_PASSWORD="$S3_SECRET" \
+            pgsty/silo:RELEASE.2026-09-16T00-00-00Z server /data
+          for _ in $(seq 1 30); do
+            curl -sf "http://$S3_IP:9000/minio/health/ready" && break
+            sleep 2
+          done
+          curl -sf "http://$S3_IP:9000/minio/health/ready"
+          docker exec -e MC_HOST_ext="http://$S3_ACCESS:$S3_SECRET@127.0.0.1:9000" \
+            ext-s3 mc mb --ignore-existing ext/cvctl-e2e
+
+      - name: Configure /etc/cvctl
+        run: |
+          sudo install -d -m 0700 /etc/cvctl /etc/cvctl/secrets
+          sudo cp scripts/e2e/init-host-s3.env /etc/cvctl/host.env
+          sudo sed -i "s|S3_IP_PLACEHOLDER|$S3_IP|" /etc/cvctl/host.env
+          sudo sed -i 's|CVCTL_REGISTRIES=.*|CVCTL_REGISTRIES=localhost:5000/e2e|' /etc/cvctl/host.env
+          printf '%s' "$S3_ACCESS" | sudo tee /etc/cvctl/secrets/s3_access_key >/dev/null
+          printf '%s' "$S3_SECRET" | sudo tee /etc/cvctl/secrets/s3_secret_key >/dev/null
+          sudo chmod 0600 /etc/cvctl/secrets/s3_access_key /etc/cvctl/secrets/s3_secret_key
+
+      - name: Run cvctl init
+        run: |
+          set +e
+          sudo ./cvctl init --non-interactive --json > init.json
+          echo $? > init.code
+          set -e
+          cat init.json
+          test "$(cat init.code)" -eq 0
+          jq -e '.ok == true' init.json
+          jq -e '[.data.steps[] | select(.status == "failed")] | length == 0' init.json
+
+      - name: Start local registry
+        run: docker run -d -p 5000:5000 --name registry registry:2
+
+      - name: Run E2E disaster recovery tests
+        run: |
+          chmod +x scripts/e2e/dr.sh
+          sudo -E env CVCTL_ALLOW_FILE_REPOS=1 CVCTL_INSECURE_REGISTRIES=localhost:5000 ./scripts/e2e/dr.sh
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          mkdir -p /tmp/e2e-dr-logs
+          cp init.json init.code /tmp/e2e-dr-logs/ 2>/dev/null || true
+          sudo ./cvctl status demo-dev --json > /tmp/e2e-dr-logs/status.json 2>&1 || true
+          sudo ./cvctl history demo-dev --json > /tmp/e2e-dr-logs/history.json 2>&1 || true
+          sudo cp /tmp/e2e-dr.out /tmp/e2e-dr-logs/script.out 2>/dev/null || true
+          docker ps -a > /tmp/e2e-dr-logs/docker-ps.txt 2>&1 || true
+          docker volume ls > /tmp/e2e-dr-logs/docker-volumes.txt 2>&1 || true
+          docker logs ext-s3 > /tmp/e2e-dr-logs/ext-s3.log 2>&1 || true
+          docker logs cvctl-traefik > /tmp/e2e-dr-logs/traefik.log 2>&1 || true
+          docker logs registry > /tmp/e2e-dr-logs/registry.log 2>&1 || true
+          journalctl -u cvctl-agent --no-pager > /tmp/e2e-dr-logs/agent.log 2>&1 || true
+          for c in $(docker ps -a --filter "name=demo-dev" --format '{{.Names}}'); do
+            docker logs "$c" > "/tmp/e2e-dr-logs/$c.log" 2>&1 || true
+          done
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-dr-artifacts
+          path: /tmp/e2e-dr-logs
