@@ -44,6 +44,7 @@ func (p Project) Cmd(args ...string) sys.Cmd {
 	return sys.Cmd{
 		Name: "docker",
 		Args: append(baseArgs, args...),
+		Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
 	}
 }
 

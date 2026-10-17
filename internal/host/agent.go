@@ -3,7 +3,9 @@ package host
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"strings"
@@ -30,6 +32,8 @@ ProtectSystem=strict
 ReadWritePaths=/srv/deploy /var/lib/cvctl /etc/traefik/dynamic
 PrivateTmp=yes
 SupplementaryGroups=docker
+Environment=DOCKER_CONFIG=/var/lib/cvctl/docker
+TimeoutStopSec=300
 
 [Install]
 WantedBy=multi-user.target
@@ -91,6 +95,16 @@ func (AgentStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		actions = append(actions, Action{Kind: "configure", Target: agentServicePath})
 	}
 
+	dockerDir := "/var/lib/cvctl/docker"
+	dockerDirOwner := sys.Owner{User: "deployer", Group: "deploy"}
+	fi, err := e.FS.Stat(dockerDir)
+	if errors.Is(err, fs.ErrNotExist) || (err == nil && (!fi.IsDir || fi.Mode != 0o750 || fi.User != dockerDirOwner.User || fi.Group != dockerDirOwner.Group)) {
+		changes = append(changes, "directory "+dockerDir)
+		actions = append(actions, Action{Kind: "mkdir", Target: dockerDir})
+	} else if err != nil {
+		return Plan{}, agentFSErr(dockerDir, err)
+	}
+
 	enabledRes, errEnabled := e.Run.Run(ctx, sys.Cmd{Name: "systemctl", Args: []string{"is-enabled", "cvctl-agent"}})
 	activeRes, errActive := e.Run.Run(ctx, sys.Cmd{Name: "systemctl", Args: []string{"is-active", "cvctl-agent"}})
 
@@ -123,6 +137,10 @@ func (AgentStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 
 	for _, a := range p.Actions {
 		switch {
+		case a.Kind == "mkdir":
+			if err := e.FS.MkdirAll(a.Target, 0o750, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
+				return "", agentFSErr(a.Target, err)
+			}
 		case a.Kind == "install_binary":
 			exePath, err := os.Executable()
 			if err != nil {

@@ -77,6 +77,7 @@ func Health(ctx context.Context, run sys.Runner, p Project, h contract.HealthSpe
 	inspectNetCmd := sys.Cmd{
 		Name: "docker",
 		Args: []string{"inspect", "-f", "{{json .NetworkSettings.Networks}}", target.Name},
+		Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
 	}
 	netRes, err := run.Run(ctx, inspectNetCmd)
 	if err != nil || netRes.ExitCode != 0 {
@@ -127,6 +128,7 @@ func Health(ctx context.Context, run sys.Runner, p Project, h contract.HealthSpe
 	inspectRestartCmd := sys.Cmd{
 		Name: "docker",
 		Args: []string{"inspect", "-f", "{{.RestartCount}}", target.Name},
+		Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
 	}
 
 	type restartInfo struct {

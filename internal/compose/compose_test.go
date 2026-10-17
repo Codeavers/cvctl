@@ -82,6 +82,10 @@ func TestCmdShape(t *testing.T) {
 			if !reflect.DeepEqual(cmd.Args, tc.wantArgs) {
 				t.Fatalf("cmd.Args mismatch:\ngot:  %#v\nwant: %#v", cmd.Args, tc.wantArgs)
 			}
+			wantEnv := []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"}
+			if !reflect.DeepEqual(cmd.Env, wantEnv) {
+				t.Fatalf("cmd.Env mismatch:\ngot:  %#v\nwant: %#v", cmd.Env, wantEnv)
+			}
 		})
 	}
 }

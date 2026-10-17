@@ -202,6 +202,7 @@ func Login(ctx context.Context, run sys.Runner, host, user, token string) error 
 		Name:  "docker",
 		Args:  []string{"login", host, "-u", user, "--password-stdin"},
 		Stdin: []byte(token),
+		Env:   []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
 	}
 	res, err := run.Run(ctx, cmd)
 	if err != nil || res.ExitCode != 0 {

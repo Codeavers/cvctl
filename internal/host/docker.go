@@ -67,6 +67,7 @@ func (DockerDaemonStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		res, err := e.Run.Run(ctx, sys.Cmd{
 			Name: "docker",
 			Args: []string{"info", "--format", "{{.LoggingDriver}} {{.LiveRestoreEnabled}}"},
+			Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
 		})
 		if err != nil || res.ExitCode != 0 || strings.TrimSpace(string(res.Stdout)) != "local true" {
 			return Plan{Pending: dockerRestartPendingMsg}, nil
@@ -127,7 +128,7 @@ func (DockerDaemonStep) Apply(ctx context.Context, e *Env, p Plan) (string, erro
 		return "", err
 	}
 
-	dockerPsCmd := sys.Cmd{Name: "docker", Args: []string{"ps", "-q"}}
+	dockerPsCmd := sys.Cmd{Name: "docker", Args: []string{"ps", "-q"}, Env: []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"}}
 	res, err := e.Run.Run(ctx, dockerPsCmd)
 	if err != nil {
 		return "", err

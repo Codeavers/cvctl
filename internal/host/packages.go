@@ -78,9 +78,9 @@ func (PackagesStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	var changes []string
 	var actions []Action
 
-	resInfo, errInfo := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"info"}})
+	resInfo, errInfo := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"info"}, Env: []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"}})
 	if errInfo == nil && resInfo.ExitCode == 0 {
-		resComp, errComp := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"compose", "version", "--short"}})
+		resComp, errComp := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"compose", "version", "--short"}, Env: []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"}})
 		if errComp == nil && resComp.ExitCode == 0 && isComposeSatisfied(string(resComp.Stdout)) {
 			// Compose is installed and version is >= 2.24.0.
 		} else {
@@ -91,7 +91,7 @@ func (PackagesStep) Check(ctx context.Context, e *Env) (Plan, error) {
 			}
 		}
 	} else {
-		resComp, errComp := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"compose", "version", "--short"}})
+		resComp, errComp := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"compose", "version", "--short"}, Env: []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"}})
 		if errComp == nil && resComp.ExitCode == 0 && isComposeSatisfied(string(resComp.Stdout)) {
 			return Plan{}, &output.Error{
 				Code:    "E_DOCKER_DAEMON_DOWN",

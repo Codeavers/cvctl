@@ -324,6 +324,7 @@ func (s StorageStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 	if err := runStorageCmd(ctx, e, sys.Cmd{
 		Name: "docker",
 		Args: upArgs,
+		Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
 	}); err != nil {
 		return "", err
 	}

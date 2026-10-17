@@ -25,6 +25,8 @@ ProtectSystem=strict
 ReadWritePaths=/srv/deploy /var/lib/cvctl /etc/traefik/dynamic
 PrivateTmp=yes
 SupplementaryGroups=docker
+Environment=DOCKER_CONFIG=/var/lib/cvctl/docker
+TimeoutStopSec=300
 
 [Install]
 WantedBy=multi-user.target
@@ -113,5 +115,71 @@ func TestAgentStepRestartsOnBinaryChange(t *testing.T) {
 	}
 	if !foundRestart {
 		t.Fatalf("expected systemctl try-restart cvctl-agent in calls: %v", run.Calls)
+	}
+}
+
+func TestAgentStepEnsuresDockerDir(t *testing.T) {
+	fsys := systest.NewFS()
+	run := &systest.Runner{}
+
+	exePath, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := []byte("cvctl-binary")
+	if err := fsys.WriteFile(exePath, binary, 0o755, sys.Owner{User: "root", Group: "root"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.WriteFile("/usr/local/bin/cvctl", binary, 0o755, sys.Owner{User: "root", Group: "root"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.WriteFile("/etc/systemd/system/cvctl-agent.service", []byte(goldenUnitContent), 0o644, sys.Owner{User: "root", Group: "root"}); err != nil {
+		t.Fatal(err)
+	}
+
+	run.On("systemctl is-enabled cvctl-agent", sys.Result{Stdout: []byte("enabled\n"), ExitCode: 0})
+	run.On("systemctl is-active cvctl-agent", sys.Result{Stdout: []byte("active\n"), ExitCode: 0})
+	run.On("systemctl daemon-reload", sys.Result{ExitCode: 0})
+
+	e := &host.Env{
+		Run: run,
+		FS:  fsys,
+	}
+
+	step := host.AgentStep{}
+	ctx := context.Background()
+
+	plan, err := step.Check(ctx, e)
+	if err != nil {
+		t.Fatalf("Check failed: %v", err)
+	}
+
+	foundDirChange := false
+	for _, c := range plan.Changes {
+		if c == "directory /var/lib/cvctl/docker" {
+			foundDirChange = true
+			break
+		}
+	}
+	if !foundDirChange {
+		t.Fatalf("expected directory /var/lib/cvctl/docker in plan changes, got: %v", plan.Changes)
+	}
+
+	if _, err := step.Apply(ctx, e, plan); err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+
+	fi, err := fsys.Stat("/var/lib/cvctl/docker")
+	if err != nil {
+		t.Fatalf("expected /var/lib/cvctl/docker to exist: %v", err)
+	}
+	if !fi.IsDir {
+		t.Fatalf("expected /var/lib/cvctl/docker to be a directory")
+	}
+	if fi.Mode != 0o750 {
+		t.Fatalf("expected mode 0750, got %#o", fi.Mode)
+	}
+	if fi.User != "deployer" || fi.Group != "deploy" {
+		t.Fatalf("expected owner deployer:deploy, got %s:%s", fi.User, fi.Group)
 	}
 }

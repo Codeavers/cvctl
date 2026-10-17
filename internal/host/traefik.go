@@ -123,6 +123,7 @@ func (TraefikStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	netRes, err := e.Run.Run(ctx, sys.Cmd{
 		Name: "docker",
 		Args: []string{"network", "inspect", EdgeNetwork},
+		Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
 	})
 	if err != nil || netRes.ExitCode != 0 {
 		changes = append(changes, "create network "+EdgeNetwork)
@@ -132,6 +133,7 @@ func (TraefikStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	psRes, err := e.Run.Run(ctx, sys.Cmd{
 		Name: "docker",
 		Args: []string{"compose", "-p", traefikProject, "-f", traefikComposePath, "ps", "--format", "json"},
+		Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
 	})
 	if err != nil || psRes.ExitCode != 0 || !isTraefikRunningWithImage(psRes.Stdout, traefikImage) {
 		changes = append(changes, "start traefik")
@@ -173,6 +175,7 @@ func (s TraefikStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 		if err := runTraefikCmd(ctx, e, sys.Cmd{
 			Name: "docker",
 			Args: []string{"network", "create", EdgeNetwork},
+			Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
 		}); err != nil {
 			return "", err
 		}
@@ -227,6 +230,7 @@ func (s TraefikStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 	if err := runTraefikCmd(ctx, e, sys.Cmd{
 		Name: "docker",
 		Args: upArgs,
+		Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
 	}); err != nil {
 		return "", err
 	}
@@ -251,6 +255,7 @@ func (s TraefikStep) waitForHealthy(ctx context.Context, e *Env) error {
 	inspectCmd := sys.Cmd{
 		Name: "docker",
 		Args: []string{"inspect", "-f", "{{.State.Health.Status}}", traefikContainer},
+		Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
 	}
 
 	deadline := time.Now().Add(timeout)
@@ -275,6 +280,7 @@ func (s TraefikStep) waitForHealthy(ctx context.Context, e *Env) error {
 	logRes, err := e.Run.Run(ctx, sys.Cmd{
 		Name: "docker",
 		Args: []string{"logs", "--tail", "20", traefikContainer},
+		Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
 	})
 	if err != nil {
 		return err

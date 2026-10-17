@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -231,6 +232,10 @@ func TestLoginUsesStdin(t *testing.T) {
 	}
 	if strings.Contains(call.String(), token) {
 		t.Errorf("token found in Cmd.String(): %s", call.String())
+	}
+	wantEnv := []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"}
+	if !reflect.DeepEqual(call.Env, wantEnv) {
+		t.Errorf("expected call.Env to equal %v, got %v", wantEnv, call.Env)
 	}
 }
 
