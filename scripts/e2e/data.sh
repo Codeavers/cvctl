@@ -64,7 +64,8 @@ echo "$res" | jq -e '.ok == true and ([.data.results[] | select(.ok != true)] | 
 list=$(cvctl backup list "$INST" db --json)
 echo "$list"
 echo "$list" | jq -e '.data.snapshots | length == 1'
-vol_dir=$(docker volume inspect cvctl-storage-data --format '{{.Mountpoint}}')
+vol=$(docker volume ls -q --filter label=com.docker.compose.project=cvctl-storage --filter label=com.docker.compose.volume=cvctl-storage-data | head -n1)
+vol_dir=$(docker volume inspect "$vol" --format '{{.Mountpoint}}')
 objs=$(find "$vol_dir" -path "*/${HOST_NAME}/${INST}/db/*" -type f | wc -l)
 echo "Objects under ${HOST_NAME}/${INST}/db/: $objs"
 test "$objs" -gt 0
