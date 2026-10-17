@@ -139,9 +139,13 @@ chmod 0600 "$SECRETS_DIR/s3_access_key" "$SECRETS_DIR/s3_secret_key"
 init_res=$(cvctl init --non-interactive --json)
 echo "$init_res" | jq -e '.ok == true and ([.data.steps[] | select(.status == "failed")] | length == 0)'
 test "$(cat "$SECRETS_DIR/walg_libsodium_key")" != "$WALG_KEY"
-CVCTL_SECRETS_PASSPHRASE="$PASSPHRASE" cvctl secrets import --force /tmp/bundle.age --json >/dev/null
+res=$(CVCTL_SECRETS_PASSPHRASE="$PASSPHRASE" cvctl secrets import --force /tmp/bundle.age --json) || { echo "$res"; false; }
+echo "$res" | jq -e '.ok == true'
 test "$(cat "$SECRETS_DIR/walg_libsodium_key")" = "$WALG_KEY"
-grep -q '^CVCTL_SVC_DB_BACKUP_GEN=0$' "/srv/deploy/${INST}/cvctl.env"
+# the stale bundle predates any generation switch: GEN is absent or 0
+gen=$(sed -n 's/^CVCTL_SVC_DB_BACKUP_GEN=//p' "/srv/deploy/${INST}/cvctl.env")
+echo "bundle generation: ${gen:-absent}"
+test -z "$gen" -o "$gen" = 0
 systemctl start cvctl-agent
 res=$(cvctl project restore "$INST" --json) || { echo "$res"; false; }
 echo "$res"
