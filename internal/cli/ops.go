@@ -144,6 +144,7 @@ var newOpsEnv = func(o opsOpts) (*OpsEnv, error) {
 		Host:       cfg,
 		Catalog:    cat,
 	}
+	deploy.Wire(deployer, run)
 
 	return &OpsEnv{
 		FS:          fsys,

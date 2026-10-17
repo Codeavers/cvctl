@@ -69,6 +69,7 @@ var newProjectEnv = func(o projectOpts) (*project.Env, error) {
 		Host:       cfg,
 		Catalog:    cat,
 	}
+	deploy.Wire(deployer, run)
 
 	return &project.Env{
 		Run:         run,

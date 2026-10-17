@@ -133,10 +133,10 @@ func setupOpsFixture(t *testing.T, inst string) (string, *OpsEnv) {
 		Store:      store,
 		Host:       hcfg,
 		Catalog:    cat,
-		Compose: func(override, envFile string) deploy.ComposeAPI {
+		Compose: func(inst, override, envFile string) deploy.ComposeAPI {
 			return stubComp
 		},
-		Health: func(ctx context.Context, inst, override, envFile string) error {
+		Health: func(ctx context.Context, inst, override string) error {
 			return nil
 		},
 		Repo: stubRepo,
@@ -168,7 +168,7 @@ func TestGetEnvMasked(t *testing.T) {
 	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
 
 	appEnvPath := filepath.Join(env.deployRoot(), "myapp-dev", "app.env")
-	appEnvData := "SHORT=12345\nEXACT6=123456\nLONGVAL=secret123\n"
+	appEnvData := "SHORT=12345\nEXACT6=123456\nLONGVAL=secret123\nJP7=日本語語日本語\nJP6=日本語語日本\n"
 	if err := os.WriteFile(appEnvPath, []byte(appEnvData), 0o640); err != nil {
 		t.Fatal(err)
 	}
@@ -186,6 +186,12 @@ func TestGetEnvMasked(t *testing.T) {
 	}
 	if !strings.Contains(out, "LONGVAL=se***") {
 		t.Errorf("expected LONGVAL=se*** in out: %s", out)
+	}
+	if !strings.Contains(out, "JP7=日本***") {
+		t.Errorf("expected JP7=日本*** in out: %s", out)
+	}
+	if !strings.Contains(out, "JP6=***") {
+		t.Errorf("expected JP6=*** in out: %s", out)
 	}
 
 	// 2. JSON output: masked by default
@@ -205,7 +211,7 @@ func TestGetEnvMasked(t *testing.T) {
 	if !res.OK {
 		t.Fatalf("expected ok=true, got out=%s", out)
 	}
-	if res.Data.Values["SHORT"] != "***" || res.Data.Values["EXACT6"] != "***" || res.Data.Values["LONGVAL"] != "se***" {
+	if res.Data.Values["SHORT"] != "***" || res.Data.Values["EXACT6"] != "***" || res.Data.Values["LONGVAL"] != "se***" || res.Data.Values["JP7"] != "日本***" || res.Data.Values["JP6"] != "***" {
 		t.Fatalf("unexpected masked values in json: %+v", res.Data.Values)
 	}
 
@@ -681,5 +687,161 @@ func TestInstanceNotFound(t *testing.T) {
 		if res.Error == nil || res.Error.Code != "E_INSTANCE_NOT_FOUND" {
 			t.Errorf("for %v, expected E_INSTANCE_NOT_FOUND, got %s", cmdArgs, out)
 		}
+	}
+}
+
+func TestSetEnvInvalidKey(t *testing.T) {
+	_, env := setupOpsFixture(t, "myapp-dev")
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+
+	invalidKeys := []string{"", "A=B", "A B", "X\nY", "123KEY"}
+	for _, key := range invalidKeys {
+		code, out, _ := run(t, "set-env", "myapp-dev", key, "someval", "--json")
+		if code != 2 {
+			t.Errorf("for key %q: expected exit code 2, got %d (out: %s)", key, code, out)
+		}
+		var res struct {
+			OK    bool          `json:"ok"`
+			Error *output.Error `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(out), &res); err != nil {
+			t.Fatalf("unmarshal json: %v out=%s", err, out)
+		}
+		if res.Error == nil || res.Error.Code != "E_SETENV_KEY_INVALID" {
+			t.Errorf("for key %q: expected E_SETENV_KEY_INVALID, got %s", key, out)
+		}
+	}
+
+	appEnvPath := filepath.Join(env.deployRoot(), "myapp-dev", "app.env")
+	if _, err := os.Stat(appEnvPath); !os.IsNotExist(err) {
+		t.Fatalf("expected app.env not to exist, got err: %v", err)
+	}
+}
+
+type promptSpy struct {
+	called bool
+}
+
+func (p *promptSpy) Ask(q hostcfg.Question, defaultValue string) (string, error) {
+	p.called = true
+	return "secret", nil
+}
+
+func TestSetEnvUnknownInstanceNoPrompt(t *testing.T) {
+	_, env := setupOpsFixture(t, "myapp-dev")
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	spy := &promptSpy{}
+	env.Interactive = true
+	env.Prompt = spy
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+
+	code, out, _ := run(t, "set-env", "unknown-dev", "SOME_KEY", "--json")
+	if code == 0 {
+		t.Fatalf("expected error for unknown instance, got code 0: %s", out)
+	}
+	if spy.called {
+		t.Fatal("expected prompter NOT to be called when instance is unknown")
+	}
+	var res struct {
+		OK    bool          `json:"ok"`
+		Error *output.Error `json:"error"`
+	}
+	_ = json.Unmarshal([]byte(out), &res)
+	if res.Error == nil || res.Error.Code != "E_INSTANCE_NOT_FOUND" {
+		t.Fatalf("expected E_INSTANCE_NOT_FOUND, got %s", out)
+	}
+}
+
+func TestResumeNotPaused(t *testing.T) {
+	_, env := setupOpsFixture(t, "myapp-dev")
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+
+	_ = env.Store.Save(&state.State{
+		Instance: "myapp-dev",
+		Status:   state.StatusOK,
+	})
+
+	code, out, _ := run(t, "resume", "myapp-dev", "--json")
+	if code == 0 {
+		t.Fatalf("expected error resuming OK instance, got code 0: %s", out)
+	}
+	var res struct {
+		OK    bool          `json:"ok"`
+		Error *output.Error `json:"error"`
+	}
+	_ = json.Unmarshal([]byte(out), &res)
+	if res.Error == nil || res.Error.Code != "E_NOT_PAUSED" {
+		t.Fatalf("expected E_NOT_PAUSED, got %s", out)
+	}
+	if !strings.Contains(res.Error.Hint, "cvctl status myapp-dev") {
+		t.Fatalf("expected hint 'cvctl status myapp-dev', got %q", res.Error.Hint)
+	}
+	events, _ := env.Store.History("myapp-dev", 10)
+	if len(events) != 0 {
+		t.Fatalf("expected no events recorded on invalid resume, got %d events", len(events))
+	}
+}
+
+func TestPauseDeploying(t *testing.T) {
+	_, env := setupOpsFixture(t, "myapp-dev")
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+
+	_ = env.Store.Save(&state.State{
+		Instance: "myapp-dev",
+		Status:   state.StatusDeploying,
+	})
+
+	code, out, _ := run(t, "pause", "myapp-dev", "--json")
+	if code == 0 {
+		t.Fatalf("expected error pausing deploying instance, got code 0: %s", out)
+	}
+	var res struct {
+		OK    bool          `json:"ok"`
+		Error *output.Error `json:"error"`
+	}
+	_ = json.Unmarshal([]byte(out), &res)
+	if res.Error == nil || res.Error.Code != "E_DEPLOY_IN_PROGRESS" {
+		t.Fatalf("expected E_DEPLOY_IN_PROGRESS, got %s", out)
+	}
+	st, _ := env.Store.Load("myapp-dev")
+	if st.Status != state.StatusDeploying {
+		t.Fatalf("expected status to remain DEPLOYING, got %s", st.Status)
+	}
+	events, _ := env.Store.History("myapp-dev", 10)
+	if len(events) != 0 {
+		t.Fatalf("expected no events recorded on refused pause, got %d events", len(events))
+	}
+}
+
+func TestStatusZeroInstancesJSON(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir := filepath.Join(tmp, "state")
+	cat, _ := kinds.Load()
+	store := state.NewStore(sys.NewOSFS(), stateDir)
+	env := &OpsEnv{
+		FS:         sys.NewOSFS(),
+		Run:        sys.NewExecRunner(),
+		Store:      store,
+		Catalog:    cat,
+		DeployRoot: filepath.Join(tmp, "deploy"),
+		StateRoot:  stateDir,
+	}
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+
+	code, out, errb := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("code %d: out=%s err=%s", code, out, errb)
+	}
+	if !strings.Contains(out, `"instances":[]`) {
+		t.Fatalf("expected JSON to contain '\"instances\":[]', got %s", out)
 	}
 }

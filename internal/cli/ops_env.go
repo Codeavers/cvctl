@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 
 	"github.com/joho/godotenv"
@@ -20,6 +21,8 @@ import (
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
 )
+
+var validEnvKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type setEnvReport struct {
 	Instance string   `json:"instance"`
@@ -38,10 +41,11 @@ type setStrategyReport struct {
 }
 
 func maskEnvValue(val string) string {
-	if len(val) <= 6 {
+	r := []rune(val)
+	if len(r) <= 6 {
 		return "***"
 	}
-	return val[:2] + "***"
+	return string(r[:2]) + "***"
 }
 
 func readAppEnv(fsys sys.FS, path string) (map[string]string, error) {
@@ -71,13 +75,23 @@ func newSetEnvCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "set-env <instance> <key> [value]",
 		Short: "Set an environment variable in app.env",
-		Example: `  cvctl set-env myapp-dev API_KEY secret123
-  cvctl set-env myapp-dev SECRET_KEY --json`,
+		Example: `  cvctl set-env myapp-dev SECRET_KEY
+  cvctl set-env myapp-dev LOG_LEVEL debug --json`,
 		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			inst := args[0]
 			key := args[1]
 			asJSON, _ := cmd.Flags().GetBool("json")
+
+			if !validEnvKey.MatchString(key) {
+				return &output.UsageError{
+					Err: &output.Error{
+						Code:    "E_SETENV_KEY_INVALID",
+						Message: fmt.Sprintf("invalid environment variable name %q: must match ^[A-Za-z_][A-Za-z0-9_]*$", key),
+						Hint:    "use letters, numbers and underscores, starting with a letter or underscore",
+					},
+				}
+			}
 
 			e, err := newOpsEnv(opsOpts{
 				NonInteractive: asJSON,
@@ -85,6 +99,10 @@ func newSetEnvCmd() *cobra.Command {
 				Out:            cmd.ErrOrStderr(),
 			})
 			if err != nil {
+				return err
+			}
+
+			if err := e.checkInstance(inst); err != nil {
 				return err
 			}
 
@@ -106,10 +124,6 @@ func newSetEnvCmd() *cobra.Command {
 					return err
 				}
 				val = ans
-			}
-
-			if err := e.checkInstance(inst); err != nil {
-				return err
 			}
 
 			unlock, err := e.Store.Lock(inst)

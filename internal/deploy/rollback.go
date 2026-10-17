@@ -97,7 +97,7 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 		return err
 	}
 
-	finalCompose := d.Compose(finalOverridePath, finalAppEnvPath)
+	finalCompose := d.Compose(inst, finalOverridePath, finalAppEnvPath)
 	if finalCompose == nil {
 		return &output.Error{
 			Code:    "E_DEPLOY_MISCONFIGURED",
@@ -109,7 +109,7 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 		return err
 	}
 
-	if err := d.Health(ctx, inst, finalOverridePath, finalAppEnvPath); err != nil {
+	if err := d.Health(ctx, inst, finalOverridePath); err != nil {
 		return err
 	}
 

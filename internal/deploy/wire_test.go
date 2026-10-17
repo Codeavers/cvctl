@@ -1,0 +1,121 @@
+package deploy_test
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"slices"
+	"testing"
+	"time"
+
+	"github.com/codeavers/cvctl/internal/compose"
+	"github.com/codeavers/cvctl/internal/deploy"
+	"github.com/codeavers/cvctl/internal/sys"
+	"github.com/codeavers/cvctl/internal/sys/systest"
+	"github.com/codeavers/cvctl/kinds"
+)
+
+func TestWire(t *testing.T) {
+	fsys := systest.NewFS()
+	run := &systest.Runner{}
+	d := &deploy.Deployer{
+		DeployRoot: "/srv/deploy",
+		FS:         fsys,
+	}
+
+	deploy.Wire(d, run)
+
+	if d.Compose == nil {
+		t.Fatal("expected non-nil Compose")
+	}
+	if d.Health == nil {
+		t.Fatal("expected non-nil Health")
+	}
+
+	inst := "myapp-dev"
+	instDir := filepath.Join("/srv/deploy", inst)
+	cvctlEnv := "CVCTL_INFRA_PATH=server\n"
+	if err := fsys.WriteFile(filepath.Join(instDir, "cvctl.env"), []byte(cvctlEnv), 0o640, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
+		t.Fatalf("write cvctl.env: %v", err)
+	}
+
+	override := filepath.Join(instDir, "compose.cvctl.yml")
+	envFile := filepath.Join(instDir, "app.env")
+	comp := d.Compose(inst, override, envFile)
+	if comp == nil {
+		t.Fatal("expected non-nil ComposeAPI")
+	}
+
+	proj, ok := comp.(*compose.Project)
+	if !ok {
+		t.Fatalf("expected *compose.Project, got %T", comp)
+	}
+
+	cmd := proj.Cmd("config", "-q")
+	wantArgs := []string{
+		"compose",
+		"-p", inst,
+		"--env-file", envFile,
+		"-f", filepath.Join(instDir, "infra", "server", "compose.yml"),
+		"-f", override,
+		"config", "-q",
+	}
+	if !slices.Equal(cmd.Args, wantArgs) {
+		t.Fatalf("got args %v, want %v", cmd.Args, wantArgs)
+	}
+}
+
+func TestWireHealth(t *testing.T) {
+	tmp := t.TempDir()
+	inst := "myapp-dev"
+	instDir := filepath.Join(tmp, inst)
+	serverDir := filepath.Join(instDir, "infra", "server")
+	if err := os.MkdirAll(serverDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	composeYML := `services:
+  web:
+    image: myimage:v1
+    labels:
+      cvctl.role: app
+      cvctl.expose: "8080"
+x-cvctl:
+  health:
+    service: web
+    http: /health
+`
+	if err := os.WriteFile(filepath.Join(serverDir, "compose.yml"), []byte(composeYML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(instDir, "cvctl.env"), []byte("CVCTL_INFRA_PATH=server\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	run := &systest.Runner{}
+	psOut := `[{"Service":"web","Name":"myapp-dev-web-1","State":"running","Health":"healthy"}]`
+	run.On("docker compose -p myapp-dev --env-file "+filepath.Join(instDir, "app.env")+" -f "+filepath.Join(serverDir, "compose.yml")+" -f "+filepath.Join(instDir, "compose.cvctl.yml")+" ps --format json", sys.Result{Stdout: []byte(psOut), ExitCode: 0})
+
+	inspectOut := `{"myapp_dev_app":{"IPAddress":"127.0.0.1"}}`
+	run.On("docker inspect -f {{json .NetworkSettings.Networks}} myapp-dev-web-1", sys.Result{Stdout: []byte(inspectOut), ExitCode: 0})
+
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d := &deploy.Deployer{
+		DeployRoot: tmp,
+		Catalog:    cat,
+	}
+	deploy.Wire(d, run)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	// Calling d.Health exercises the contract loading, project binding, and compose.Health call.
+	// Since HTTP ping fails against dummy 127.0.0.1 without mock server, it returns an error.
+	if err := d.Health(ctx, inst, filepath.Join(instDir, "compose.cvctl.yml")); err == nil {
+		t.Fatal("expected error connecting to dummy health endpoint")
+	}
+}

@@ -301,6 +301,14 @@ func newPauseCmd() *cobra.Command {
 				return err
 			}
 
+			if st.Status == state.StatusDeploying {
+				return &output.Error{
+					Code:    "E_DEPLOY_IN_PROGRESS",
+					Message: fmt.Sprintf("cannot pause instance %q: deploy in progress", inst),
+					Hint:    fmt.Sprintf("wait for the deploy to finish or check cvctl status %s", inst),
+				}
+			}
+
 			now := time.Now()
 			st.Status = state.StatusPaused
 			st.PausedReason = reason
@@ -372,6 +380,14 @@ func newResumeCmd() *cobra.Command {
 			st, err := e.Store.Load(inst)
 			if err != nil {
 				return err
+			}
+
+			if st.Status != state.StatusPaused {
+				return &output.Error{
+					Code:    "E_NOT_PAUSED",
+					Message: fmt.Sprintf("cannot resume instance %q: status is %s (not PAUSED)", inst, st.Status),
+					Hint:    fmt.Sprintf("cvctl status %s", inst),
+				}
 			}
 
 			now := time.Now()

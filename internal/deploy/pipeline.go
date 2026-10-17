@@ -73,14 +73,14 @@ type Deployer struct {
 	TraefikDir     string
 	FS             sys.FS
 	Store          *state.Store
-	Compose        func(override, envFile string) ComposeAPI
+	Compose        func(inst, override, envFile string) ComposeAPI
 	Repo           CheckoutAPI
 	Notify         notify.Notifier
 	Restore        RestorePointer
 	Host           *hostcfg.Config
 	Catalog        kinds.Catalog
 	Clock          func() time.Time
-	Health         func(ctx context.Context, inst, override, envFile string) error
+	Health         func(ctx context.Context, inst, override string) error
 	RenderOverride func(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o render.Options) ([]byte, error)
 	RenderTraefik  func(p *contract.Project, d *instance.Decisions, o render.Options) ([]byte, error)
 }
@@ -599,7 +599,7 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 		}
 	}
 
-	stagingCompose := d.Compose(stagingOverridePath, stagingAppEnvPath)
+	stagingCompose := d.Compose(inst, stagingOverridePath, stagingAppEnvPath)
 	if stagingCompose == nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, "deployer misconfigured: Compose returned nil", resEnv.Values)
@@ -676,7 +676,7 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 	d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 	promoted = true
 
-	finalCompose := d.Compose(finalOverridePath, finalAppEnvPath)
+	finalCompose := d.Compose(inst, finalOverridePath, finalAppEnvPath)
 	if finalCompose == nil {
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, "deployer misconfigured: Compose returned nil", resEnv.Values)
 	}
@@ -685,7 +685,7 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 	// Step 9: HealthCheck
 	var healthErr error
 	if upErr == nil {
-		healthErr = d.Health(ctx, inst, finalOverridePath, finalAppEnvPath)
+		healthErr = d.Health(ctx, inst, finalOverridePath)
 	}
 
 	if upErr == nil && healthErr == nil {

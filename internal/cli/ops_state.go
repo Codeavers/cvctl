@@ -109,7 +109,7 @@ func newStatusCmd() *cobra.Command {
 			}
 
 			now := time.Now()
-			var items []instanceStatusItem
+			items := make([]instanceStatusItem, 0)
 			for _, inst := range instances {
 				st, _ := e.Store.Load(inst)
 				statusStr := string(state.StatusOK)
@@ -258,7 +258,7 @@ func newLogsCmd() *cobra.Command {
 
 			var logsOut string
 			if e.Deployer != nil && e.Deployer.Compose != nil {
-				comp := e.Deployer.Compose(overridePath, appEnvPath)
+				comp := e.Deployer.Compose(inst, overridePath, appEnvPath)
 				out, err := comp.Logs(cmd.Context(), service, tail)
 				if err != nil {
 					return err

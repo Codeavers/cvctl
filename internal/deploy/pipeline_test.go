@@ -302,7 +302,7 @@ func setupTestRig(t *testing.T, envName, instName string) *testRig {
 		TraefikDir: traefikDir,
 		FS:         osFS,
 		Store:      store,
-		Compose: func(override, envFile string) ComposeAPI {
+		Compose: func(inst, override, envFile string) ComposeAPI {
 			return &boundCompose{fake: comp, override: override, envFile: envFile}
 		},
 		Repo:    repo,
@@ -316,7 +316,7 @@ func setupTestRig(t *testing.T, envName, instName string) *testRig {
 		Clock: func() time.Time {
 			return fixedNow
 		},
-		Health: func(ctx context.Context, inst, override, envFile string) error {
+		Health: func(ctx context.Context, inst, override string) error {
 			return nil
 		},
 	}
@@ -350,7 +350,7 @@ func TestDeployHappyPath(t *testing.T) {
 	want := defaultDesired()
 
 	healthCalled := false
-	rig.deployer.Health = func(ctx context.Context, inst, override, envFile string) error {
+	rig.deployer.Health = func(ctx context.Context, inst, override string) error {
 		healthCalled = true
 		return nil
 	}
@@ -623,7 +623,7 @@ func TestHealthFailsRollsBack(t *testing.T) {
 	want := defaultDesired()
 
 	healthCount := 0
-	rig.deployer.Health = func(ctx context.Context, inst, override, envFile string) error {
+	rig.deployer.Health = func(ctx context.Context, inst, override string) error {
 		healthCount++
 		if healthCount == 1 {
 			return fmt.Errorf("health timeout on :3000/health")
@@ -689,7 +689,7 @@ func TestRollbackFailsMarksRollbackFailed(t *testing.T) {
 
 	want := defaultDesired()
 
-	rig.deployer.Health = func(ctx context.Context, inst, override, envFile string) error {
+	rig.deployer.Health = func(ctx context.Context, inst, override string) error {
 		return fmt.Errorf("persistent health failure")
 	}
 
@@ -997,7 +997,7 @@ func TestDeployingStateSavedBeforePull(t *testing.T) {
 	want := defaultDesired()
 
 	pullCalled := false
-	rig.deployer.Compose = func(override, envFile string) ComposeAPI {
+	rig.deployer.Compose = func(inst, override, envFile string) ComposeAPI {
 		b := &boundCompose{fake: rig.compose, override: override, envFile: envFile}
 		return &pullCheckingCompose{
 			boundCompose: b,
@@ -1264,7 +1264,7 @@ func TestRollbackFailureNotificationAndEvent(t *testing.T) {
 
 	want := defaultDesired()
 
-	rig.deployer.Health = func(ctx context.Context, inst, override, envFile string) error {
+	rig.deployer.Health = func(ctx context.Context, inst, override string) error {
 		return errors.New("fatal container crash")
 	}
 
@@ -1628,7 +1628,7 @@ func TestRollbackFailureStoreSaveErrorStillNotifies(t *testing.T) {
 	}
 
 	// Make health check fail so executeSwap in Rollback fails
-	rig.deployer.Health = func(ctx context.Context, inst, override, envFile string) error {
+	rig.deployer.Health = func(ctx context.Context, inst, override string) error {
 		return errors.New("swap healthcheck failed")
 	}
 
@@ -1720,7 +1720,7 @@ func TestDeployNilFactoryAfterDeployingFailPermanent(t *testing.T) {
 	want := defaultDesired()
 
 	// Compose returns nil on staging
-	rig.deployer.Compose = func(override, envFile string) ComposeAPI {
+	rig.deployer.Compose = func(inst, override, envFile string) ComposeAPI {
 		return nil
 	}
 
@@ -2168,7 +2168,7 @@ func TestHealthFailureRestoresPreDeployAppEnv(t *testing.T) {
 	currCvctlEnv, _ := os.ReadFile(cvctlEnvPath)
 	_ = os.WriteFile(cvctlEnvPath, append(currCvctlEnv, []byte("CVCTL_ENV_NEW_VAR=resolved_new_val\n")...), 0o644)
 
-	rig.deployer.Health = func(ctx context.Context, inst, override, envFile string) error {
+	rig.deployer.Health = func(ctx context.Context, inst, override string) error {
 		if rig.compose.upCount == 1 {
 			return errors.New("unhealthy container")
 		}
@@ -2215,7 +2215,7 @@ func TestAutoRollbackSuccessSaveFailureStillNotifies(t *testing.T) {
 		t.Fatalf("store.Save: %v", err)
 	}
 
-	rig.deployer.Health = func(ctx context.Context, inst, override, envFile string) error {
+	rig.deployer.Health = func(ctx context.Context, inst, override string) error {
 		if rig.compose.upCount == 1 {
 			return errors.New("health check failure")
 		}
