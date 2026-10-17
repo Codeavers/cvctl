@@ -3,7 +3,12 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"syscall"
 	"testing"
+	"time"
+
+	"github.com/spf13/cobra"
 )
 
 func run(t *testing.T, args ...string) (int, string, string) {
@@ -46,5 +51,31 @@ func TestUnknownFlagExit2JSON(t *testing.T) {
 	var env map[string]any
 	if err := json.Unmarshal([]byte(out), &env); err != nil || env["ok"] != false {
 		t.Fatalf("out %q err %v", out, err)
+	}
+}
+
+func TestSignalsCancelTheCommandContext(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP} {
+		root := NewRoot("1.2.3")
+		cancelled := false
+		root.AddCommand(&cobra.Command{
+			Use: "wait",
+			RunE: func(cmd *cobra.Command, _ []string) error {
+				if err := syscall.Kill(os.Getpid(), sig); err != nil {
+					return err
+				}
+				select {
+				case <-cmd.Context().Done():
+					cancelled = true
+				case <-time.After(5 * time.Second):
+				}
+				return nil
+			},
+		})
+		var out, errb bytes.Buffer
+		Execute(root, []string{"wait"}, &out, &errb)
+		if !cancelled {
+			t.Fatalf("%v did not cancel the command context", sig)
+		}
 	}
 }

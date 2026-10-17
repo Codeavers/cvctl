@@ -2,8 +2,11 @@
 package cli
 
 import (
+	"context"
 	"io"
+	"os/signal"
 	"slices"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -62,7 +65,12 @@ func Execute(root *cobra.Command, args []string, stdout, stderr io.Writer) int {
 		p.JSON, _ = cmd.Flags().GetBool("json")
 	}
 
-	err := root.Execute()
+	// Restores and backups roll back on a cancelled context (they use
+	// WithoutCancel for that); without this, Ctrl-C or a closed SSH session
+	// would kill the process mid-restore and leave the instance stopped.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+	err := root.ExecuteContext(ctx)
 	if err == nil {
 		return output.ExitOK
 	}
