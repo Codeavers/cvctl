@@ -298,7 +298,6 @@ func TestStorageS3BucketDenied(t *testing.T) {
 	sec.Set("s3_secret_key", "secret1234567890123456789012345678901234")
 	sec.Set("walg_libsodium_key", strings.Repeat("ab", 32))
 	sec.Set("restic_password", strings.Repeat("R", 40))
-	_ = cfg.Set("S3_ENDPOINT_INTERNAL", "https://s3.example.com")
 
 	env := &Env{Run: r, FS: fs, Cfg: cfg, Secrets: sec, EUID: 0}
 
@@ -356,10 +355,8 @@ func TestStorageUnchangedWhenProbeOK(t *testing.T) {
 		sec.Set("s3_secret_key", "secret1234567890123456789012345678901234")
 		sec.Set("walg_libsodium_key", strings.Repeat("ab", 32))
 		sec.Set("restic_password", strings.Repeat("R", 40))
-		_ = cfg.Set("S3_ENDPOINT_INTERNAL", "https://s3.example.com")
 		sec.Set("walg_libsodium_key", strings.Repeat("ab", 32))
 		sec.Set("restic_password", strings.Repeat("R", 40))
-		_ = cfg.Set("S3_ENDPOINT_INTERNAL", "https://s3.example.com")
 
 		env := &Env{Run: r, FS: fs, Cfg: cfg, Secrets: sec, EUID: 0}
 
@@ -648,7 +645,7 @@ func TestStorageLocalComposeHasBackupAlias(t *testing.T) {
 func TestStorageInternalEndpointPerMode(t *testing.T) {
 	cases := []struct{ mode, ep, want string }{
 		{"local", "", "http://cvctl-storage:9000"},
-		{"s3", "https://s3.example.com", "https://s3.example.com"},
+		{"s3", "https://s3.example.com", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.mode, func(t *testing.T) {
@@ -671,6 +668,38 @@ func TestStorageInternalEndpointPerMode(t *testing.T) {
 			}
 			if cfg.S3EndpointInternal != tc.want {
 				t.Fatalf("persisted = %q, want %q", cfg.S3EndpointInternal, tc.want)
+			}
+		})
+	}
+}
+
+func TestStorageInternalEndpointFollowsModeChanges(t *testing.T) {
+	cases := []struct{ mode, ep, stale, want string }{
+		{"s3", "https://s3.example.com", "http://cvctl-storage:9000", ""},
+		{"local", "", "https://old.example.com", "http://cvctl-storage:9000"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode, func(t *testing.T) {
+			env, r, fs := backupEnv(t, tc.mode, tc.ep)
+			_ = env.Cfg.Set("S3_ENDPOINT_INTERNAL", tc.stale)
+			r.OnPrefix("docker network", sys.Result{ExitCode: 0})
+			step := StorageStep{PollInterval: time.Millisecond, PollTimeout: 20 * time.Millisecond}
+			plan, err := step.Check(context.Background(), env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Contains(plan.Changes, "configure internal storage endpoint") {
+				t.Fatalf("stale endpoint not detected: %v", plan.Changes)
+			}
+			if _, err := step.Apply(context.Background(), env, plan); err != nil {
+				t.Fatal(err)
+			}
+			cfg, _, err := hostcfg.Load(fs, "/etc/cvctl")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if env.Cfg.S3EndpointInternal != tc.want || cfg.S3EndpointInternal != tc.want {
+				t.Fatalf("internal endpoint = %q, persisted %q, want %q", env.Cfg.S3EndpointInternal, cfg.S3EndpointInternal, tc.want)
 			}
 		})
 	}

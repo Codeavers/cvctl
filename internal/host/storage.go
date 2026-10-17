@@ -170,7 +170,11 @@ func (s StorageStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		p.Changes = append(p.Changes, "generate backup keys")
 		p.Actions = append(p.Actions, Action{Kind: "configure", Target: actionBackupKeys})
 	}
-	if e.Cfg == nil || e.Cfg.S3EndpointInternal == "" {
+	current := ""
+	if e.Cfg != nil {
+		current = e.Cfg.S3EndpointInternal
+	}
+	if current != internalEndpoint(effectiveStorageMode(e.Cfg)) {
 		p.Changes = append(p.Changes, "configure internal storage endpoint")
 		p.Actions = append(p.Actions, Action{Kind: "configure", Target: actionInternalEP})
 	}
@@ -184,6 +188,16 @@ func (s StorageStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		p.Actions = append(p.Actions, Action{Kind: "network-create", Target: BackupNetwork})
 	}
 	return p, nil
+}
+
+// internalEndpoint is derived from the storage mode on every run, so switching
+// modes never leaves the other mode's endpoint behind. With s3 the backup
+// containers use CVCTL_S3_ENDPOINT itself.
+func internalEndpoint(mode string) string {
+	if mode == "local" {
+		return localInternalS3URL
+	}
+	return ""
 }
 
 func hasBackupKeys(sec *hostcfg.Secrets) bool {
@@ -269,15 +283,9 @@ func (s StorageStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 	if err := ensureBackupKeys(e.Secrets); err != nil {
 		return "", err
 	}
-	if e.Cfg.S3EndpointInternal == "" {
-		internal := localInternalS3URL
-		if mode == "s3" {
-			internal = e.Cfg.S3Endpoint
-		}
-		if internal != "" {
-			if err := e.Cfg.Set("S3_ENDPOINT_INTERNAL", internal); err != nil {
-				return "", err
-			}
+	if want := internalEndpoint(mode); e.Cfg.S3EndpointInternal != want {
+		if err := e.Cfg.Set("S3_ENDPOINT_INTERNAL", want); err != nil {
+			return "", err
 		}
 	}
 	for _, a := range p.Actions {
