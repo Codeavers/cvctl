@@ -755,6 +755,77 @@ vars:
 	_ = res
 }
 
+func TestAddWithDomain(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra-source")
+	writeTestInfra(t, infraDir, validCompose, validSpec)
+
+	cat := testCatalog(t)
+	stub := &stubRepo{infraSource: infraDir}
+
+	e := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "state"),
+		Catalog:     cat,
+		Interactive: false,
+		RepoFactory: func(dir, _ string) RepoLike {
+			r := *stub
+			r.dir = dir
+			return &r
+		},
+	}
+
+	res, err := Add(context.Background(), e, "git@github.com:myorg/my-service-infra.git", AddOptions{
+		Domains: map[string]string{
+			"web": "web.example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Add with Domains failed: %v", err)
+	}
+
+	if res.Decisions.Domains["web"] != "web.example.com" {
+		t.Errorf("expected domain web.example.com, got %s", res.Decisions.Domains["web"])
+	}
+}
+
+func TestAddWithDomainUnknownService(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra-source")
+	writeTestInfra(t, infraDir, validCompose, validSpec)
+
+	cat := testCatalog(t)
+	stub := &stubRepo{infraSource: infraDir}
+
+	e := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "state"),
+		Catalog:     cat,
+		Interactive: false,
+		RepoFactory: func(dir, _ string) RepoLike {
+			r := *stub
+			r.dir = dir
+			return &r
+		},
+	}
+
+	_, err := Add(context.Background(), e, "git@github.com:myorg/my-service-infra.git", AddOptions{
+		Domains: map[string]string{
+			"nonexistent": "bad.example.com",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown service domain, got nil")
+	}
+
+	var usage *output.UsageError
+	if !errors.As(err, &usage) {
+		t.Fatalf("expected usage error, got %T: %v", err, err)
+	}
+}
+
 func TestAddPathTraversalAndValidation(t *testing.T) {
 	fsys := systest.NewFS()
 	runner := &systest.Runner{}

@@ -1,0 +1,70 @@
+name: e2e-deploy
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'internal/**'
+      - 'examples/e2e/**'
+      - 'scripts/e2e/**'
+      - '.github/workflows/e2e-deploy.yml'
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build cvctl
+        run: CGO_ENABLED=0 go build -o cvctl ./cmd/cvctl
+
+      - name: Configure /etc/cvctl
+        run: |
+          sudo install -d -m 0700 /etc/cvctl
+          sudo cp scripts/e2e/init-host.env /etc/cvctl/host.env
+          sudo sed -i 's|CVCTL_REGISTRIES=.*|CVCTL_REGISTRIES=localhost:5000/e2e|' /etc/cvctl/host.env
+
+      - name: Run cvctl init
+        run: |
+          set +e
+          sudo ./cvctl init --non-interactive --json > init.json
+          echo $? > init.code
+          set -e
+          cat init.json
+          test "$(cat init.code)" -eq 0
+          jq -e '.ok == true' init.json
+          jq -e '[.data.steps[] | select(.status == "failed")] | length == 0' init.json
+
+      - name: Start local registry
+        run: docker run -d -p 5000:5000 --name registry registry:2
+
+      - name: Run E2E deploy tests
+        run: |
+          chmod +x scripts/e2e/deploy.sh
+          sudo -E env CVCTL_ALLOW_FILE_REPOS=1 CVCTL_INSECURE_REGISTRIES=localhost:5000 ./scripts/e2e/deploy.sh
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          mkdir -p /tmp/e2e-deploy-logs
+          cp init.json init.code /tmp/e2e-deploy-logs/ 2>/dev/null || true
+          sudo ./cvctl status demo-dev --json > /tmp/e2e-deploy-logs/status.json 2>&1 || true
+          sudo ./cvctl history demo-dev --json > /tmp/e2e-deploy-logs/history.json 2>&1 || true
+          docker ps -a > /tmp/e2e-deploy-logs/docker-ps.txt 2>&1 || true
+          docker logs cvctl-traefik > /tmp/e2e-deploy-logs/traefik.log 2>&1 || true
+          docker logs registry > /tmp/e2e-deploy-logs/registry.log 2>&1 || true
+          journalctl -u cvctl-agent --no-pager > /tmp/e2e-deploy-logs/agent.log 2>&1 || true
+          for c in $(docker ps -a --filter "name=demo-dev" --format '{{.Names}}'); do
+            docker logs "$c" > "/tmp/e2e-deploy-logs/$c.log" 2>&1 || true
+          done
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-deploy-artifacts
+          path: /tmp/e2e-deploy-logs

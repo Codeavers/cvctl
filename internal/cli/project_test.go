@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/codeavers/cvctl/internal/project"
@@ -261,5 +262,109 @@ func TestProjectAddInvalidSet(t *testing.T) {
 	code, _, _ := run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--set", "NOEQUALS")
 	if code != 2 {
 		t.Fatalf("code %d, want exit 2 for bad flag", code)
+	}
+}
+
+func TestProjectAddDomain(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra-source")
+	writeCLIInfra(t, infraDir)
+
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stub := &cliStubRepo{infraSource: infraDir}
+
+	oldEnv := newProjectEnv
+	t.Cleanup(func() { newProjectEnv = oldEnv })
+
+	newProjectEnv = func(o projectOpts) (*project.Env, error) {
+		return &project.Env{
+			FS:          sys.NewOSFS(),
+			DeployRoot:  tmp,
+			StateRoot:   filepath.Join(tmp, "state"),
+			Catalog:     cat,
+			Interactive: false,
+			RepoFactory: func(dir, _ string) project.RepoLike {
+				r := *stub
+				r.dir = dir
+				return &r
+			},
+		}, nil
+	}
+
+	code, out, errb := run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--domain", "web=web.example.com", "--json")
+	if code != 0 {
+		t.Fatalf("code %d: out=%s err=%s", code, out, errb)
+	}
+
+	var env struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Instance string `json:"instance"`
+			Status   string `json:"status"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("json unmarshal: %v (out: %s)", err, out)
+	}
+	if !env.OK || env.Data.Instance != "my-app-dev" || env.Data.Status != "OK" {
+		t.Fatalf("unexpected data: %+v", env)
+	}
+
+	cvctlEnvData, err := os.ReadFile(filepath.Join(tmp, "my-app-dev", "cvctl.env"))
+	if err != nil {
+		t.Fatalf("read cvctl.env: %v", err)
+	}
+	if !strings.Contains(string(cvctlEnvData), "CVCTL_DOMAIN_WEB=web.example.com") {
+		t.Errorf("expected CVCTL_DOMAIN_WEB in cvctl.env, got:\n%s", string(cvctlEnvData))
+	}
+}
+
+func TestProjectAddDomainUnknownService(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra-source")
+	writeCLIInfra(t, infraDir)
+
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stub := &cliStubRepo{infraSource: infraDir}
+
+	oldEnv := newProjectEnv
+	t.Cleanup(func() { newProjectEnv = oldEnv })
+
+	newProjectEnv = func(o projectOpts) (*project.Env, error) {
+		return &project.Env{
+			FS:          sys.NewOSFS(),
+			DeployRoot:  tmp,
+			StateRoot:   filepath.Join(tmp, "state"),
+			Catalog:     cat,
+			Interactive: false,
+			RepoFactory: func(dir, _ string) project.RepoLike {
+				r := *stub
+				r.dir = dir
+				return &r
+			},
+		}, nil
+	}
+
+	code, out, _ := run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--domain", "unknownsvc=web.example.com", "--json")
+	if code != 2 {
+		t.Fatalf("code %d, want exit 2 for unknown service", code)
+	}
+	if !strings.Contains(out, "unknown") && !strings.Contains(out, "usage") {
+		t.Errorf("expected unknown service error in output, got: %s", out)
+	}
+}
+
+func TestProjectAddInvalidDomain(t *testing.T) {
+	code, _, _ := run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--domain", "NOEQUALS")
+	if code != 2 {
+		t.Fatalf("code %d, want exit 2 for bad --domain flag", code)
 	}
 }

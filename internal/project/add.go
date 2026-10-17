@@ -127,6 +127,7 @@ type AddOptions struct {
 	TrackTag string
 	Strategy string
 	Set      map[string]string
+	Domains  map[string]string
 }
 
 type AddResult struct {
@@ -669,6 +670,23 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		return nil, err
 	}
 
+	knownApps := make(map[string]bool, len(p.Apps))
+	for _, a := range p.Apps {
+		knownApps[a.Name] = true
+	}
+	for svc := range opts.Domains {
+		if !knownApps[svc] {
+			cleanupInst()
+			return nil, &output.UsageError{
+				Err: &output.Error{
+					Code:    "E_PROJECT_UNKNOWN_SERVICE",
+					Message: fmt.Sprintf("unknown service %q for --domain", svc),
+					Hint:    "specify an app service defined in compose.yml",
+				},
+			}
+		}
+	}
+
 	trackTag := opts.TrackTag
 	if trackTag == "" && envName == "dev" {
 		trackTag = "develop"
@@ -684,6 +702,9 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		Services:    make(map[string]instance.ServiceDecision),
 		Domains:     make(map[string]string),
 		Digests:     make(map[string]string),
+	}
+	for k, v := range opts.Domains {
+		d.Domains[k] = v
 	}
 
 	if err := promptDataServices(ctx, e, cat, p, d); err != nil {

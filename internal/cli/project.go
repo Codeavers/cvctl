@@ -98,6 +98,18 @@ func parseSet(setFlags []string) (map[string]string, error) {
 	return out, nil
 }
 
+func parseDomains(domainFlags []string) (map[string]string, error) {
+	out := make(map[string]string, len(domainFlags))
+	for _, s := range domainFlags {
+		k, v, found := strings.Cut(s, "=")
+		if !found || strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+			return nil, &output.UsageError{Err: fmt.Errorf("invalid --domain flag %q: expected svc=host", s)}
+		}
+		out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+	}
+	return out, nil
+}
+
 func newProjectCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "project",
@@ -116,7 +128,7 @@ func newProjectAddCmd() *cobra.Command {
 		Short: "Add and deploy a new project instance",
 		Example: `  cvctl project add git@github.com:myorg/my-infra.git
   cvctl project add https://github.com/myorg/my-infra.git --env prod --branch main
-  cvctl project add git@github.com:myorg/my-infra.git --set FOO=bar --non-interactive`,
+  cvctl project add git@github.com:myorg/my-infra.git --set FOO=bar --domain api=api.example.com --non-interactive`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repoURL := args[0]
@@ -128,8 +140,13 @@ func newProjectAddCmd() *cobra.Command {
 			nonInt, _ := cmd.Flags().GetBool("non-interactive")
 			asJSON, _ := cmd.Flags().GetBool("json")
 			setFlags, _ := cmd.Flags().GetStringArray("set")
+			domainFlags, _ := cmd.Flags().GetStringArray("domain")
 
 			setMap, err := parseSet(setFlags)
+			if err != nil {
+				return err
+			}
+			domainMap, err := parseDomains(domainFlags)
 			if err != nil {
 				return err
 			}
@@ -150,6 +167,7 @@ func newProjectAddCmd() *cobra.Command {
 				TrackTag: tag,
 				Strategy: strategy,
 				Set:      setMap,
+				Domains:  domainMap,
 			})
 			if err != nil {
 				return err
@@ -188,6 +206,7 @@ func newProjectAddCmd() *cobra.Command {
 	cmd.Flags().String("strategy", "recreate", "deployment strategy (recreate|blue-green)")
 	cmd.Flags().Bool("non-interactive", false, "never prompt; use defaults and --set values")
 	cmd.Flags().StringArray("set", nil, "pre-seed app.env values (KEY=VALUE, repeatable)")
+	cmd.Flags().StringArray("domain", nil, "domain for exposed service (svc=host, repeatable)")
 	return cmd
 }
 
