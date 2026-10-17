@@ -295,20 +295,25 @@ func (d *Deployer) failTransient(ctx context.Context, inst string, st *state.Sta
 	if !strings.HasSuffix(detail, "will retry next cycle") {
 		detail = detail + ": will retry next cycle"
 	}
+	// Transient failures repeat every poll cycle; only a changed cause is worth a message.
+	repeated := st.LastTransient == detail
 	st.Status = state.StatusFailed
 	st.FailedHash = ""
+	st.LastTransient = detail
 	st.UpdatedAt = now
 	res := Result{
 		Status: state.StatusFailed,
 		ID:     deployID,
 		Detail: detail,
 	}
-	_ = d.notifier().Send(ctx, notify.Message{
-		Host:  d.hostName(),
-		Level: "error",
-		Title: fmt.Sprintf("%s deploy FAILED", inst),
-		Text:  detail,
-	})
+	if !repeated {
+		_ = d.notifier().Send(ctx, notify.Message{
+			Host:  d.hostName(),
+			Level: "error",
+			Title: fmt.Sprintf("%s deploy FAILED", inst),
+			Text:  detail,
+		})
+	}
 	var errs []error
 	if err := d.Store.Save(st); err != nil {
 		errs = append(errs, err)
@@ -401,6 +406,32 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		}, nil
 	}
 	if st.Current != nil && want.Hash() == st.Current.Hash() && !opts.Force {
+		if st.Status == state.StatusBlocked || st.Status == state.StatusFailed {
+			// The running state already matches; a stale BLOCKED/FAILED status
+			// (e.g. after the cause was fixed by hand) must not stick forever.
+			st.Status = state.StatusOK
+			st.Blocked = nil
+			st.FailedHash = ""
+			st.LastTransient = ""
+			st.UpdatedAt = now
+			var errs []error
+			if err := d.Store.Save(st); err != nil {
+				errs = append(errs, err)
+			}
+			if err := d.Store.Append(inst, state.Event{
+				ID:     deployID,
+				At:     now,
+				Kind:   "recovered",
+				From:   st.Current,
+				To:     &want,
+				Result: string(state.StatusOK),
+				Detail: "desired state already running",
+				Actor:  actor,
+			}); err != nil {
+				errs = append(errs, err)
+			}
+			return Result{Status: state.StatusOK, ID: deployID, Detail: "already at desired state"}, errors.Join(errs...)
+		}
 		return Result{
 			Status: state.StatusOK,
 			ID:     deployID,
@@ -773,29 +804,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			}
 		}
 
-		st.Previous = st.Current
-		st.Current = &want
-		st.Status = state.StatusOK
-		st.FailedHash = ""
-		st.RollbackFailed = false
-		st.Blocked = nil
-		st.UpdatedAt = now
-		if err := d.Store.Save(st); err != nil {
-			return Result{}, err
-		}
-
-		if err := d.Store.Append(inst, state.Event{
-			ID:     deployID,
-			At:     now,
-			Kind:   "deploy",
-			From:   st.Previous,
-			To:     st.Current,
-			Result: string(state.StatusOK),
-			Detail: fmt.Sprintf("commit %s deployed", commitShort(want.InfraCommit)),
-			Actor:  actor,
-		}); err != nil {
-			return Result{}, err
-		}
+		okDetail := fmt.Sprintf("commit %s deployed", commitShort(want.InfraCommit))
 		_ = d.notifier().Send(ctx, notify.Message{
 			Host:  d.hostName(),
 			Level: "info",
@@ -803,11 +812,37 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			Text:  fmt.Sprintf("commit %s deployed successfully", commitShort(want.InfraCommit)),
 		})
 
+		st.Previous = st.Current
+		st.Current = &want
+		st.Status = state.StatusOK
+		st.FailedHash = ""
+		st.LastTransient = ""
+		st.RollbackFailed = false
+		st.Blocked = nil
+		st.UpdatedAt = now
+
+		var okErrs []error
+		if err := d.Store.Save(st); err != nil {
+			okErrs = append(okErrs, err)
+		}
+		if err := d.Store.Append(inst, state.Event{
+			ID:     deployID,
+			At:     now,
+			Kind:   "deploy",
+			From:   st.Previous,
+			To:     st.Current,
+			Result: string(state.StatusOK),
+			Detail: okDetail,
+			Actor:  actor,
+		}); err != nil {
+			okErrs = append(okErrs, err)
+		}
+
 		return Result{
 			Status: state.StatusOK,
 			ID:     deployID,
-			Detail: fmt.Sprintf("commit %s deployed", commitShort(want.InfraCommit)),
-		}, nil
+			Detail: okDetail,
+		}, errors.Join(okErrs...)
 	}
 
 	// Step 10: Rollback to st.Current

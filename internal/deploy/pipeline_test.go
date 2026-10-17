@@ -2415,3 +2415,88 @@ func TestGeneratedRandomSurvivesAutoRollback(t *testing.T) {
 		t.Fatalf("rollback env lost keys: %v (generated %q)", vals, seen)
 	}
 }
+
+func TestIdenticalTransientFailureNotifiesOnce(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	rig.compose.failPull = errors.New("pull network timeout")
+	want := defaultDesired()
+	for i := 0; i < 2; i++ {
+		if res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{}); err != nil || res.Status != state.StatusFailed {
+			t.Fatalf("run %d: %v %v", i, res.Status, err)
+		}
+	}
+	if n := len(rig.notifier.messages); n != 1 {
+		t.Fatalf("expected 1 notification, got %d", n)
+	}
+	st, _ := rig.store.Load("demo-dev")
+	if st.LastTransient == "" {
+		t.Fatal("expected LastTransient to be stored")
+	}
+
+	rig.compose.failPull = nil
+	if res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{}); err != nil || res.Status != state.StatusOK {
+		t.Fatalf("success run: %v %v", res.Status, err)
+	}
+	st, _ = rig.store.Load("demo-dev")
+	if st.LastTransient != "" {
+		t.Fatalf("LastTransient not cleared: %q", st.LastTransient)
+	}
+}
+
+func TestDeployAtCurrentRecoversBlockedOrFailed(t *testing.T) {
+	for _, status := range []state.Status{state.StatusBlocked, state.StatusFailed} {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		want := defaultDesired()
+		cur := want
+		if err := rig.store.Save(&state.State{
+			Instance: "demo-dev", Status: status, Current: &cur,
+			Blocked: []string{"X"}, FailedHash: "stale", LastTransient: "old",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{})
+		if err != nil || res.Status != state.StatusOK {
+			t.Fatalf("%s: %v %v", status, res.Status, err)
+		}
+		st, _ := rig.store.Load("demo-dev")
+		if st.Status != state.StatusOK || st.Blocked != nil || st.FailedHash != "" || st.LastTransient != "" {
+			t.Fatalf("%s: state not recovered: %+v", status, st)
+		}
+		hist, _ := rig.store.History("demo-dev", 0)
+		if len(hist) != 1 || hist[0].Kind != "recovered" {
+			t.Fatalf("%s: expected recovered event, got %+v", status, hist)
+		}
+		if rig.compose.upCount != 0 {
+			t.Fatalf("%s: unexpected redeploy", status)
+		}
+	}
+}
+
+func TestDeploySuccessSaveFailureStillNotifies(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	stateDir := filepath.Join(rig.tempDir, "state")
+	fcfs := &failCountingFS{
+		FS:          rig.fs,
+		targetPath:  filepath.Join(stateDir, "demo-dev", "state.json"),
+		failOnCount: 2, // 1st is DEPLOYING, 2nd is the success save
+	}
+	rig.deployer.FS = fcfs
+	rig.deployer.Store = state.NewStore(fcfs, stateDir)
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{})
+	if err == nil {
+		t.Fatal("expected error when the success save fails")
+	}
+	if res.Status != state.StatusOK {
+		t.Fatalf("expected OK result, got %v", res.Status)
+	}
+	found := false
+	for _, m := range rig.notifier.messages {
+		if m.Level == "info" && strings.Contains(m.Title, "deploy OK") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected deploy OK notification, got %v", rig.notifier.messages)
+	}
+}
