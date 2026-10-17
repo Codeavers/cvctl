@@ -121,3 +121,25 @@ func (h runHook) Run(ctx context.Context, c sys.Cmd) (sys.Result, error) {
 	h.hook()
 	return h.Runner.Run(ctx, c)
 }
+
+func TestDataLockWaitStopsOnCancel(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+	holdDataLock(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	sleeps := 0
+	g.r.Sleep = func(time.Duration) {
+		sleeps++
+		if sleeps == 2 {
+			cancel()
+		}
+	}
+	_, err := g.r.BackupNow(ctx, "app-prod", "db")
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_CANCELLED" || sleeps != 2 {
+		t.Fatalf("err=%v sleeps=%d", err, sleeps)
+	}
+	if len(g.run.Calls) != 0 {
+		t.Fatalf("ran without the lock: %v", g.calls())
+	}
+}

@@ -82,7 +82,7 @@ func (r *Runner) Verify(ctx context.Context, inst, only string) ([]Result, error
 	if err != nil {
 		return nil, err
 	}
-	unlock, err := r.lockData(true)
+	unlock, err := r.lockData(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -145,6 +145,29 @@ func (r *Runner) sleep(d time.Duration) {
 		return
 	}
 	time.Sleep(d)
+}
+
+// sleepCtx waits d or until ctx ends: the CLI turns SIGINT/SIGTERM into a
+// cancelled context, so lock waits must observe it or Ctrl-C does nothing.
+func (r *Runner) sleepCtx(ctx context.Context, d time.Duration) error {
+	if r.Sleep != nil {
+		r.Sleep(d)
+	} else {
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+		case <-t.C:
+		}
+	}
+	if ctx.Err() != nil {
+		return &output.Error{
+			Code:    "E_CANCELLED",
+			Message: "cancelled while waiting for a lock",
+			Hint:    "nothing was changed; run the command again",
+		}
+	}
+	return nil
 }
 
 func (r *Runner) walgVerify(ctx context.Context, inst string, p *contract.Project, d *instance.Decisions, cat kinds.Catalog, t Target) error {
@@ -316,7 +339,7 @@ func (r *Runner) recordVerify(ctx context.Context, inst, svc string, res Result)
 	if r.Store == nil {
 		return nil
 	}
-	unlock, err := r.lock(inst)
+	unlock, err := r.lock(ctx, inst)
 	if err != nil {
 		return err
 	}

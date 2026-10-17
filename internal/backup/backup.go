@@ -153,7 +153,7 @@ const (
 // lockData takes the host-wide data lock. Backups and verifies wait for it
 // (a restore or the other timer may be running); restores pass wait=false
 // and fail at once, since an operator is waiting on them.
-func (r *Runner) lockData(wait bool) (func(), error) {
+func (r *Runner) lockData(ctx context.Context, wait bool) (func(), error) {
 	if r.Store == nil {
 		return func() {}, nil
 	}
@@ -167,22 +167,20 @@ func (r *Runner) lockData(wait bool) (func(), error) {
 		if !wait || !errors.As(err, &oe) || oe.Code != "E_DATA_BUSY" || waited >= dataLockWait {
 			return nil, err
 		}
-		r.sleep(dataLockInterval)
+		if err := r.sleepCtx(ctx, dataLockInterval); err != nil {
+			return nil, err
+		}
 		waited += dataLockInterval
 	}
 }
 
-func (r *Runner) lock(inst string) (func(), error) {
+func (r *Runner) lock(ctx context.Context, inst string) (func(), error) {
 	interval, timeout := r.LockInterval, r.LockTimeout
 	if interval <= 0 {
 		interval = defaultLockInterval
 	}
 	if timeout <= 0 {
 		timeout = defaultLockTimeout
-	}
-	sleep := r.Sleep
-	if sleep == nil {
-		sleep = time.Sleep
 	}
 	var waited time.Duration
 	for {
@@ -194,7 +192,9 @@ func (r *Runner) lock(inst string) (func(), error) {
 		if !errors.As(err, &oe) || oe.Code != "E_INSTANCE_LOCKED" || waited >= timeout {
 			return nil, err
 		}
-		sleep(interval)
+		if err := r.sleepCtx(ctx, interval); err != nil {
+			return nil, err
+		}
 		waited += interval
 	}
 }
@@ -310,7 +310,7 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 	if err != nil {
 		return nil, err
 	}
-	unlock, err := r.lockData(true)
+	unlock, err := r.lockData(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -387,7 +387,7 @@ func (r *Runner) record(ctx context.Context, inst, svc string, res Result) error
 	if r.Store == nil {
 		return nil
 	}
-	unlock, err := r.lock(inst)
+	unlock, err := r.lock(ctx, inst)
 	if err != nil {
 		return err
 	}
