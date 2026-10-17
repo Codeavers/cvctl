@@ -2,6 +2,7 @@ package render
 
 import (
 	"context"
+	"crypto/rand"
 	"flag"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/codeavers/cvctl/internal/contract"
+	"github.com/codeavers/cvctl/internal/envspec"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/kinds"
@@ -461,5 +463,313 @@ func TestLabelBackupNoneOverridesKindDefault(t *testing.T) {
 	}
 	if envs := BackupEnvs(p, d, cat, Options{Backup: testBackup()}); len(envs) != 0 {
 		t.Fatalf("backup env for backup: none: %v", envs)
+	}
+}
+
+func setupBuckets(t *testing.T) (*contract.Project, *instance.Decisions, kinds.Catalog) {
+	t.Helper()
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := contract.Load("testdata/buckets", cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &instance.Decisions{
+		Instance: "proj-dev", Env: "dev", Strategy: "recreate",
+		Services: map[string]instance.ServiceDecision{
+			"media": {
+				Mode: "local",
+				Creds: kinds.Credentials{
+					User: "rootuser", Password: "rootpassword", DB: "s3db",
+					AppUser: "media-app", AppPassword: "media-app-pw",
+				},
+			},
+		},
+		Domains: map[string]string{
+			"api":   "api.example.com",
+			"media": "media.example.com",
+		},
+		Digests: map[string]string{
+			"api": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+	}
+	return p, d, cat
+}
+
+func TestOverrideGoldenBuckets(t *testing.T) {
+	p, d, cat := setupBuckets(t)
+	out, err := Override(p, d, cat, Options{InstanceDir: "/srv/inst/proj-dev", Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "override-buckets.yml", out)
+}
+
+func TestTraefikGoldenBucketsEdge(t *testing.T) {
+	p, d, _ := setupBuckets(t)
+	out, err := Traefik(p, d, Options{Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "traefik-buckets-edge.yml", out)
+}
+
+func TestTraefikBucketsBehindProxy(t *testing.T) {
+	p, d, _ := setupBuckets(t)
+	out, err := Traefik(p, d, Options{Edge: "behind-proxy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "entryPoints:\n        - web\n") {
+		t.Fatalf("expected web entryPoint in behind-proxy:\n%s", out)
+	}
+	if strings.Contains(string(out), "websecure") || strings.Contains(string(out), "certResolver") {
+		t.Fatalf("unexpected TLS config in behind-proxy:\n%s", out)
+	}
+}
+
+func TestTraefikMultiplePublicBucketsRule(t *testing.T) {
+	p, d, _ := setupBuckets(t)
+	p.X.S3["media"] = []contract.Bucket{
+		{Name: "zebra", Public: true},
+		{Name: "photos-raw", Public: true},
+		{Name: "hidden", Public: false},
+		{Name: "alpha.v1", Public: true},
+	}
+	out, err := Traefik(p, d, Options{Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRule := "rule: Host(`media.example.com`) && (Method(`GET`) || Method(`HEAD`)) && PathRegexp(`^/(alpha\\.v1|photos-raw|zebra)/.+`)"
+	if !strings.Contains(string(out), wantRule) {
+		t.Fatalf("expected rule %q in output:\n%s", wantRule, out)
+	}
+}
+
+func TestOverrideIsValidComposeBuckets(t *testing.T) {
+	p, d, cat := setupBuckets(t)
+	out, err := Override(p, d, cat, Options{InstanceDir: "/srv/inst/proj-dev", Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := loadCompose(t, map[string][]byte{"compose.yml": p.RawCompose, "compose.cvctl.yml": out}, []string{"compose.yml", "compose.cvctl.yml"})
+	if img := cp.Services["api"].Image; !strings.Contains(img, "@sha256:") {
+		t.Fatalf("api image %q", img)
+	}
+	if img := cp.Services["media"].Image; !strings.Contains(img, "pgsty/silo:") {
+		t.Fatalf("media image %q", img)
+	}
+}
+
+func TestServiceVarsBucketsLocal(t *testing.T) {
+	p, d, cat := setupBuckets(t)
+	sv, err := ServiceVars(p, d, cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := sv["media"]
+	if _, ok := m["S3_BUCKET"]; ok {
+		t.Fatal("S3_BUCKET must be dropped when buckets are declared")
+	}
+	if m["S3_BUCKET_PRODUCTS"] != "products" {
+		t.Fatalf("S3_BUCKET_PRODUCTS = %q, want %q", m["S3_BUCKET_PRODUCTS"], "products")
+	}
+	if m["S3_PUBLIC_URL_PRODUCTS"] != "https://media.example.com/products" {
+		t.Fatalf("S3_PUBLIC_URL_PRODUCTS = %q, want %q", m["S3_PUBLIC_URL_PRODUCTS"], "https://media.example.com/products")
+	}
+	if m["S3_BUCKET_PRESCRIPTIONS"] != "prescriptions" {
+		t.Fatalf("S3_BUCKET_PRESCRIPTIONS = %q, want %q", m["S3_BUCKET_PRESCRIPTIONS"], "prescriptions")
+	}
+	if _, ok := m["S3_PUBLIC_URL_PRESCRIPTIONS"]; ok {
+		t.Fatal("private bucket must not have public url")
+	}
+	if m["S3_ACCESS_KEY"] != "media-app" || m["S3_SECRET_KEY"] != "media-app-pw" {
+		t.Fatalf("credentials = %v", m)
+	}
+	if m["S3_ENDPOINT"] != "http://media:9000" {
+		t.Fatalf("S3_ENDPOINT = %q", m["S3_ENDPOINT"])
+	}
+}
+
+func TestServiceVarsBucketsExternal(t *testing.T) {
+	p, d, cat := setupBuckets(t)
+	d.Services["media"] = instance.ServiceDecision{
+		Mode: "external",
+		External: map[string]string{
+			"endpoint":             "https://s3.amazonaws.com",
+			"access_key":           "ak",
+			"secret_key":           "sk",
+			"region":               "us-east-1",
+			"bucket_products":      "ext-prod",
+			"public_url_products":  "https://cdn.example.com/products",
+			"bucket_prescriptions": "ext-rx",
+		},
+	}
+	sv, err := ServiceVars(p, d, cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := sv["media"]
+	if _, ok := m["S3_BUCKET"]; ok {
+		t.Fatal("S3_BUCKET must be dropped when buckets are declared")
+	}
+	if m["S3_BUCKET_PRODUCTS"] != "ext-prod" {
+		t.Fatalf("S3_BUCKET_PRODUCTS = %q", m["S3_BUCKET_PRODUCTS"])
+	}
+	if m["S3_PUBLIC_URL_PRODUCTS"] != "https://cdn.example.com/products" {
+		t.Fatalf("S3_PUBLIC_URL_PRODUCTS = %q", m["S3_PUBLIC_URL_PRODUCTS"])
+	}
+	if m["S3_BUCKET_PRESCRIPTIONS"] != "ext-rx" {
+		t.Fatalf("S3_BUCKET_PRESCRIPTIONS = %q", m["S3_BUCKET_PRESCRIPTIONS"])
+	}
+	if _, ok := m["S3_PUBLIC_URL_PRESCRIPTIONS"]; ok {
+		t.Fatal("private bucket must not have public url")
+	}
+	if m["S3_ACCESS_KEY"] != "ak" || m["S3_SECRET_KEY"] != "sk" || m["S3_ENDPOINT"] != "https://s3.amazonaws.com" {
+		t.Fatalf("media vars: %v", m)
+	}
+}
+
+func TestServiceVarsBucketsExternalMissing(t *testing.T) {
+	for _, field := range []string{"endpoint", "access_key", "secret_key", "region", "bucket_products", "public_url_products", "bucket_prescriptions"} {
+		p, d, cat := setupBuckets(t)
+		ext := map[string]string{
+			"endpoint":             "https://s3.amazonaws.com",
+			"access_key":           "ak",
+			"secret_key":           "sk",
+			"region":               "us-east-1",
+			"bucket_products":      "ext-prod",
+			"public_url_products":  "https://cdn.example.com/products",
+			"bucket_prescriptions": "ext-rx",
+		}
+		delete(ext, field)
+		d.Services["media"] = instance.ServiceDecision{Mode: "external", External: ext}
+		if _, err := ServiceVars(p, d, cat); err == nil {
+			t.Fatalf("expected error when missing %s", field)
+		}
+	}
+}
+
+func TestRootPasswordNeverReachesServiceVarsOrAppEnv(t *testing.T) {
+	p, d, cat := setupBuckets(t)
+	rootPw := "super-secret-root-password-xyz123"
+	sd := d.Services["media"]
+	sd.Creds.Password = rootPw
+	d.Services["media"] = sd
+
+	sv, err := ServiceVars(p, d, cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for svcName, vars := range sv {
+		for k, v := range vars {
+			if strings.Contains(v, rootPw) {
+				t.Fatalf("root password found in ServiceVars[%q][%q] = %q", svcName, k, v)
+			}
+		}
+	}
+
+	spec, err := envspec.Load("testdata/buckets/env.spec.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := envspec.Resolve(spec, envspec.Input{
+		Env:         d.Env,
+		Existing:    map[string]string{},
+		ServiceVars: sv,
+		Domains:     d.Domains,
+		Rand:        rand.Reader,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range res.Values {
+		if strings.Contains(v, rootPw) {
+			t.Fatalf("root password found in resolved app env[%q] = %q", k, v)
+		}
+	}
+
+	out, err := Override(p, d, cat, Options{InstanceDir: "/srv/inst/proj-dev", Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Services map[string]map[string]any `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	apiSvc, ok := doc.Services["api"]
+	if !ok {
+		t.Fatal("api service missing from override")
+	}
+	apiBytes, err := yaml.Marshal(apiSvc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(apiBytes), rootPw) {
+		t.Fatalf("root password found in api service rendered override:\n%s", string(apiBytes))
+	}
+}
+
+func TestOverrideBucketsBackedUp(t *testing.T) {
+	p, d, cat := setupBuckets(t)
+	out, err := Override(p, d, cat, Options{InstanceDir: "/srv/inst/proj-dev", Edge: "edge", Backup: testBackup()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Services map[string]struct {
+			Networks map[string]any `yaml:"networks"`
+		} `yaml:"services"`
+		Networks map[string]any `yaml:"networks"`
+	}
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	mediaNets := doc.Services["media"].Networks
+	if _, ok := mediaNets["data"]; !ok {
+		t.Fatal("media missing data network")
+	}
+	if _, ok := mediaNets["edge"]; !ok {
+		t.Fatal("media missing edge network")
+	}
+	if _, ok := mediaNets["cvctl-backup"]; !ok {
+		t.Fatal("media missing cvctl-backup network")
+	}
+	if _, ok := doc.Networks["cvctl-backup"]; !ok {
+		t.Fatal("top level missing cvctl-backup network")
+	}
+}
+
+func TestOverrideBucketsExternal(t *testing.T) {
+	p, d, cat := setupBuckets(t)
+	d.Services["media"] = instance.ServiceDecision{
+		Mode: "external",
+		External: map[string]string{
+			"endpoint":             "https://s3",
+			"access_key":           "ak",
+			"secret_key":           "sk",
+			"region":               "r",
+			"bucket_products":      "p",
+			"public_url_products":  "https://cdn.example.com/p",
+			"bucket_prescriptions": "rx",
+		},
+	}
+	out, err := Override(p, d, cat, Options{InstanceDir: "/srv/inst/proj-dev", Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "profiles:\n      - cvctl-disabled") {
+		t.Fatalf("expected cvctl-disabled for external media:\n%s", out)
+	}
+	tout, err := Traefik(p, d, Options{Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(tout), "proj-dev-media") {
+		t.Fatalf("external media should have no router in traefik:\n%s", tout)
 	}
 }
