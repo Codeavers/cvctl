@@ -80,3 +80,34 @@ func TestNewDeployKeyEmptyComment(t *testing.T) {
 		t.Fatalf("failed to parse private key: %v", err)
 	}
 }
+
+func TestPublicKeyFromPrivate(t *testing.T) {
+	privPEM, _, err := gitrepo.NewDeployKey("initial")
+	if err != nil {
+		t.Fatalf("failed to generate deploy key: %v", err)
+	}
+
+	pubAuth, err := gitrepo.PublicKeyFromPrivate(privPEM, "regenerated-comment")
+	if err != nil {
+		t.Fatalf("unexpected error regenerating public key: %v", err)
+	}
+
+	pubStr := string(pubAuth)
+	if !strings.HasPrefix(pubStr, "ssh-ed25519 ") {
+		t.Errorf("expected public key to start with 'ssh-ed25519 ', got %q", pubStr)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(pubStr), "regenerated-comment") {
+		t.Errorf("expected public key to end with 'regenerated-comment', got %q", pubStr)
+	}
+
+	parsedPub, parsedComment, _, _, err := ssh.ParseAuthorizedKey(pubAuth)
+	if err != nil {
+		t.Fatalf("failed to parse regenerated authorized key: %v", err)
+	}
+	if parsedPub.Type() != "ssh-ed25519" {
+		t.Errorf("expected ssh-ed25519, got %s", parsedPub.Type())
+	}
+	if parsedComment != "regenerated-comment" {
+		t.Errorf("expected comment 'regenerated-comment', got %q", parsedComment)
+	}
+}

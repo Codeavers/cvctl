@@ -38,3 +38,19 @@ func NewDeployKey(comment string) (privatePEM, publicAuthorized []byte, err erro
 
 	return privatePEM, pubBytes, nil
 }
+
+// PublicKeyFromPrivate extracts and serializes the OpenSSH authorized_key public key
+// corresponding to the given private key PEM.
+func PublicKeyFromPrivate(privPEM []byte, comment string) ([]byte, error) {
+	signer, err := ssh.ParsePrivateKey(privPEM)
+	if err != nil {
+		return nil, err
+	}
+	pubBytes := bytes.TrimRight(ssh.MarshalAuthorizedKey(signer.PublicKey()), "\r\n")
+	if comment != "" {
+		pubBytes = append(pubBytes, ' ')
+		pubBytes = append(pubBytes, []byte(comment)...)
+	}
+	pubBytes = append(pubBytes, '\n')
+	return pubBytes, nil
+}

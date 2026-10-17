@@ -3,7 +3,9 @@ package gitrepo
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -16,11 +18,42 @@ const (
 	forbiddenKeyPathChars = "'\"$\\`;" + "&|<>()"
 )
 
+// EUID is the function used to query the effective user ID, injectable for testing.
+var EUID = os.Geteuid
+
+var urlCredsRe = regexp.MustCompile(`(https?://)(?:[^@/\s]+@)`)
+
+// RedactURL masks user:password credentials in HTTP/HTTPS URLs.
+func RedactURL(s string) string {
+	return urlCredsRe.ReplaceAllString(s, "${1}***@")
+}
+
 // Repo provides git operations against a repository checkout using an optional deploy key.
 type Repo struct {
 	Run     sys.Runner
 	Dir     string
 	KeyPath string
+}
+
+func (r *Repo) gitCmd(args []string, env []string) sys.Cmd {
+	if EUID() == 0 {
+		return sys.Cmd{
+			Name: "setpriv",
+			Args: append([]string{"--reuid=deployer", "--regid=deploy", "--init-groups", "--", "git"}, args...),
+			Env:  env,
+		}
+	}
+	return sys.Cmd{
+		Name: "git",
+		Args: args,
+		Env:  env,
+	}
+}
+
+func (r *Repo) cmdErr(cmd sys.Cmd, res sys.Result, err error) *output.Error {
+	oe := sys.CmdErr("E_GIT_FAILED", cmd, res, err, gitDeployKeyHint)
+	oe.Message = RedactURL(oe.Message)
+	return oe
 }
 
 func validateRef(s string) error {
@@ -35,8 +68,12 @@ func validateRef(s string) error {
 }
 
 func (r *Repo) env() ([]string, error) {
+	envs := []string{"LC_ALL=C"}
+	if EUID() == 0 {
+		envs = append(envs, "HOME=/srv/deploy")
+	}
 	if r.KeyPath == "" {
-		return []string{"LC_ALL=C"}, nil
+		return envs, nil
 	}
 	if strings.ContainsFunc(r.KeyPath, unicode.IsSpace) || strings.ContainsAny(r.KeyPath, forbiddenKeyPathChars) {
 		return nil, &output.Error{
@@ -47,10 +84,8 @@ func (r *Repo) env() ([]string, error) {
 	}
 	knownHosts := filepath.Join(filepath.Dir(r.KeyPath), "known_hosts")
 	sshCmd := fmt.Sprintf("GIT_SSH_COMMAND=ssh -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=%s", r.KeyPath, knownHosts)
-	return []string{
-		"LC_ALL=C",
-		sshCmd,
-	}, nil
+	envs = append(envs, sshCmd)
+	return envs, nil
 }
 
 // Clone performs a single-branch clone into Dir.
@@ -65,14 +100,10 @@ func (r *Repo) Clone(ctx context.Context, url, branch string) error {
 	if err != nil {
 		return err
 	}
-	cmd := sys.Cmd{
-		Name: "git",
-		Args: []string{"clone", "--branch", branch, "--single-branch", "--", url, r.Dir},
-		Env:  env,
-	}
+	cmd := r.gitCmd([]string{"clone", "--branch", branch, "--single-branch", "--", url, r.Dir}, env)
 	res, err := r.Run.Run(ctx, cmd)
 	if err != nil {
-		return sys.CmdErr("E_GIT_FAILED", cmd, res, err, gitDeployKeyHint)
+		return r.cmdErr(cmd, res, err)
 	}
 	if res.ExitCode != 0 {
 		stderr := string(res.Stderr)
@@ -83,7 +114,7 @@ func (r *Repo) Clone(ctx context.Context, url, branch string) error {
 				Hint:    "remove it or run cvctl project update",
 			}
 		}
-		return sys.CmdErr("E_GIT_FAILED", cmd, res, nil, gitDeployKeyHint)
+		return r.cmdErr(cmd, res, nil)
 	}
 	return nil
 }
@@ -97,24 +128,16 @@ func (r *Repo) Fetch(ctx context.Context, branch string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	fetchCmd := sys.Cmd{
-		Name: "git",
-		Args: []string{"-C", r.Dir, "fetch", "origin", branch},
-		Env:  env,
-	}
+	fetchCmd := r.gitCmd([]string{"-C", r.Dir, "fetch", "origin", branch}, env)
 	res, err := r.Run.Run(ctx, fetchCmd)
 	if err != nil || res.ExitCode != 0 {
-		return "", sys.CmdErr("E_GIT_FAILED", fetchCmd, res, err, gitDeployKeyHint)
+		return "", r.cmdErr(fetchCmd, res, err)
 	}
 
-	revCmd := sys.Cmd{
-		Name: "git",
-		Args: []string{"-C", r.Dir, "rev-parse", "origin/" + branch},
-		Env:  env,
-	}
+	revCmd := r.gitCmd([]string{"-C", r.Dir, "rev-parse", "origin/" + branch}, env)
 	res, err = r.Run.Run(ctx, revCmd)
 	if err != nil || res.ExitCode != 0 {
-		return "", sys.CmdErr("E_GIT_FAILED", revCmd, res, err, gitDeployKeyHint)
+		return "", r.cmdErr(revCmd, res, err)
 	}
 	return strings.TrimSpace(string(res.Stdout)), nil
 }
@@ -128,14 +151,10 @@ func (r *Repo) Checkout(ctx context.Context, commit string) error {
 	if err != nil {
 		return err
 	}
-	cmd := sys.Cmd{
-		Name: "git",
-		Args: []string{"-C", r.Dir, "checkout", "--detach", commit, "--"},
-		Env:  env,
-	}
+	cmd := r.gitCmd([]string{"-C", r.Dir, "checkout", "--detach", commit, "--"}, env)
 	res, err := r.Run.Run(ctx, cmd)
 	if err != nil || res.ExitCode != 0 {
-		return sys.CmdErr("E_GIT_FAILED", cmd, res, err, gitDeployKeyHint)
+		return r.cmdErr(cmd, res, err)
 	}
 	return nil
 }
@@ -150,14 +169,10 @@ func (r *Repo) Show(ctx context.Context, commit, path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd := sys.Cmd{
-		Name: "git",
-		Args: []string{"-C", r.Dir, "show", fmt.Sprintf("%s:%s", commit, path)},
-		Env:  env,
-	}
+	cmd := r.gitCmd([]string{"-C", r.Dir, "show", fmt.Sprintf("%s:%s", commit, path)}, env)
 	res, err := r.Run.Run(ctx, cmd)
 	if err != nil {
-		return nil, sys.CmdErr("E_GIT_FAILED", cmd, res, err, gitDeployKeyHint)
+		return nil, r.cmdErr(cmd, res, err)
 	}
 	if res.ExitCode != 0 {
 		stderr := string(res.Stderr)
@@ -168,7 +183,7 @@ func (r *Repo) Show(ctx context.Context, commit, path string) ([]byte, error) {
 				Hint:    "verify the file exists at this commit",
 			}
 		}
-		return nil, sys.CmdErr("E_GIT_FAILED", cmd, res, nil, gitDeployKeyHint)
+		return nil, r.cmdErr(cmd, res, nil)
 	}
 	return res.Stdout, nil
 }
@@ -186,14 +201,10 @@ func (r *Repo) IsAncestor(ctx context.Context, commit, branch string) (bool, err
 	if err != nil {
 		return false, err
 	}
-	cmd := sys.Cmd{
-		Name: "git",
-		Args: []string{"-C", r.Dir, "merge-base", "--is-ancestor", commit, "origin/" + branch},
-		Env:  env,
-	}
+	cmd := r.gitCmd([]string{"-C", r.Dir, "merge-base", "--is-ancestor", commit, "origin/" + branch}, env)
 	res, err := r.Run.Run(ctx, cmd)
 	if err != nil {
-		return false, sys.CmdErr("E_GIT_FAILED", cmd, res, err, gitDeployKeyHint)
+		return false, r.cmdErr(cmd, res, err)
 	}
 	switch res.ExitCode {
 	case 0:
@@ -201,7 +212,7 @@ func (r *Repo) IsAncestor(ctx context.Context, commit, branch string) (bool, err
 	case 1:
 		return false, nil
 	default:
-		return false, sys.CmdErr("E_GIT_FAILED", cmd, res, nil, gitDeployKeyHint)
+		return false, r.cmdErr(cmd, res, nil)
 	}
 }
 
@@ -214,14 +225,10 @@ func (r *Repo) LsRemote(ctx context.Context, url string) error {
 	if err != nil {
 		return err
 	}
-	cmd := sys.Cmd{
-		Name: "git",
-		Args: []string{"ls-remote", "--", url, "HEAD"},
-		Env:  env,
-	}
+	cmd := r.gitCmd([]string{"ls-remote", "--", url, "HEAD"}, env)
 	res, err := r.Run.Run(ctx, cmd)
 	if err != nil || res.ExitCode != 0 {
-		return sys.CmdErr("E_GIT_FAILED", cmd, res, err, gitDeployKeyHint)
+		return r.cmdErr(cmd, res, err)
 	}
 	return nil
 }

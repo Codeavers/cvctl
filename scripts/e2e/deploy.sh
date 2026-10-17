@@ -51,7 +51,7 @@ echo "=== 4. Push bad image, run agent --once -> FAILED, /health still returns o
 docker build --build-arg MIGRATE_FAIL=1 -t localhost:5000/e2e/api:develop examples/e2e/app
 docker push localhost:5000/e2e/api:develop
 
-cvctl agent --once --json || true
+sudo -u deployer --preserve-env=CVCTL_INSECURE_REGISTRIES,CVCTL_ALLOW_FILE_REPOS /usr/local/bin/cvctl agent --once --json || true
 test "$(jqs '.status')" = "FAILED"
 
 greeting=$(curl -sk --resolve api.e2e.local:443:127.0.0.1 https://api.e2e.local/health)
@@ -63,7 +63,7 @@ echo "=== 5. Run agent --once again -> history count unchanged ==="
 count_before=$(cvctl history demo-dev --json | jq '.data.history | length')
 echo "History count before: $count_before"
 
-cvctl agent --once --json || true
+sudo -u deployer --preserve-env=CVCTL_INSECURE_REGISTRIES,CVCTL_ALLOW_FILE_REPOS /usr/local/bin/cvctl agent --once --json || true
 
 count_after=$(cvctl history demo-dev --json | jq '.data.history | length')
 echo "History count after: $count_after"
@@ -74,7 +74,7 @@ echo "=== 6. Push good image with BUILD_ID=2 -> agent --once -> OK ==="
 docker build --build-arg BUILD_ID=2 -t localhost:5000/e2e/api:develop examples/e2e/app
 docker push localhost:5000/e2e/api:develop
 
-cvctl agent --once --json
+sudo -u deployer --preserve-env=CVCTL_INSECURE_REGISTRIES,CVCTL_ALLOW_FILE_REPOS /usr/local/bin/cvctl agent --once --json
 test "$(jqs '.status')" = "OK"
 
 greeting=$(curl -sk --resolve api.e2e.local:443:127.0.0.1 https://api.e2e.local/health)
@@ -90,11 +90,11 @@ git -C /tmp/infra-work add env.spec.yml
 git -C /tmp/infra-work commit -m "add prompt var NEWVAR"
 git -C /tmp/infra-work push /tmp/infra.git develop
 
-cvctl agent --once --json || true
+sudo -u deployer --preserve-env=CVCTL_INSECURE_REGISTRIES,CVCTL_ALLOW_FILE_REPOS /usr/local/bin/cvctl agent --once --json || true
 test "$(jqs '.status')" = "BLOCKED"
 
 cvctl set-env demo-dev NEWVAR x --json
-cvctl agent --once --json
+sudo -u deployer --preserve-env=CVCTL_INSECURE_REGISTRIES,CVCTL_ALLOW_FILE_REPOS /usr/local/bin/cvctl agent --once --json
 test "$(jqs '.status')" = "OK"
 echo "Assert 7: blocked on missing prompt var, then resumed after set-env"
 

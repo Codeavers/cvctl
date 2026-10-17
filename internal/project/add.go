@@ -202,7 +202,7 @@ func ValidateInstanceName(deployRoot, stateRoot, inst string) error {
 func repoURLErr(url string) error {
 	return &output.Error{
 		Code:    "E_PROJECT_REPO_URL",
-		Message: fmt.Sprintf("invalid repository URL %q", url),
+		Message: fmt.Sprintf("invalid repository URL %q", gitrepo.RedactURL(url)),
 		Hint:    "accepted formats: ssh://..., git@host:path, https://... (or file://... with CVCTL_ALLOW_FILE_REPOS=1)",
 	}
 }
@@ -219,6 +219,9 @@ func validateRepoURL(repoURL string) error {
 	}
 	if strings.HasPrefix(repoURL, "https://") {
 		rest := strings.TrimPrefix(repoURL, "https://")
+		if idx := strings.Index(rest, "@"); idx >= 0 {
+			rest = rest[idx+1:]
+		}
 		if rest == "" || strings.HasPrefix(rest, "-") {
 			return repoURLErr(repoURL)
 		}
@@ -226,6 +229,9 @@ func validateRepoURL(repoURL string) error {
 	}
 	if strings.HasPrefix(repoURL, "ssh://") {
 		rest := strings.TrimPrefix(repoURL, "ssh://")
+		if idx := strings.Index(rest, "@"); idx >= 0 {
+			rest = rest[idx+1:]
+		}
 		if rest == "" || strings.HasPrefix(rest, "-") {
 			return repoURLErr(repoURL)
 		}
@@ -570,12 +576,24 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 
 		if existingPub, err := e.fs().ReadFile(pubPath); err == nil {
 			pubKey = string(existingPub)
+		} else if existingPriv, err := e.fs().ReadFile(keyPath); err == nil {
+			pub, err := gitrepo.PublicKeyFromPrivate(existingPriv, "cvctl-"+inst)
+			if err != nil {
+				return nil, err
+			}
+			if err := e.fs().MkdirAll(keyDir, 0o750, deployOwner); err != nil {
+				return nil, err
+			}
+			if err := e.fs().WriteFile(pubPath, pub, 0o644, deployOwner); err != nil {
+				return nil, err
+			}
+			pubKey = string(pub)
 		} else {
 			priv, pub, err := gitrepo.NewDeployKey("cvctl-" + inst)
 			if err != nil {
 				return nil, err
 			}
-			if err := e.fs().MkdirAll(keyDir, 0o700, deployOwner); err != nil {
+			if err := e.fs().MkdirAll(keyDir, 0o750, deployOwner); err != nil {
 				return nil, err
 			}
 			if err := e.fs().WriteFile(keyPath, priv, 0o600, deployOwner); err != nil {

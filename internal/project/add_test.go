@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/codeavers/cvctl/internal/contract"
+	"github.com/codeavers/cvctl/internal/gitrepo"
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/hostcfg/hostcfgtest"
 	"github.com/codeavers/cvctl/internal/output"
@@ -22,6 +23,7 @@ import (
 type stubRepo struct {
 	dir         string
 	infraSource string
+	fs          sys.FS
 	cloneErr    error
 	lsRemoteErr error
 	fetchCommit string
@@ -39,9 +41,15 @@ func (s *stubRepo) Clone(_ context.Context, _, _ string) error {
 		_ = os.MkdirAll(s.dir, 0o755)
 		if data, err := os.ReadFile(filepath.Join(s.infraSource, "compose.yml")); err == nil {
 			_ = os.WriteFile(filepath.Join(s.dir, "compose.yml"), data, 0o644)
+			if s.fs != nil {
+				_ = s.fs.WriteFile(filepath.Join(s.dir, "compose.yml"), data, 0o644, sys.Owner{})
+			}
 		}
 		if data, err := os.ReadFile(filepath.Join(s.infraSource, "env.spec.yml")); err == nil {
 			_ = os.WriteFile(filepath.Join(s.dir, "env.spec.yml"), data, 0o644)
+			if s.fs != nil {
+				_ = s.fs.WriteFile(filepath.Join(s.dir, "env.spec.yml"), data, 0o644, sys.Owner{})
+			}
 		}
 	}
 	return nil
@@ -1263,4 +1271,196 @@ CVCTL_DOMAIN_WEB=web.example.com
 	if oe.Message != expectedMsg {
 		t.Errorf("expected message %q, got %q", expectedMsg, oe.Message)
 	}
+}
+
+func TestDeployKeyPreservesExistingPrivateKeyWhenPubMissing(t *testing.T) {
+	t.Setenv("CVCTL_ALLOW_FILE_REPOS", "1")
+	tmp := t.TempDir()
+	fsys := sys.NewOSFS()
+	cat := testCatalog(t)
+
+	infraSrc := filepath.Join(tmp, "source-infra")
+	writeTestInfra(t, infraSrc, validCompose, validSpec)
+
+	stateRoot := filepath.Join(tmp, "var-lib-cvctl")
+	inst := "demo-dev"
+	keyDir := filepath.Join(stateRoot, inst)
+	keyPath := filepath.Join(keyDir, "deploy_key")
+
+	// Pre-create private key
+	privPEM, _, err := gitrepo.NewDeployKey("custom-key")
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	if err := fsys.MkdirAll(keyDir, 0o750, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
+		t.Fatalf("failed to mkdir: %v", err)
+	}
+	if err := fsys.WriteFile(keyPath, privPEM, 0o600, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
+		t.Fatalf("failed to write key: %v", err)
+	}
+
+	e := &Env{
+		FS:          fsys,
+		DeployRoot:  tmp,
+		StateRoot:   stateRoot,
+		Interactive: false,
+		Catalog:     cat,
+		RepoFactory: func(dir, _ string) RepoLike {
+			return &stubRepo{dir: dir, infraSource: infraSrc}
+		},
+	}
+
+	res, err := Add(context.Background(), e, "git@github.com:codeavers/infra.git", AddOptions{
+		Project: "demo",
+		Env:     "dev",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify private key was NOT overwritten
+	currentPriv, err := fsys.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("cannot read private key: %v", err)
+	}
+	if string(currentPriv) != string(privPEM) {
+		t.Errorf("private key was overwritten! expected %s, got %s", string(privPEM), string(currentPriv))
+	}
+
+	// Verify public key was regenerated from existing private key
+	pubPath := keyPath + ".pub"
+	currentPub, err := fsys.ReadFile(pubPath)
+	if err != nil {
+		t.Fatalf("cannot read public key: %v", err)
+	}
+	if string(currentPub) != res.DeployKeyPub {
+		t.Errorf("expected deploy key pub to match file: %s vs %s", res.DeployKeyPub, string(currentPub))
+	}
+}
+
+func TestProjectRepoURLRedactsCredentials(t *testing.T) {
+	tmp := t.TempDir()
+	e := &Env{
+		DeployRoot: tmp,
+		StateRoot:  filepath.Join(tmp, "var-lib-cvctl"),
+	}
+	badURL := "https://myuser:secretpassword@-bad-host/repo"
+	_, err := Add(context.Background(), e, badURL, AddOptions{})
+	if err == nil {
+		t.Fatal("expected error for bad repo URL, got nil")
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_PROJECT_REPO_URL" {
+		t.Fatalf("expected E_PROJECT_REPO_URL, got %v", err)
+	}
+	if strings.Contains(oe.Message, "secretpassword") {
+		t.Errorf("error message leaked secret: %s", oe.Message)
+	}
+	if !strings.Contains(oe.Message, "https://***@-bad-host") {
+		t.Errorf("expected message to contain redacted https URL, got: %s", oe.Message)
+	}
+}
+
+func TestStateDirCreated0750(t *testing.T) {
+	tmp := t.TempDir()
+	fsys := systest.NewFS()
+	cat := testCatalog(t)
+
+	infraSrc := filepath.Join(tmp, "source-infra")
+	writeTestInfra(t, infraSrc, validCompose, validSpec)
+
+	stateRoot := filepath.Join(tmp, "var-lib-cvctl")
+	e := &Env{
+		FS:          fsys,
+		DeployRoot:  tmp,
+		StateRoot:   stateRoot,
+		Interactive: false,
+		Catalog:     cat,
+		RepoFactory: func(dir, _ string) RepoLike {
+			return &stubRepo{dir: dir, infraSource: infraSrc, fs: fsys}
+		},
+	}
+
+	_, err := Add(context.Background(), e, "git@github.com:codeavers/infra.git", AddOptions{
+		Project: "demo",
+		Env:     "dev",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	keyDir := filepath.Join(stateRoot, "demo-dev")
+	fi, err := fsys.Stat(keyDir)
+	if err != nil {
+		t.Fatalf("failed to stat keyDir: %v", err)
+	}
+	if fi.Mode != 0o750 {
+		t.Errorf("expected keyDir mode 0750, got %#o", fi.Mode)
+	}
+}
+
+func TestProjectAddParentOfInfraCreatedBeforeClone(t *testing.T) {
+	tmp := t.TempDir()
+	fsys := systest.NewFS()
+	cat := testCatalog(t)
+
+	infraSrc := filepath.Join(tmp, "source-infra")
+	writeTestInfra(t, infraSrc, validCompose, validSpec)
+
+	var parentMode os.FileMode
+	var parentOwner sys.Owner
+	var parentExistsBeforeClone bool
+
+	e := &Env{
+		FS:          fsys,
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "var-lib-cvctl"),
+		Interactive: false,
+		Catalog:     cat,
+		RepoFactory: func(dir, _ string) RepoLike {
+			return &recordParentRepo{
+				stubRepo: stubRepo{dir: dir, infraSource: infraSrc, fs: fsys},
+				dir:      dir,
+				cloneHook: func() {
+					parent := filepath.Dir(dir)
+					if fi, err := fsys.Stat(parent); err == nil {
+						parentExistsBeforeClone = true
+						parentMode = fi.Mode
+						parentOwner = sys.Owner{User: fi.User, Group: fi.Group}
+					}
+				},
+			}
+		},
+	}
+
+	_, err := Add(context.Background(), e, "git@github.com:codeavers/infra.git", AddOptions{
+		Project: "demo",
+		Env:     "dev",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !parentExistsBeforeClone {
+		t.Fatalf("parent directory /srv/deploy/<inst> did not exist before clone")
+	}
+	if parentMode != 0o2775 {
+		t.Errorf("expected parent mode 02775, got %#o", parentMode)
+	}
+	if parentOwner.User != "deployer" || parentOwner.Group != "deploy" {
+		t.Errorf("expected parent owner deployer:deploy, got %s:%s", parentOwner.User, parentOwner.Group)
+	}
+}
+
+type recordParentRepo struct {
+	stubRepo
+	dir       string
+	cloneHook func()
+}
+
+func (r *recordParentRepo) Clone(ctx context.Context, url, branch string) error {
+	if r.cloneHook != nil {
+		r.cloneHook()
+	}
+	return r.stubRepo.Clone(ctx, url, branch)
 }

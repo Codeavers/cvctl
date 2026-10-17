@@ -600,3 +600,158 @@ func TestCloneDirNotEmpty(t *testing.T) {
 		t.Errorf("expected hint 'remove it or run cvctl project update', got %q", oe.Hint)
 	}
 }
+
+func TestEUIDZeroRunsSetprivAndAddsHomeEnv(t *testing.T) {
+	orig := gitrepo.EUID
+	gitrepo.EUID = func() int { return 0 }
+	defer func() { gitrepo.EUID = orig }()
+
+	run := &systest.Runner{}
+	repo := &gitrepo.Repo{
+		Run:     run,
+		Dir:     testDir,
+		KeyPath: testKeyPath,
+	}
+
+	// 1. Clone
+	run.OnPrefix("setpriv --reuid=deployer --regid=deploy --init-groups -- git clone", sys.Result{ExitCode: 0})
+	if err := repo.Clone(context.Background(), "git@github.com:codeavers/infra.git", "main"); err != nil {
+		t.Fatalf("Clone: unexpected error: %v", err)
+	}
+	cloneCall := run.Calls[len(run.Calls)-1]
+	if cloneCall.Name != "setpriv" {
+		t.Fatalf("expected command name setpriv, got %s", cloneCall.Name)
+	}
+	expectedPrefix := []string{"--reuid=deployer", "--regid=deploy", "--init-groups", "--", "git", "clone"}
+	if !slices.Equal(cloneCall.Args[:len(expectedPrefix)], expectedPrefix) {
+		t.Fatalf("expected args to start with %v, got %v", expectedPrefix, cloneCall.Args)
+	}
+	if !slices.Contains(cloneCall.Env, "HOME=/srv/deploy") {
+		t.Errorf("expected HOME=/srv/deploy in Env, got %v", cloneCall.Env)
+	}
+	if !slices.Contains(cloneCall.Env, "LC_ALL=C") {
+		t.Errorf("expected LC_ALL=C in Env, got %v", cloneCall.Env)
+	}
+	if !slices.Contains(cloneCall.Env, testSSHCmd) {
+		t.Errorf("expected GIT_SSH_COMMAND in Env, got %v", cloneCall.Env)
+	}
+
+	// 2. Fetch
+	run.OnPrefix("setpriv --reuid=deployer --regid=deploy --init-groups -- git -C "+testDir+" fetch", sys.Result{ExitCode: 0})
+	run.OnPrefix("setpriv --reuid=deployer --regid=deploy --init-groups -- git -C "+testDir+" rev-parse", sys.Result{ExitCode: 0, Stdout: []byte("c0ffee\n")})
+	commit, err := repo.Fetch(context.Background(), "main")
+	if err != nil || commit != "c0ffee" {
+		t.Fatalf("Fetch: unexpected error: %v, commit: %s", err, commit)
+	}
+	fetchCall := run.Calls[len(run.Calls)-2]
+	if fetchCall.Name != "setpriv" || !slices.Contains(fetchCall.Env, "HOME=/srv/deploy") {
+		t.Errorf("Fetch: expected setpriv and HOME=/srv/deploy, got call: %v", fetchCall)
+	}
+	revCall := run.Calls[len(run.Calls)-1]
+	if revCall.Name != "setpriv" || !slices.Contains(revCall.Env, "HOME=/srv/deploy") {
+		t.Errorf("rev-parse: expected setpriv and HOME=/srv/deploy, got call: %v", revCall)
+	}
+
+	// 3. Checkout
+	run.OnPrefix("setpriv --reuid=deployer --regid=deploy --init-groups -- git -C "+testDir+" checkout", sys.Result{ExitCode: 0})
+	if err := repo.Checkout(context.Background(), "c0ffee"); err != nil {
+		t.Fatalf("Checkout: unexpected error: %v", err)
+	}
+	checkoutCall := run.Calls[len(run.Calls)-1]
+	if checkoutCall.Name != "setpriv" || !slices.Contains(checkoutCall.Env, "HOME=/srv/deploy") {
+		t.Errorf("Checkout: expected setpriv and HOME=/srv/deploy, got call: %v", checkoutCall)
+	}
+
+	// 4. Show
+	run.OnPrefix("setpriv --reuid=deployer --regid=deploy --init-groups -- git -C "+testDir+" show", sys.Result{ExitCode: 0, Stdout: []byte("content")})
+	data, err := repo.Show(context.Background(), "c0ffee", "compose.yml")
+	if err != nil || string(data) != "content" {
+		t.Fatalf("Show: unexpected error: %v", err)
+	}
+	showCall := run.Calls[len(run.Calls)-1]
+	if showCall.Name != "setpriv" || !slices.Contains(showCall.Env, "HOME=/srv/deploy") {
+		t.Errorf("Show: expected setpriv and HOME=/srv/deploy, got call: %v", showCall)
+	}
+
+	// 5. IsAncestor
+	run.OnPrefix("setpriv --reuid=deployer --regid=deploy --init-groups -- git -C "+testDir+" merge-base", sys.Result{ExitCode: 0})
+	isAnc, err := repo.IsAncestor(context.Background(), "c0ffee", "main")
+	if err != nil || !isAnc {
+		t.Fatalf("IsAncestor: unexpected error: %v", err)
+	}
+	ancCall := run.Calls[len(run.Calls)-1]
+	if ancCall.Name != "setpriv" || !slices.Contains(ancCall.Env, "HOME=/srv/deploy") {
+		t.Errorf("IsAncestor: expected setpriv and HOME=/srv/deploy, got call: %v", ancCall)
+	}
+
+	// 6. LsRemote
+	run.OnPrefix("setpriv --reuid=deployer --regid=deploy --init-groups -- git ls-remote", sys.Result{ExitCode: 0})
+	if err := repo.LsRemote(context.Background(), "git@github.com:codeavers/infra.git"); err != nil {
+		t.Fatalf("LsRemote: unexpected error: %v", err)
+	}
+	lsCall := run.Calls[len(run.Calls)-1]
+	if lsCall.Name != "setpriv" || !slices.Contains(lsCall.Env, "HOME=/srv/deploy") {
+		t.Errorf("LsRemote: expected setpriv and HOME=/srv/deploy, got call: %v", lsCall)
+	}
+}
+
+func TestEUIDNonZeroRunsPlainGitWithoutHomeEnv(t *testing.T) {
+	orig := gitrepo.EUID
+	gitrepo.EUID = func() int { return 1000 }
+	defer func() { gitrepo.EUID = orig }()
+
+	run := &systest.Runner{}
+	repo := &gitrepo.Repo{
+		Run:     run,
+		Dir:     testDir,
+		KeyPath: testKeyPath,
+	}
+
+	run.OnPrefix("git clone", sys.Result{ExitCode: 0})
+	if err := repo.Clone(context.Background(), "git@github.com:codeavers/infra.git", "main"); err != nil {
+		t.Fatalf("Clone: unexpected error: %v", err)
+	}
+	call := run.Calls[len(run.Calls)-1]
+	if call.Name != "git" {
+		t.Errorf("expected command name git, got %s", call.Name)
+	}
+	if slices.Contains(call.Env, "HOME=/srv/deploy") {
+		t.Errorf("did not expect HOME=/srv/deploy in Env for non-zero euid")
+	}
+}
+
+func TestGitFailedRedactsEmbeddedHttpsCredentials(t *testing.T) {
+	orig := gitrepo.EUID
+	gitrepo.EUID = func() int { return 1000 }
+	defer func() { gitrepo.EUID = orig }()
+
+	run := &systest.Runner{}
+	repo := &gitrepo.Repo{
+		Run: run,
+		Dir: testDir,
+	}
+
+	secretURL := "https://myuser:supersecretpass@github.com/codeavers/infra.git"
+	run.OnPrefix("git ls-remote", sys.Result{
+		ExitCode: 128,
+		Stderr:   []byte("fatal: unable to access '" + secretURL + "': Authentication failed\n"),
+	})
+
+	err := repo.LsRemote(context.Background(), secretURL)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) {
+		t.Fatalf("expected *output.Error, got %T: %v", err, err)
+	}
+	if oe.Code != "E_GIT_FAILED" {
+		t.Errorf("expected code E_GIT_FAILED, got %s", oe.Code)
+	}
+	if strings.Contains(oe.Message, "supersecretpass") {
+		t.Errorf("expected password to be redacted, got message: %s", oe.Message)
+	}
+	if !strings.Contains(oe.Message, "https://***@github.com") {
+		t.Errorf("expected redacted https URL in message, got: %s", oe.Message)
+	}
+}
