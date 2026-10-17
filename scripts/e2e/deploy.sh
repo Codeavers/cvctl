@@ -26,6 +26,8 @@ git -C /tmp/infra-work config user.email "test@example.com"
 git -C /tmp/infra-work add compose.yml env.spec.yml
 git -C /tmp/infra-work commit -m "initial infra"
 git clone --bare /tmp/infra-work /tmp/infra.git
+chmod -R a+rX /tmp/infra.git
+sudo -u deployer env HOME=/srv/deploy git config --global --add safe.directory /tmp/infra.git
 echo "Assert 2: bare git repo created at /tmp/infra.git with develop branch"
 
 echo "=== 3. Add demo project and verify status OK and /health ==="
