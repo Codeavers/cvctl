@@ -283,3 +283,46 @@ func TestInsecureHostsFromEnv(t *testing.T) {
 		t.Errorf("expected empty for empty env var, got %v", hosts)
 	}
 }
+
+func TestLoginWithFSFixesConfigOwnershipAsRoot(t *testing.T) {
+	old := registry.Geteuid
+	t.Cleanup(func() { registry.Geteuid = old })
+	registry.Geteuid = func() int { return 0 }
+
+	run := &systest.Runner{}
+	run.On("docker login ghcr.io -u cvctl --password-stdin", sys.Result{ExitCode: 0})
+	fsys := systest.NewFS()
+	const cfg = "/var/lib/cvctl/docker/config.json"
+	if err := fsys.WriteFile(cfg, []byte(`{"auths":{}}`), 0o644, sys.Owner{User: "root", Group: "root"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.LoginWithFS(context.Background(), run, fsys, "ghcr.io", "", "tok"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	fi, err := fsys.Stat(cfg)
+	if err != nil || fi.User != "deployer" || fi.Group != "deploy" || fi.Mode != 0o600 {
+		t.Fatalf("config.json not fixed: %+v err=%v", fi, err)
+	}
+	data, _ := fsys.ReadFile(cfg)
+	if string(data) != `{"auths":{}}` {
+		t.Fatalf("content changed: %q", data)
+	}
+}
+
+func TestLoginWithFSLeavesConfigAloneWhenNotRoot(t *testing.T) {
+	old := registry.Geteuid
+	t.Cleanup(func() { registry.Geteuid = old })
+	registry.Geteuid = func() int { return 1000 }
+
+	run := &systest.Runner{}
+	run.On("docker login ghcr.io -u cvctl --password-stdin", sys.Result{ExitCode: 0})
+	fsys := systest.NewFS()
+	const cfg = "/var/lib/cvctl/docker/config.json"
+	_ = fsys.WriteFile(cfg, []byte("{}"), 0o644, sys.Owner{User: "root", Group: "root"})
+	if err := registry.LoginWithFS(context.Background(), run, fsys, "ghcr.io", "", "tok"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := fsys.Stat(cfg); fi.User != "root" || fi.Mode != 0o644 {
+		t.Fatalf("config.json should be untouched: %+v", fi)
+	}
+}

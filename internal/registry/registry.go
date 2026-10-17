@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
@@ -193,8 +194,22 @@ func isInsecure(host string, insecureHosts []string) bool {
 	return false
 }
 
+// Geteuid is the effective-uid lookup, replaceable in tests.
+var Geteuid = os.Geteuid
+
+const dockerConfigPath = "/var/lib/cvctl/docker/config.json"
+
+var dockerConfigOwner = sys.Owner{User: "deployer", Group: "deploy"}
+
 // Login runs `docker login <host> -u <user> --password-stdin` passing the token on Stdin.
 func Login(ctx context.Context, run sys.Runner, host, user, token string) error {
+	return LoginWithFS(ctx, run, nil, host, user, token)
+}
+
+// LoginWithFS is Login plus, when running as root with a non-nil fsys, handing
+// the resulting docker config to deployer:deploy with mode 0600 so the
+// deploy pipeline (which runs as deployer) can pull with these credentials.
+func LoginWithFS(ctx context.Context, run sys.Runner, fsys sys.FS, host, user, token string) error {
 	if user == "" {
 		user = "cvctl"
 	}
@@ -207,6 +222,20 @@ func Login(ctx context.Context, run sys.Runner, host, user, token string) error 
 	res, err := run.Run(ctx, cmd)
 	if err != nil || res.ExitCode != 0 {
 		return sys.CmdErr("E_REGISTRY_LOGIN", cmd, res, err, "check the registry token (needs read:packages)")
+	}
+	if fsys != nil && Geteuid() == 0 {
+		data, rErr := fsys.ReadFile(dockerConfigPath)
+		if rErr == nil {
+			// WriteFile rewrites atomically with the requested mode and owner.
+			rErr = fsys.WriteFile(dockerConfigPath, data, 0o600, dockerConfigOwner)
+		}
+		if rErr != nil && !errors.Is(rErr, fs.ErrNotExist) {
+			return &output.Error{
+				Code:    "E_REGISTRY_LOGIN",
+				Message: fmt.Sprintf("login succeeded but cannot hand %s to deployer: %v", dockerConfigPath, rErr),
+				Hint:    "check ownership of /var/lib/cvctl/docker",
+			}
+		}
 	}
 	return nil
 }
