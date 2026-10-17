@@ -22,6 +22,12 @@ func (execRunner) Run(ctx context.Context, c Cmd) (Result, error) {
 	}
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
+	if c.Stdout != nil {
+		cmd.Stdout = c.Stdout
+	}
+	if c.Inherit {
+		cmd.Stdin, cmd.Stderr = os.Stdin, os.Stderr
+	}
 	err := cmd.Run()
 	res := Result{Stdout: out.Bytes(), Stderr: errb.Bytes()}
 	var ee *exec.ExitError

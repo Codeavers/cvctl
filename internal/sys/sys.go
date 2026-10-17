@@ -5,6 +5,7 @@ package sys
 
 import (
 	"context"
+	"io"
 	"os"
 	"strings"
 )
@@ -14,6 +15,11 @@ type Cmd struct {
 	Args  []string
 	Stdin []byte
 	Env   []string
+	// Stdout, when set, receives the process output instead of Result.Stdout.
+	Stdout io.Writer
+	// Inherit attaches the process to the caller's terminal (stdin and stderr);
+	// it is for commands that prompt, such as ssh -t.
+	Inherit bool
 }
 
 // String is the key the fake runner matches on.

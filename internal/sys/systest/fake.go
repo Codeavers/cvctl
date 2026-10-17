@@ -52,7 +52,16 @@ func (r *Runner) OnErrorPrefix(prefix string, err error) {
 
 // Run matches exact registrations first, then the longest registered prefix;
 // anything else exits 127 like a shell would.
-func (r *Runner) Run(_ context.Context, c sys.Cmd) (sys.Result, error) {
+func (r *Runner) Run(ctx context.Context, c sys.Cmd) (sys.Result, error) {
+	res, err := r.run(ctx, c)
+	if c.Stdout != nil && err == nil {
+		_, _ = c.Stdout.Write(res.Stdout)
+		res.Stdout = nil
+	}
+	return res, err
+}
+
+func (r *Runner) run(_ context.Context, c sys.Cmd) (sys.Result, error) {
 	r.Calls = append(r.Calls, c)
 	key := c.String()
 	if err, ok := r.errors[key]; ok {
