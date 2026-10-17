@@ -12,12 +12,12 @@ import (
 	"github.com/codeavers/cvctl/internal/sys"
 )
 
-const psAll = "docker compose -p app-prod --env-file /srv/deploy/app-prod/app.env -f /srv/deploy/app-prod/infra/compose.yml -f /srv/deploy/app-prod/compose.cvctl.yml ps -a --format json"
+const psAll = "docker ps -a --filter label=com.docker.compose.project=app-prod --filter label=com.docker.compose.service=db --format {{.State}}"
 
 func TestRestorePointCommands(t *testing.T) {
 	g := newRig(t)
 	g.okAll()
-	g.run.On(psAll, sys.Result{Stdout: []byte(`[{"Service":"db","State":"running"}]`)})
+	g.run.On(psAll, sys.Result{Stdout: []byte("running\n")})
 	rp := &backup.RestorePoint{Compose: g.r.Compose, Load: g.r.Load}
 	if err := rp.Create(context.Background(), "app-prod", "deploy-1700000000"); err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestRestorePointNoWalgTargetsIsNoop(t *testing.T) {
 func TestRestorePointFailureIsCoded(t *testing.T) {
 	g := newRig(t)
 	g.run.OnPrefix("docker", sys.Result{ExitCode: 1, Stderr: []byte("no")})
-	g.run.On(psAll, sys.Result{Stdout: []byte(`[{"Service":"db","State":"exited"}]`)})
+	g.run.On(psAll, sys.Result{Stdout: []byte("exited\n")})
 	rp := &backup.RestorePoint{Compose: g.r.Compose, Load: g.r.Load}
 	err := rp.Create(context.Background(), "app-prod", "deploy-5")
 	if err == nil || !strings.Contains(err.Error(), "E_RESTORE_POINT_FAILED") {
@@ -76,13 +76,15 @@ func TestRestorePointFailureIsCoded(t *testing.T) {
 func TestRestorePointNeverCreatedContainerIsFreshInstance(t *testing.T) {
 	g := newRig(t)
 	g.okAll()
-	g.run.On(psAll, sys.Result{Stdout: []byte(`[]`)})
+	// a fresh instance has no app.env or compose.cvctl.yml yet: any compose call fails
+	g.run.OnPrefix("docker compose", sys.Result{ExitCode: 1, Stderr: []byte("open /srv/deploy/app-prod/app.env: no such file or directory")})
+	g.run.On(psAll, sys.Result{})
 	rp := &backup.RestorePoint{Compose: g.r.Compose, Load: g.r.Load}
 	err := rp.Create(context.Background(), "app-prod", "deploy-5")
 	if !errors.Is(err, backup.ErrFreshInstance) {
 		t.Fatalf("err=%v", err)
 	}
-	if len(g.calls()) != 1 {
-		t.Fatalf("only the state probe may run: %v", g.calls())
+	if c := g.calls(); len(c) != 1 || c[0] != psAll {
+		t.Fatalf("only the label probe may run: %v", c)
 	}
 }

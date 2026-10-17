@@ -21,17 +21,29 @@ const (
 // EUID is the function used to query the effective user ID, injectable for testing.
 var EUID = os.Geteuid
 
-var (
-	urlCredsRe = regexp.MustCompile(`(?i)(https?://)(?:[^@/\s]+@)`)
-	// ssh user names are not secrets; only a password is masked
-	sshPassRe = regexp.MustCompile(`(?i)(ssh://[^:@/\s]+):[^@/\s]*@`)
-)
+var urlAuthorityRe = regexp.MustCompile(`(?i)(https?|ssh)://[^/\s]*`)
 
-// RedactURL masks credentials in HTTP/HTTPS URLs and passwords in ssh:// URLs,
-// whatever the case of the scheme.
+// RedactURL masks credentials in http(s) URLs and the password of ssh:// URLs,
+// whatever the case of the scheme. Userinfo ends at the last '@' of the
+// authority, so an '@' inside a password cannot leak its tail.
 func RedactURL(s string) string {
-	s = urlCredsRe.ReplaceAllString(s, "${1}***@")
-	return sshPassRe.ReplaceAllString(s, "${1}:***@")
+	return urlAuthorityRe.ReplaceAllStringFunc(s, func(m string) string {
+		i := strings.Index(m, "://") + 3
+		prefix, authority := m[:i], m[i:]
+		at := strings.LastIndex(authority, "@")
+		if at < 0 {
+			return m
+		}
+		userinfo, host := authority[:at], authority[at:]
+		if strings.EqualFold(prefix, "ssh://") {
+			user, _, hasPass := strings.Cut(userinfo, ":")
+			if !hasPass {
+				return m
+			}
+			return prefix + user + ":***" + host
+		}
+		return prefix + "***" + host
+	})
 }
 
 // Repo provides git operations against a repository checkout using an optional deploy key.

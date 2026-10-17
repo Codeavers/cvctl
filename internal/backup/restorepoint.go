@@ -24,18 +24,10 @@ type RestorePoint struct {
 // no data to protect.
 var ErrFreshInstance = errors.New("no restore point: fresh instance")
 
-// serviceState reports whether the container of svc exists and is running.
+// serviceState probes docker by compose labels: the compose files and env of a
+// fresh instance may not exist yet, and compose would fail on them.
 func serviceState(ctx context.Context, proj *compose.Project, svc string) (exists, running bool, err error) {
-	cs, err := proj.PSAll(ctx)
-	if err != nil {
-		return false, false, err
-	}
-	for _, c := range cs {
-		if c.Service == svc {
-			return true, c.State == "running", nil
-		}
-	}
-	return false, false, nil
+	return sys.ContainerState(ctx, proj.Run, proj.Instance, svc)
 }
 
 // Create names a restore point in every wal-g postgres service of inst and

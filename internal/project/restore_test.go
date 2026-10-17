@@ -396,6 +396,9 @@ func TestStorableInfraURL(t *testing.T) {
 		{"https://github.com/org/repo.git", "https://github.com/org/repo.git", false},
 		{"https://github.com/org/a@b.git", "https://github.com/org/a@b.git", false},
 		{"ssh://git@github.com/org/repo.git", "ssh://git@github.com/org/repo.git", false},
+		{"https://u:p@ss@host/x", "https://host/x", true},
+		{"ssh://:pw@h/x", "ssh://h/x", true},
+		{"ssh://u:p@ss@h/x", "ssh://u@h/x", true},
 		{"ssh://git:hunter2@github.com/org/repo.git", "ssh://git@github.com/org/repo.git", true},
 		{"git@github.com:org/repo.git", "git@github.com:org/repo.git", false},
 	} {

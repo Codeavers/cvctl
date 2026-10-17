@@ -20,6 +20,8 @@ import (
 const cpBase = "docker compose -p app-prod --env-file /srv/deploy/app-prod/app.env -f /srv/deploy/app-prod/infra/compose.yml -f /srv/deploy/app-prod/compose.cvctl.yml"
 const cp = cpBase + " "
 
+const probe = "docker ps -a --filter label=com.docker.compose.project=app-prod --filter label=com.docker.compose.service=db --format {{.State}}"
+
 const (
 	newVol  = "app-prod_db-data-r1767323045"
 	recName = "cvctl-restore-app-prod-db-1767323045"
@@ -59,7 +61,7 @@ func newRestoreRig(t *testing.T) *restoreRig {
 	g.r.Sleep = func(time.Duration) {}
 	pq := cp + "exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c "
 	pg := cp + "exec -T -u postgres db psql -U app -d postgres -v ON_ERROR_STOP=1 -tA -c "
-	g.run.On(cpBase+" ps -a --format json", sys.Result{Stdout: []byte(`[{"Service":"db","State":"running"}]`)})
+	g.run.On(probe, sys.Result{Stdout: []byte("running\n")})
 	g.run.OnPrefix(pg+"select pg_walfile_name", sys.Result{Stdout: []byte("000000010000000000000005\n")})
 	g.run.OnPrefix(pg+"select coalesce", sys.Result{Stdout: []byte("000000010000000000000005\n")})
 	g.run.OnPrefix(pq+"select 1", sys.Result{Stdout: []byte("1\n")})
@@ -506,9 +508,9 @@ func TestVerifyScriptHasNoPersistedRecoverySettings(t *testing.T) {
 }
 
 func TestRestoreNotRunningClusterSkipsFlushWithWarning(t *testing.T) {
-	for name, ps := range map[string]string{"exited": `[{"Service":"db","State":"exited"}]`, "never created": `[]`} {
+	for name, ps := range map[string]string{"exited": "exited\n", "never created": ""} {
 		g := newRestoreRig(t)
-		g.run.On(cpBase+" ps -a --format json", sys.Result{Stdout: []byte(ps)})
+		g.run.On(probe, sys.Result{Stdout: []byte(ps)})
 		res, err := g.r.Restore(context.Background(), "app-prod", "db", "latest")
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -525,6 +527,16 @@ func TestRestoreNotRunningClusterSkipsFlushWithWarning(t *testing.T) {
 		if len(g.note.msgs) != 2 || g.note.msgs[1].Level != "warn" || !strings.Contains(g.note.msgs[1].Title, "WAL flush skipped during restore") || strings.Contains(g.note.msgs[1].Title, "backup needed") {
 			t.Fatalf("%s: notify: %+v", name, g.note.msgs)
 		}
+	}
+}
+
+func TestRestoreFlushProbesByLabelNotCompose(t *testing.T) {
+	g := newRestoreRig(t)
+	if _, err := g.r.Restore(context.Background(), "app-prod", "db", "latest"); err != nil {
+		t.Fatal(err)
+	}
+	if g.has(probe) != 1 || g.has(cpBase+" ps") != 0 {
+		t.Fatalf("calls: %v", g.calls())
 	}
 }
 

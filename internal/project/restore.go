@@ -324,6 +324,9 @@ func storableInfraURL(raw string) (string, bool) {
 		}
 		if at := strings.LastIndex(authority, "@"); at >= 0 {
 			if user, _, hasPass := strings.Cut(authority[:at], ":"); hasPass {
+				if user == "" {
+					return "ssh://" + rest[at+1:], true
+				}
 				return "ssh://" + user + rest[at:], true
 			}
 		}

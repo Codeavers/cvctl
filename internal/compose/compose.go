@@ -103,16 +103,7 @@ func (p Project) Up(ctx context.Context) error {
 }
 
 func (p Project) PS(ctx context.Context) ([]Container, error) {
-	return p.ps(ctx, "ps", "--format", "json")
-}
-
-// PSAll also lists stopped containers, which tells "never created" from "not running".
-func (p Project) PSAll(ctx context.Context) ([]Container, error) {
-	return p.ps(ctx, "ps", "-a", "--format", "json")
-}
-
-func (p Project) ps(ctx context.Context, args ...string) ([]Container, error) {
-	cmd := p.Cmd(args...)
+	cmd := p.Cmd("ps", "--format", "json")
 	res, err := p.Run.Run(ctx, cmd)
 	if err != nil || res.ExitCode != 0 {
 		return nil, p.composeErr(cmd, res, err)
