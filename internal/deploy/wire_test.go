@@ -10,6 +10,8 @@ import (
 
 	"github.com/codeavers/cvctl/internal/compose"
 	"github.com/codeavers/cvctl/internal/deploy"
+	"github.com/codeavers/cvctl/internal/gitrepo"
+	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/internal/sys/systest"
 	"github.com/codeavers/cvctl/kinds"
@@ -30,6 +32,17 @@ func TestWire(t *testing.T) {
 	}
 	if d.Health == nil {
 		t.Fatal("expected non-nil Health")
+	}
+	if d.Repo == nil {
+		t.Fatal("expected non-nil Repo")
+	}
+
+	repoAPI := d.Repo("myapp-dev")
+	if repoAPI == nil {
+		t.Fatal("expected non-nil CheckoutAPI from d.Repo")
+	}
+	if _, ok := repoAPI.(*gitrepo.Repo); !ok {
+		t.Fatalf("expected *gitrepo.Repo, got %T", repoAPI)
 	}
 
 	inst := "myapp-dev"
@@ -117,5 +130,27 @@ x-cvctl:
 	// Since HTTP ping fails against dummy 127.0.0.1 without mock server, it returns an error.
 	if err := d.Health(ctx, inst, filepath.Join(instDir, "compose.cvctl.yml")); err == nil {
 		t.Fatal("expected error connecting to dummy health endpoint")
+	}
+}
+
+func TestSourceDeps(t *testing.T) {
+	run := &systest.Runner{}
+	hcfg := &hostcfg.Config{
+		Registries:   "ghcr.io/codeavers,docker.io/myorg",
+		RegistryUser: "myuser",
+	}
+	sec := hostcfg.NewSecrets()
+	sec.Set("registry_token", "secret-token")
+
+	deps := deploy.SourceDeps("demo-dev", run, hcfg, sec)
+	if deps.Repo == nil {
+		t.Fatal("expected non-nil Repo in Deps")
+	}
+	if deps.Resolver == nil {
+		t.Fatal("expected non-nil Resolver in Deps")
+	}
+	wantAllowed := []string{"ghcr.io/codeavers", "docker.io/myorg"}
+	if !slices.Equal(deps.Allowed, wantAllowed) {
+		t.Fatalf("got Allowed %v, want %v", deps.Allowed, wantAllowed)
 	}
 }

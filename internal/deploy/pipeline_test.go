@@ -305,7 +305,9 @@ func setupTestRig(t *testing.T, envName, instName string) *testRig {
 		Compose: func(inst, override, envFile string) ComposeAPI {
 			return &boundCompose{fake: comp, override: override, envFile: envFile}
 		},
-		Repo:    repo,
+		Repo: func(string) CheckoutAPI {
+			return repo
+		},
 		Notify:  notifier,
 		Restore: restore,
 		Host: &hostcfg.Config{

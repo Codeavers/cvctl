@@ -139,7 +139,9 @@ func setupOpsFixture(t *testing.T, inst string) (string, *OpsEnv) {
 		Health: func(ctx context.Context, inst, override string) error {
 			return nil
 		},
-		Repo: stubRepo,
+		Repo: func(string) deploy.CheckoutAPI {
+			return stubRepo
+		},
 	}
 
 	env := &OpsEnv{

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -91,33 +90,31 @@ func newDeployCmd() *cobra.Command {
 				return err
 			}
 
-			keyPath := filepath.Join(e.stateRoot(), inst, "deploy_key")
-			if _, err := e.fs().Stat(keyPath); err != nil {
-				keyPath = ""
+			deps := deploy.SourceDepsWithRoots(inst, e.runner(), e.Host, e.Secrets, e.deployRoot(), e.stateRoot(), e.fs())
+			if e.Resolver != nil {
+				deps.Resolver = e.Resolver
 			}
-			repo := e.repo(infraDir, keyPath)
-
-			var allowed []string
-			if e.Host != nil && e.Host.Registries != "" {
-				for _, r := range strings.Split(e.Host.Registries, ",") {
-					if s := strings.TrimSpace(r); s != "" {
-						allowed = append(allowed, s)
-					}
+			if e.RepoFactory != nil {
+				keyPath := filepath.Join(e.stateRoot(), inst, "deploy_key")
+				if _, err := e.fs().Stat(keyPath); err != nil {
+					keyPath = ""
 				}
+				deps.Repo = e.repo(infraDir, keyPath)
 			}
 
-			src := deploy.SourceFor(d, deploy.Deps{
-				Repo:     repo,
-				Resolver: e.Resolver,
-				Allowed:  allowed,
-			})
+			src := deploy.SourceFor(d, deps)
 			desired, err := src.Desired(cmd.Context(), d, p)
 			if err != nil {
 				return err
 			}
 
 			if e.Deployer.Repo == nil {
-				e.Deployer.Repo = repo
+				e.Deployer.Repo = func(string) deploy.CheckoutAPI {
+					if c, ok := deps.Repo.(deploy.CheckoutAPI); ok {
+						return c
+					}
+					return nil
+				}
 			}
 			if e.Deployer.Catalog == nil {
 				e.Deployer.Catalog = cat

@@ -70,11 +70,12 @@ type Result struct {
 // Deployer coordinates instance deployment, promotion, health checks, and rollback.
 type Deployer struct {
 	DeployRoot     string
+	StateRoot      string
 	TraefikDir     string
 	FS             sys.FS
 	Store          *state.Store
 	Compose        func(inst, override, envFile string) ComposeAPI
-	Repo           CheckoutAPI
+	Repo           func(inst string) CheckoutAPI
 	Notify         notify.Notifier
 	Restore        RestorePointer
 	Host           *hostcfg.Config
@@ -97,6 +98,23 @@ func (d *Deployer) traefikDir() string {
 		return d.TraefikDir
 	}
 	return "/etc/traefik/dynamic"
+}
+
+func (d *Deployer) stateRoot() string {
+	if d.StateRoot != "" {
+		return d.StateRoot
+	}
+	if d.Store != nil && d.Store.Root() != "" {
+		return d.Store.Root()
+	}
+	return "/var/lib/cvctl"
+}
+
+func (d *Deployer) repo(inst string) CheckoutAPI {
+	if d.Repo != nil {
+		return d.Repo(inst)
+	}
+	return nil
 }
 
 func (d *Deployer) fs() sys.FS {
@@ -400,20 +418,22 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 	// Step 2: Checkout want.InfraCommit, load contract, spec, decisions, Validate + Check
 	promoted := false
 	defer func() {
-		if !promoted && st.Current != nil && st.Current.InfraCommit != "" && d.Repo != nil {
-			if rErr := d.Repo.Checkout(ctx, st.Current.InfraCommit); rErr != nil {
-				errMsg := fmt.Sprintf("restore checkout failed: %v", rErr)
-				if res.Detail != "" {
-					res.Detail += "; " + errMsg
-				} else {
-					res.Detail = errMsg
+		if !promoted && st.Current != nil && st.Current.InfraCommit != "" {
+			if r := d.repo(inst); r != nil {
+				if rErr := r.Checkout(ctx, st.Current.InfraCommit); rErr != nil {
+					errMsg := fmt.Sprintf("restore checkout failed: %v", rErr)
+					if res.Detail != "" {
+						res.Detail += "; " + errMsg
+					} else {
+						res.Detail = errMsg
+					}
 				}
 			}
 		}
 	}()
 
-	if d.Repo != nil {
-		if err := d.Repo.Checkout(ctx, want.InfraCommit); err != nil {
+	if r := d.repo(inst); r != nil {
+		if err := r.Checkout(ctx, want.InfraCommit); err != nil {
 			return Result{}, err
 		}
 	}

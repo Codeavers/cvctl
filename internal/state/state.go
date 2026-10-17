@@ -89,6 +89,13 @@ func NewStore(fs sys.FS, root string) *Store {
 	return &Store{fs: fs, root: root}
 }
 
+func (s *Store) Root() string {
+	if s == nil {
+		return ""
+	}
+	return s.root
+}
+
 func (s *Store) Load(inst string) (*State, error) {
 	statePath := filepath.Join(s.root, inst, "state.json")
 	data, err := s.fs.ReadFile(statePath)

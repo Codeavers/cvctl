@@ -4,16 +4,21 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/joho/godotenv"
 
 	"github.com/codeavers/cvctl/internal/contract"
+	"github.com/codeavers/cvctl/internal/gitrepo"
+	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/registry"
 	"github.com/codeavers/cvctl/internal/state"
+	"github.com/codeavers/cvctl/internal/sys"
 )
 
 var digestRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -34,6 +39,70 @@ type Deps struct {
 	Repo     RepoAPI
 	Resolver registry.Resolver
 	Allowed  []string
+}
+
+var (
+	DefaultDeployRoot = "/srv/deploy"
+	DefaultStateRoot  = "/var/lib/cvctl"
+)
+
+// SourceDeps builds Deps for an instance using the host configuration, secrets, and repository checkout.
+func SourceDeps(inst string, run sys.Runner, host *hostcfg.Config, secrets *hostcfg.Secrets) Deps {
+	return SourceDepsWithRoots(inst, run, host, secrets, DefaultDeployRoot, DefaultStateRoot, nil)
+}
+
+// SourceDepsWithRoots builds Deps allowing custom deployRoot, stateRoot, and filesystem.
+func SourceDepsWithRoots(inst string, run sys.Runner, host *hostcfg.Config, secrets *hostcfg.Secrets, deployRoot, stateRoot string, fsys sys.FS) Deps {
+	if deployRoot == "" {
+		deployRoot = DefaultDeployRoot
+	}
+	if stateRoot == "" {
+		stateRoot = DefaultStateRoot
+	}
+	keyPath := filepath.Join(stateRoot, inst, "deploy_key")
+	exists := false
+	if fsys != nil {
+		if fi, err := fsys.Stat(keyPath); err == nil && !fi.IsDir {
+			exists = true
+		}
+	} else {
+		if fi, err := os.Stat(keyPath); err == nil && !fi.IsDir() {
+			exists = true
+		}
+	}
+	if !exists {
+		keyPath = ""
+	}
+	repo := &gitrepo.Repo{
+		Run:     run,
+		Dir:     filepath.Join(deployRoot, inst, "infra"),
+		KeyPath: keyPath,
+	}
+
+	var user string
+	if host != nil {
+		user = host.RegistryUser
+	}
+	var token string
+	if secrets != nil {
+		token, _ = secrets.Get("registry_token")
+	}
+	resolver := registry.New(user, token, registry.InsecureHostsFromEnv())
+
+	var allowed []string
+	if host != nil && host.Registries != "" {
+		for _, r := range strings.Split(host.Registries, ",") {
+			if s := strings.TrimSpace(r); s != "" {
+				allowed = append(allowed, s)
+			}
+		}
+	}
+
+	return Deps{
+		Repo:     repo,
+		Resolver: resolver,
+		Allowed:  allowed,
+	}
 }
 
 // DevSource resolves desired state for dev environments by tracking branch refs and image tags.

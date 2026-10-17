@@ -81,6 +81,7 @@ func DefaultSteps() []Step {
 		TraefikStep{},
 		StorageStep{},
 		NotifierStep{},
+		AgentStep{},
 	}
 }
 

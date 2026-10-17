@@ -16,8 +16,8 @@ import (
 
 // executeSwap performs checkout, render, promotion, Up, and health check for target state.
 func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.Desired, appEnv map[string]string, appEnvAbsent bool) error {
-	if d.Repo != nil {
-		if err := d.Repo.Checkout(ctx, target.InfraCommit); err != nil {
+	if r := d.repo(inst); r != nil {
+		if err := r.Checkout(ctx, target.InfraCommit); err != nil {
 			return err
 		}
 	}

@@ -487,21 +487,18 @@ func runDeploy(ctx context.Context, e *Env, repo RepoLike, d *instance.Decisions
 		return deploy.Result{Status: state.StatusOK}, nil
 	}
 	if e.Deployer.Repo == nil {
-		e.Deployer.Repo = repo
-	}
-	var allowed []string
-	if e.Host != nil && e.Host.Registries != "" {
-		for _, r := range strings.Split(e.Host.Registries, ",") {
-			if s := strings.TrimSpace(r); s != "" {
-				allowed = append(allowed, s)
-			}
+		e.Deployer.Repo = func(string) deploy.CheckoutAPI {
+			return repo
 		}
 	}
-	src := deploy.SourceFor(d, deploy.Deps{
-		Repo:     repo,
-		Resolver: e.Resolver,
-		Allowed:  allowed,
-	})
+	deps := deploy.SourceDepsWithRoots(d.Instance, e.runner(), e.Host, e.Secrets, e.deployRoot(), e.stateRoot(), e.fs())
+	if repo != nil {
+		deps.Repo = repo
+	}
+	if e.Resolver != nil {
+		deps.Resolver = e.Resolver
+	}
+	src := deploy.SourceFor(d, deps)
 	desired, err := src.Desired(ctx, d, p)
 	if err != nil {
 		return deploy.Result{}, err
