@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -26,6 +27,15 @@ const (
 	storageProject     = "cvctl-storage"
 	storageNetwork     = "cvctl-storage"
 	storageVolume      = "cvctl-storage-data"
+
+	// BackupNetwork carries backup containers to the local storage service.
+	BackupNetwork      = "cvctl-backup"
+	storageAlias       = "cvctl-storage"
+	localInternalS3URL = "http://cvctl-storage:9000"
+	secretWalgKey      = "walg_libsodium_key"
+	secretResticPass   = "restic_password"
+	actionBackupKeys   = "backup keys"
+	actionInternalEP   = "internal storage endpoint"
 
 	localS3Endpoint = "http://127.0.0.1:9100"
 	localS3Bucket   = "cvctl"
@@ -52,14 +62,18 @@ type storageComposeConfig struct {
 	Volumes  map[string]map[string]any        `yaml:"volumes"`
 }
 
+type storageComposeNetwork struct {
+	Aliases []string `yaml:"aliases,omitempty"`
+}
+
 type storageComposeService struct {
-	Image    string   `yaml:"image"`
-	Command  []string `yaml:"command"`
-	Restart  string   `yaml:"restart"`
-	Ports    []string `yaml:"ports"`
-	EnvFile  []string `yaml:"env_file"`
-	Volumes  []string `yaml:"volumes"`
-	Networks []string `yaml:"networks"`
+	Image    string                           `yaml:"image"`
+	Command  []string                         `yaml:"command"`
+	Restart  string                           `yaml:"restart"`
+	Ports    []string                         `yaml:"ports"`
+	EnvFile  []string                         `yaml:"env_file"`
+	Volumes  []string                         `yaml:"volumes"`
+	Networks map[string]storageComposeNetwork `yaml:"networks"`
 }
 
 func effectiveStorageMode(cfg *hostcfg.Config) string {
@@ -90,17 +104,21 @@ func renderStorageCompose() ([]byte, error) {
 	doc := storageComposeConfig{
 		Services: map[string]storageComposeService{
 			"s3": {
-				Image:    img,
-				Command:  []string{"server", "/data"},
-				Restart:  "unless-stopped",
-				Ports:    []string{"127.0.0.1:9100:9000"},
-				EnvFile:  []string{storageSecretsPath},
-				Volumes:  []string{storageVolume + ":/data"},
-				Networks: []string{storageNetwork},
+				Image:   img,
+				Command: []string{"server", "/data"},
+				Restart: "unless-stopped",
+				Ports:   []string{"127.0.0.1:9100:9000"},
+				EnvFile: []string{storageSecretsPath},
+				Volumes: []string{storageVolume + ":/data"},
+				Networks: map[string]storageComposeNetwork{
+					storageNetwork: {},
+					BackupNetwork:  {Aliases: []string{storageAlias}},
+				},
 			},
 		},
 		Networks: map[string]map[string]any{
 			storageNetwork: {},
+			BackupNetwork:  {"external": true},
 		},
 		Volumes: map[string]map[string]any{
 			storageVolume: {},
@@ -143,7 +161,38 @@ func storageConfigFor(cfg *hostcfg.Config, mode, ak, sk string) objstore.Config 
 	}
 }
 
-func (StorageStep) Check(ctx context.Context, e *Env) (Plan, error) {
+func (s StorageStep) Check(ctx context.Context, e *Env) (Plan, error) {
+	p, err := s.checkStorage(ctx, e)
+	if err != nil {
+		return Plan{}, err
+	}
+	if e.Secrets == nil || !hasBackupKeys(e.Secrets) {
+		p.Changes = append(p.Changes, "generate backup keys")
+		p.Actions = append(p.Actions, Action{Kind: "configure", Target: actionBackupKeys})
+	}
+	if e.Cfg == nil || e.Cfg.S3EndpointInternal == "" {
+		p.Changes = append(p.Changes, "configure internal storage endpoint")
+		p.Actions = append(p.Actions, Action{Kind: "configure", Target: actionInternalEP})
+	}
+	res, err := e.Run.Run(ctx, sys.Cmd{
+		Name: "docker",
+		Args: []string{"network", "inspect", BackupNetwork},
+		Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
+	})
+	if err != nil || res.ExitCode != 0 {
+		p.Changes = append(p.Changes, "create network "+BackupNetwork)
+		p.Actions = append(p.Actions, Action{Kind: "network-create", Target: BackupNetwork})
+	}
+	return p, nil
+}
+
+func hasBackupKeys(sec *hostcfg.Secrets) bool {
+	_, a := sec.Get(secretWalgKey)
+	_, b := sec.Get(secretResticPass)
+	return a && b
+}
+
+func (StorageStep) checkStorage(ctx context.Context, e *Env) (Plan, error) {
 	mode := effectiveStorageMode(e.Cfg)
 	var ak, sk string
 	if e.Secrets != nil {
@@ -211,7 +260,45 @@ func (s StorageStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 	}
 
 	mode := effectiveStorageMode(e.Cfg)
+	if e.Cfg == nil {
+		e.Cfg = hostcfg.NewConfig()
+	}
+	if e.Secrets == nil {
+		e.Secrets = hostcfg.NewSecrets()
+	}
+	if err := ensureBackupKeys(e.Secrets); err != nil {
+		return "", err
+	}
+	if e.Cfg.S3EndpointInternal == "" {
+		internal := localInternalS3URL
+		if mode == "s3" {
+			internal = e.Cfg.S3Endpoint
+		}
+		if internal != "" {
+			if err := e.Cfg.Set("S3_ENDPOINT_INTERNAL", internal); err != nil {
+				return "", err
+			}
+		}
+	}
+	for _, a := range p.Actions {
+		if a.Kind == "network-create" && a.Target == BackupNetwork {
+			if err := runStorageCmd(ctx, e, sys.Cmd{
+				Name: "docker",
+				Args: []string{"network", "create", BackupNetwork},
+				Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
+			}); err != nil {
+				return "", err
+			}
+		}
+	}
+
 	if mode == "s3" {
+		if err := hostcfg.Save(e.FS, "/etc/cvctl", e.Cfg, e.Secrets); err != nil {
+			return "", err
+		}
+		if err := fixSavedCfgPermissions(e.FS); err != nil {
+			return "", err
+		}
 		var ak, sk string
 		if e.Secrets != nil {
 			ak, _ = e.Secrets.Get("s3_access_key")
@@ -233,13 +320,6 @@ func (s StorageStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 			return "", err
 		}
 		return "", nil
-	}
-
-	if e.Cfg == nil {
-		e.Cfg = hostcfg.NewConfig()
-	}
-	if e.Secrets == nil {
-		e.Secrets = hostcfg.NewSecrets()
 	}
 
 	ak, okAK := e.Secrets.Get("s3_access_key")
@@ -343,6 +423,24 @@ func (s StorageStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 	}
 
 	return "", nil
+}
+
+func ensureBackupKeys(sec *hostcfg.Secrets) error {
+	if _, ok := sec.Get(secretWalgKey); !ok {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			return err
+		}
+		sec.Set(secretWalgKey, hex.EncodeToString(b))
+	}
+	if _, ok := sec.Get(secretResticPass); !ok {
+		v, err := randomAlnum(40)
+		if err != nil {
+			return err
+		}
+		sec.Set(secretResticPass, v)
+	}
+	return nil
 }
 
 func (s StorageStep) waitForBucket(ctx context.Context, store objstore.Store) error {

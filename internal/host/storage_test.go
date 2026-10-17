@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -72,6 +73,7 @@ var alnum40Re = regexp.MustCompile(`^[A-Za-z0-9]{40}$`)
 
 func TestStorageLocalGeneratesKeysOnce(t *testing.T) {
 	r := &systest.Runner{}
+	r.OnPrefix("docker network", sys.Result{ExitCode: 0})
 	fs := systest.NewFS()
 	cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 	if err != nil {
@@ -169,6 +171,7 @@ func (h *hookedStore) EnsureBucket(ctx context.Context) error {
 
 func TestStorageLocalComposeNoInlineSecrets(t *testing.T) {
 	r := &systest.Runner{}
+	r.OnPrefix("docker network", sys.Result{ExitCode: 0})
 	fs := systest.NewFS()
 	cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 	if err != nil {
@@ -281,6 +284,7 @@ func TestStorageLocalComposeNoInlineSecrets(t *testing.T) {
 
 func TestStorageS3BucketDenied(t *testing.T) {
 	r := &systest.Runner{}
+	r.OnPrefix("docker network", sys.Result{ExitCode: 0})
 	fs := systest.NewFS()
 	cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 	if err != nil {
@@ -292,6 +296,9 @@ func TestStorageS3BucketDenied(t *testing.T) {
 	_ = cfg.Set("S3_REGION", "auto")
 	sec.Set("s3_access_key", "AKIA1234567890123456")
 	sec.Set("s3_secret_key", "secret1234567890123456789012345678901234")
+	sec.Set("walg_libsodium_key", strings.Repeat("ab", 32))
+	sec.Set("restic_password", strings.Repeat("R", 40))
+	_ = cfg.Set("S3_ENDPOINT_INTERNAL", "https://s3.example.com")
 
 	env := &Env{Run: r, FS: fs, Cfg: cfg, Secrets: sec, EUID: 0}
 
@@ -334,6 +341,8 @@ func TestStorageS3BucketDenied(t *testing.T) {
 func TestStorageUnchangedWhenProbeOK(t *testing.T) {
 	t.Run("s3", func(t *testing.T) {
 		r := &systest.Runner{}
+		r.OnPrefix("docker network", sys.Result{ExitCode: 0})
+		r.OnPrefix("docker network", sys.Result{ExitCode: 0})
 		fs := systest.NewFS()
 		cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 		if err != nil {
@@ -345,6 +354,12 @@ func TestStorageUnchangedWhenProbeOK(t *testing.T) {
 		_ = cfg.Set("S3_REGION", "auto")
 		sec.Set("s3_access_key", "AKIA1234567890123456")
 		sec.Set("s3_secret_key", "secret1234567890123456789012345678901234")
+		sec.Set("walg_libsodium_key", strings.Repeat("ab", 32))
+		sec.Set("restic_password", strings.Repeat("R", 40))
+		_ = cfg.Set("S3_ENDPOINT_INTERNAL", "https://s3.example.com")
+		sec.Set("walg_libsodium_key", strings.Repeat("ab", 32))
+		sec.Set("restic_password", strings.Repeat("R", 40))
+		_ = cfg.Set("S3_ENDPOINT_INTERNAL", "https://s3.example.com")
 
 		env := &Env{Run: r, FS: fs, Cfg: cfg, Secrets: sec, EUID: 0}
 
@@ -363,13 +378,15 @@ func TestStorageUnchangedWhenProbeOK(t *testing.T) {
 		if len(plan.Changes) != 0 {
 			t.Fatalf("expected no changes when Probe is OK, got %v", plan.Changes)
 		}
-		if len(r.Calls) != 0 {
-			t.Fatalf("expected no runner calls, got %v", r.Calls)
+		if len(r.Calls) != 1 || r.Calls[0].String() != "docker network inspect cvctl-backup" {
+			t.Fatalf("expected only the network inspect call, got %v", r.Calls)
 		}
 	})
 
 	t.Run("local", func(t *testing.T) {
 		r := &systest.Runner{}
+		r.OnPrefix("docker network", sys.Result{ExitCode: 0})
+		r.OnPrefix("docker network", sys.Result{ExitCode: 0})
 		fs := systest.NewFS()
 		cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 		if err != nil {
@@ -452,6 +469,208 @@ func TestStorageWaitForBucketStopsOnAuthError(t *testing.T) {
 			}
 			if elapsed > 500*time.Millisecond {
 				t.Fatalf("waitForBucket took %v, expected immediate return", elapsed)
+			}
+		})
+	}
+}
+
+func backupEnv(t *testing.T, storage, endpoint string) (*Env, *systest.Runner, *systest.FS) {
+	t.Helper()
+	r := &systest.Runner{}
+	fs := systest.NewFS()
+	cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = cfg.Set("STORAGE", storage)
+	if storage == "s3" {
+		_ = cfg.Set("S3_ENDPOINT", endpoint)
+		_ = cfg.Set("S3_BUCKET", "b")
+		_ = cfg.Set("S3_REGION", "auto")
+		sec.Set("s3_access_key", "AKIA1234567890123456")
+		sec.Set("s3_secret_key", "secret1234567890123456789012345678901234")
+	}
+	store := newFakeObjStore()
+	old := newStore
+	t.Cleanup(func() { newStore = old })
+	newStore = func(objstore.Config) (objstore.Store, error) { return store, nil }
+	r.OnPrefix("docker compose", sys.Result{ExitCode: 0})
+	return &Env{Run: r, FS: fs, Cfg: cfg, Secrets: sec, EUID: 0}, r, fs
+}
+
+func countCalls(r *systest.Runner, cmd string) int {
+	n := 0
+	for _, c := range r.Calls {
+		if c.String() == cmd {
+			n++
+		}
+	}
+	return n
+}
+
+func TestStorageBackupKeysGeneratedOnce(t *testing.T) {
+	env, r, fs := backupEnv(t, "s3", "https://s3.example.com")
+	r.OnPrefix("docker network inspect", sys.Result{ExitCode: 0})
+	step := StorageStep{PollInterval: time.Millisecond, PollTimeout: 20 * time.Millisecond}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := step.Apply(context.Background(), env, plan); err != nil {
+		t.Fatal(err)
+	}
+	wk, _ := env.Secrets.Get("walg_libsodium_key")
+	rp, _ := env.Secrets.Get("restic_password")
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(wk) {
+		t.Fatalf("walg key not 64 hex chars")
+	}
+	if !alnum40Re.MatchString(rp) {
+		t.Fatalf("restic password not 40 alphanumeric chars")
+	}
+	for _, n := range []string{"walg_libsodium_key", "restic_password"} {
+		if _, err := fs.ReadFile("/etc/cvctl/secrets/" + n); err != nil {
+			t.Fatalf("secret %s not persisted: %v", n, err)
+		}
+	}
+	plan2, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range plan2.Actions {
+		if a.Target == "backup keys" {
+			t.Fatalf("keys should not be regenerated: %v", plan2.Actions)
+		}
+	}
+	// Even a forced Apply keeps existing values.
+	if _, err := step.Apply(context.Background(), env, Plan{Actions: []Action{{Kind: "verify", Target: "storage"}}}); err != nil {
+		t.Fatal(err)
+	}
+	wk2, _ := env.Secrets.Get("walg_libsodium_key")
+	rp2, _ := env.Secrets.Get("restic_password")
+	if wk2 != wk || rp2 != rp {
+		t.Fatal("keys were regenerated")
+	}
+}
+
+func TestStorageBackupNetworkCreatedOnce(t *testing.T) {
+	env, r, _ := backupEnv(t, "s3", "https://s3.example.com")
+	r.OnPrefix("docker network inspect", sys.Result{ExitCode: 1})
+	step := StorageStep{PollInterval: time.Millisecond, PollTimeout: 20 * time.Millisecond}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(plan.Actions, Action{Kind: "network-create", Target: "cvctl-backup"}) {
+		t.Fatalf("missing network-create action: %v", plan.Actions)
+	}
+	r.OnPrefix("docker network create cvctl-backup", sys.Result{ExitCode: 0})
+	if _, err := step.Apply(context.Background(), env, plan); err != nil {
+		t.Fatal(err)
+	}
+	if n := countCalls(r, "docker network create cvctl-backup"); n != 1 {
+		t.Fatalf("network create calls = %d, want 1", n)
+	}
+	for _, c := range r.Calls {
+		if c.Name == "docker" && !slices.Contains(c.Env, "DOCKER_CONFIG=/var/lib/cvctl/docker") {
+			t.Fatalf("docker call without DOCKER_CONFIG: %v", c)
+		}
+	}
+	r.OnPrefix("docker network inspect", sys.Result{ExitCode: 0})
+	plan2, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(plan2.Actions, Action{Kind: "network-create", Target: "cvctl-backup"}) {
+		t.Fatal("network should not be recreated")
+	}
+}
+
+func TestStorageCheckIsReadOnlyForBackup(t *testing.T) {
+	env, r, fs := backupEnv(t, "s3", "https://s3.example.com")
+	r.OnPrefix("docker network inspect", sys.Result{ExitCode: 1})
+	if _, err := (StorageStep{}).Check(context.Background(), env); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := env.Secrets.Get("walg_libsodium_key"); ok {
+		t.Fatal("Check generated a key")
+	}
+	if len(fs.Files()) != 0 {
+		t.Fatalf("Check wrote files: %v", fs.Files())
+	}
+	for _, c := range r.Calls {
+		if strings.Contains(c.String(), "network create") {
+			t.Fatal("Check created a network")
+		}
+	}
+}
+
+func TestStorageLocalComposeHasBackupAlias(t *testing.T) {
+	env, r, fs := backupEnv(t, "local", "")
+	r.OnPrefix("docker network", sys.Result{ExitCode: 0})
+	step := StorageStep{PollInterval: time.Millisecond, PollTimeout: 20 * time.Millisecond}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := step.Apply(context.Background(), env, plan); err != nil {
+		t.Fatal(err)
+	}
+	b, err := fs.ReadFile("/etc/cvctl/storage/compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp, err := loader.LoadWithContext(context.Background(), types.ConfigDetails{
+		WorkingDir:  ".",
+		ConfigFiles: []types.ConfigFile{{Filename: "compose.yml", Content: b}},
+		Environment: types.Mapping{},
+	}, func(o *loader.Options) {
+		o.SkipInterpolation = true
+		o.SkipConsistencyCheck = true
+		o.SkipResolveEnvironment = true
+		o.SetProjectName("cvctl-storage", true)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := cp.Services["s3"]
+	if _, ok := svc.Networks["cvctl-storage"]; !ok {
+		t.Fatalf("service lost its own network: %v", svc.Networks)
+	}
+	bn := svc.Networks["cvctl-backup"]
+	if bn == nil || !slices.Contains(bn.Aliases, "cvctl-storage") {
+		t.Fatalf("missing cvctl-backup alias: %+v", svc.Networks)
+	}
+	if !cp.Networks["cvctl-backup"].External {
+		t.Fatal("cvctl-backup must be external")
+	}
+}
+
+func TestStorageInternalEndpointPerMode(t *testing.T) {
+	cases := []struct{ mode, ep, want string }{
+		{"local", "", "http://cvctl-storage:9000"},
+		{"s3", "https://s3.example.com", "https://s3.example.com"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode, func(t *testing.T) {
+			env, r, fs := backupEnv(t, tc.mode, tc.ep)
+			r.OnPrefix("docker network", sys.Result{ExitCode: 0})
+			step := StorageStep{PollInterval: time.Millisecond, PollTimeout: 20 * time.Millisecond}
+			plan, err := step.Check(context.Background(), env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := step.Apply(context.Background(), env, plan); err != nil {
+				t.Fatal(err)
+			}
+			if env.Cfg.S3EndpointInternal != tc.want {
+				t.Fatalf("internal endpoint = %q, want %q", env.Cfg.S3EndpointInternal, tc.want)
+			}
+			cfg, _, err := hostcfg.Load(fs, "/etc/cvctl")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.S3EndpointInternal != tc.want {
+				t.Fatalf("persisted = %q, want %q", cfg.S3EndpointInternal, tc.want)
 			}
 		})
 	}

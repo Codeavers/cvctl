@@ -26,30 +26,32 @@ const envPrefix = "CVCTL_"
 var SecretNames = []string{
 	"telegram_token", "s3_access_key", "s3_secret_key",
 	"route53_access_key", "route53_secret_key", "cloudflare_dns_token", "registry_token",
+	"walg_libsodium_key", "restic_password",
 }
 
 // Config mirrors host.env. vals is the source of truth (it distinguishes
 // "unset" from a zero value); the typed fields are kept in sync by Set.
 type Config struct {
-	HostName       string
-	EdgeMode       string
-	ProxyPort      int
-	AdminUser      string
-	SSHManage      bool
-	FirewallManage bool
-	AcmeEmail      string
-	AcmeChallenge  string
-	Storage        string
-	S3Endpoint     string
-	S3Bucket       string
-	S3Region       string
-	Notify         string
-	TelegramChatID string
-	TelegramThread string
-	Registries     string
-	RegistryUser   string
-	vals           map[string]string
-	extra          map[string]string // host.env entries cvctl does not know; kept verbatim on Save
+	HostName           string
+	EdgeMode           string
+	ProxyPort          int
+	AdminUser          string
+	SSHManage          bool
+	FirewallManage     bool
+	AcmeEmail          string
+	AcmeChallenge      string
+	Storage            string
+	S3Endpoint         string
+	S3Bucket           string
+	S3Region           string
+	S3EndpointInternal string
+	Notify             string
+	TelegramChatID     string
+	TelegramThread     string
+	Registries         string
+	RegistryUser       string
+	vals               map[string]string
+	extra              map[string]string // host.env entries cvctl does not know; kept verbatim on Save
 }
 
 var dnsLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -97,7 +99,7 @@ var validators = map[string]func(string) error{
 
 var knownKeys = []string{
 	"HOST_NAME", "EDGE_MODE", "PROXY_PORT", "ADMIN_USER", "SSH_MANAGE", "FIREWALL_MANAGE",
-	"ACME_EMAIL", "ACME_CHALLENGE", "STORAGE", "S3_ENDPOINT", "S3_BUCKET", "S3_REGION",
+	"ACME_EMAIL", "ACME_CHALLENGE", "STORAGE", "S3_ENDPOINT", "S3_BUCKET", "S3_REGION", "S3_ENDPOINT_INTERNAL",
 	"NOTIFY", "TELEGRAM_CHAT_ID", "TELEGRAM_THREAD_ID", "REGISTRIES", "REGISTRY_USER",
 }
 
@@ -180,6 +182,8 @@ func (c *Config) sync(key, val string) {
 		c.S3Bucket = val
 	case "S3_REGION":
 		c.S3Region = val
+	case "S3_ENDPOINT_INTERNAL":
+		c.S3EndpointInternal = val
 	case "NOTIFY":
 		c.Notify = val
 	case "TELEGRAM_CHAT_ID":
