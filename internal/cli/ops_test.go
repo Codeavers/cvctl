@@ -968,3 +968,18 @@ func TestDBRestoreHasSkipWALFlushFlag(t *testing.T) {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 }
+
+func TestStatusNoBackupWarningWhenLabelSaysNone(t *testing.T) {
+	tmp, env := setupOpsFixture(t, "myapp-dev")
+	compose := strings.Replace(cliValidCompose, "      cvctl.env: DB\n", "      cvctl.env: DB\n      cvctl.backup: none\n", 1)
+	if err := os.WriteFile(filepath.Join(tmp, "myapp-dev", "infra", "compose.yml"), []byte(compose), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+	code, out, errb := run(t, "status", "--json")
+	if code != 0 || strings.Contains(out, "backups are not configured") {
+		t.Fatalf("code=%d out=%s err=%s", code, out, errb)
+	}
+}

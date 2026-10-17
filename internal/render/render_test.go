@@ -442,3 +442,24 @@ func TestBackupPrefixPerGeneration(t *testing.T) {
 		t.Fatal("env prefix")
 	}
 }
+
+func TestLabelBackupNoneOverridesKindDefault(t *testing.T) {
+	p, d, cat := setup(t)
+	for i := range p.Data {
+		if p.Data[i].Name == "main-db" {
+			p.Data[i].Backup = "none"
+		}
+	}
+	out, err := Override(p, d, cat, Options{InstanceDir: "/i", Edge: "edge", Backup: testBackup()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"archive_mode", "archive_command", "/i/backup-main-db.env", "cvctl-backup"} {
+		if strings.Contains(string(out), s) {
+			t.Fatalf("%q rendered for backup: none:\n%s", s, out)
+		}
+	}
+	if envs := BackupEnvs(p, d, cat, Options{Backup: testBackup()}); len(envs) != 0 {
+		t.Fatalf("backup env for backup: none: %v", envs)
+	}
+}

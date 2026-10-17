@@ -78,7 +78,7 @@ func BackupEnvs(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o
 		return out
 	}
 	for _, ds := range p.Data {
-		if d.Services[ds.Name].Mode == "local" && cat[ds.Kind].Backup == "wal-g" {
+		if d.Services[ds.Name].Mode == "local" && ds.Backup == "wal-g" {
 			out[ds.Name] = o.Backup.Env(d.Instance, ds.Name, d.Services[ds.Name].BackupGen)
 		}
 	}
@@ -202,11 +202,12 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 			"networks": []string{"data"},
 			"volumes":  []string{ds.Name + "-data:" + k.VolumePath},
 		}
-		if o.Backup != nil && (k.Backup == "wal-g" || k.Backup == "volume") {
+		// ds.Backup is the cvctl.backup label resolved over the kind default.
+		if o.Backup != nil && (ds.Backup == "wal-g" || ds.Backup == "volume") {
 			svc["networks"] = []string{"data", backupNetwork}
 			usesBackupNet = true
 		}
-		if o.Backup != nil && k.Backup == "wal-g" {
+		if o.Backup != nil && ds.Backup == "wal-g" {
 			dir := o.BackupEnvDir
 			if dir == "" {
 				dir = o.InstanceDir
@@ -218,7 +219,7 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 		}
 		if len(k.Command) > 0 {
 			cmd := k.Command
-			if o.Backup != nil && k.Backup == "wal-g" {
+			if o.Backup != nil && ds.Backup == "wal-g" {
 				cmd = append(slices.Clone(cmd), k.BackupCommandArgs...)
 			}
 			svc["command"] = substituteAll(k, cmd, sd.Creds)

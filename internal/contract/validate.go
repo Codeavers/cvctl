@@ -101,9 +101,21 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 			sort.Strings(names)
 			add("E_CONTRACT_UNKNOWN_KIND", d.Name, fmt.Sprintf("unknown kind %q", d.Kind),
 				"use one of: "+strings.Join(names, ", "))
-		} else if _, err := k.ImageFor(d.Version); err != nil {
-			add("E_CONTRACT_KIND_VERSION", d.Name, fmt.Sprintf("kind %s has no version %q", d.Kind, d.Version),
-				"use one of: "+strings.Join(k.Versions, ", "))
+		} else {
+			if _, err := k.ImageFor(d.Version); err != nil {
+				add("E_CONTRACT_KIND_VERSION", d.Name, fmt.Sprintf("kind %s has no version %q", d.Kind, d.Version),
+					"use one of: "+strings.Join(k.Versions, ", "))
+			}
+			// wal-g runs postgres tools inside the service; a file-level copy
+			// of a live postgres volume is torn.
+			switch {
+			case d.Backup == "wal-g" && k.Backup != "wal-g":
+				add("E_CONTRACT_BACKUP_UNSUPPORTED", d.Name, fmt.Sprintf("kind %s does not support %s wal-g", d.Kind, LabelBackup),
+					fmt.Sprintf("set %s to volume or none for this service", LabelBackup))
+			case d.Backup == "volume" && k.Backup == "wal-g":
+				add("E_CONTRACT_BACKUP_UNSUPPORTED", d.Name, fmt.Sprintf("kind %s cannot be backed up as a volume while it runs", d.Kind),
+					fmt.Sprintf("set %s to wal-g or none for this service", LabelBackup))
+			}
 		}
 		if d.EnvPrefix == "" {
 			add("E_CONTRACT_NO_ENV_PREFIX", d.Name, "data service lacks cvctl.env",
