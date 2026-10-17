@@ -58,10 +58,16 @@ type Hooks struct {
 	PostDeploy []Hook
 }
 
+type Bucket struct {
+	Name   string
+	Public bool
+}
+
 type Ext struct {
 	Health HealthSpec
 	Verify *VerifySpec
 	Hooks  Hooks
+	S3     map[string][]Bucket
 }
 
 type AppService struct {
@@ -78,6 +84,7 @@ type DataService struct {
 	EnvPrefix       string
 	ExternalAllowed bool
 	Backup          string
+	ExposePort      int
 }
 
 type Project struct {
@@ -101,6 +108,23 @@ func (p *Project) HealthPort() int {
 	return 0
 }
 
+func (p *Project) Buckets(service string) []Bucket {
+	if p.X.S3 == nil {
+		return nil
+	}
+	return p.X.S3[service]
+}
+
+func (p *Project) PublicBuckets(service string) []Bucket {
+	var out []Bucket
+	for _, b := range p.Buckets(service) {
+		if b.Public {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
 type rawExt struct {
 	Health struct {
 		Service string `yaml:"service"`
@@ -116,6 +140,11 @@ type rawExt struct {
 		PreDeploy  []rawHook `yaml:"pre-deploy"`
 		PostDeploy []rawHook `yaml:"post-deploy"`
 	} `yaml:"hooks"`
+	S3 map[string]struct {
+		Buckets map[string]struct {
+			Public bool `yaml:"public"`
+		} `yaml:"buckets"`
+	} `yaml:"s3"`
 }
 
 type rawHook struct {
@@ -180,6 +209,22 @@ func Load(dir string, cat kinds.Catalog) (*Project, error) {
 	for _, h := range doc.X.Hooks.PostDeploy {
 		x.Hooks.PostDeploy = append(x.Hooks.PostDeploy, Hook(h))
 	}
+	if len(doc.X.S3) > 0 {
+		x.S3 = make(map[string][]Bucket, len(doc.X.S3))
+		for svcName, s3Data := range doc.X.S3 {
+			var bks []Bucket
+			for bName, bData := range s3Data.Buckets {
+				bks = append(bks, Bucket{
+					Name:   bName,
+					Public: bData.Public,
+				})
+			}
+			sort.Slice(bks, func(i, j int) bool {
+				return bks[i].Name < bks[j].Name
+			})
+			x.S3[svcName] = bks
+		}
+	}
 
 	p := &Project{Dir: dir, Compose: cp, X: x, RawCompose: raw}
 	names := make([]string, 0, len(cp.Services))
@@ -206,6 +251,7 @@ func Load(dir string, cat kinds.Catalog) (*Project, error) {
 			if b := svc.Labels[LabelBackup]; b != "" {
 				d.Backup = b
 			}
+			d.ExposePort, _ = strconv.Atoi(svc.Labels[LabelExpose])
 			p.Data = append(p.Data, d)
 			continue
 		}

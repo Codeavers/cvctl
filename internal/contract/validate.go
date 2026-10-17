@@ -2,6 +2,7 @@ package contract
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -11,6 +12,8 @@ import (
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/kinds"
 )
+
+var bucketNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}$`)
 
 func exposedApp(p *Project, name string) bool {
 	for _, a := range p.Apps {
@@ -35,8 +38,10 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 		isApp[a.Name] = true
 	}
 	isData := map[string]bool{}
+	dataByName := map[string]DataService{}
 	for _, d := range p.Data {
 		isData[d.Name] = true
+		dataByName[d.Name] = d
 	}
 
 	seen := map[string]string{}
@@ -116,10 +121,63 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 				add("E_CONTRACT_BACKUP_UNSUPPORTED", d.Name, fmt.Sprintf("kind %s cannot be backed up as a volume while it runs", d.Kind),
 					fmt.Sprintf("set %s to wal-g or none for this service", LabelBackup))
 			}
+			svc := p.Compose.Services[d.Name]
+			if k.Buckets {
+				if rawExpose, ok := svc.Labels[LabelExpose]; ok {
+					if d.ExposePort != k.Port {
+						add("E_CONTRACT_EXPOSE_DATA", d.Name,
+							fmt.Sprintf("data service %s exposes port %q, but kind %s uses port %d", d.Name, rawExpose, d.Kind, k.Port),
+							fmt.Sprintf("set cvctl.expose to %q", strconv.Itoa(k.Port)))
+					} else if len(p.PublicBuckets(d.Name)) == 0 {
+						add("E_CONTRACT_S3_ROUTE_NO_PUBLIC", d.Name,
+							fmt.Sprintf("exposed bucket service %s has no public buckets", d.Name),
+							"declare at least one public bucket under x-cvctl.s3 or remove cvctl.expose")
+					}
+				} else {
+					if len(p.PublicBuckets(d.Name)) > 0 {
+						add("E_CONTRACT_S3_PUBLIC_NO_ROUTE", d.Name,
+							fmt.Sprintf("service %s declares public buckets but has no cvctl.expose label", d.Name),
+							"add cvctl.expose to the service or remove public: true from its buckets")
+					}
+				}
+			} else {
+				if _, ok := svc.Labels[LabelExpose]; ok {
+					add("E_CONTRACT_EXPOSE_DATA", d.Name,
+						fmt.Sprintf("data service %s (kind %s) does not support cvctl.expose", d.Name, d.Kind),
+						"remove cvctl.expose; only bucket-capable data services can be exposed")
+				}
+			}
 		}
 		if d.EnvPrefix == "" {
 			add("E_CONTRACT_NO_ENV_PREFIX", d.Name, "data service lacks cvctl.env",
 				fmt.Sprintf("add label %s: <PREFIX> for the generated env vars", LabelEnv))
+		}
+	}
+
+	var s3Services []string
+	for svcName := range p.X.S3 {
+		s3Services = append(s3Services, svcName)
+	}
+	sort.Strings(s3Services)
+
+	for _, svcName := range s3Services {
+		ds, isDataSvc := dataByName[svcName]
+		if !isDataSvc {
+			add("E_CONTRACT_S3_NOT_S3", svcName, fmt.Sprintf("service %q in x-cvctl.s3 is not a data service", svcName),
+				"point x-cvctl.s3 at a data service whose kind supports buckets")
+			continue
+		}
+		k, hasKind := cat[ds.Kind]
+		if !hasKind || !k.Buckets {
+			add("E_CONTRACT_S3_NOT_S3", svcName, fmt.Sprintf("service %q has kind %q which does not support buckets", svcName, ds.Kind),
+				"use x-cvctl.s3 only with bucket-capable data services")
+			continue
+		}
+		for _, b := range p.X.S3[svcName] {
+			if !bucketNameRe.MatchString(b.Name) {
+				add("E_CONTRACT_S3_BUCKET_NAME", svcName, fmt.Sprintf("bucket %q name must match ^[a-z][a-z0-9-]{1,30}$", b.Name),
+					"use 2 to 31 lowercase alphanumeric characters or hyphens, starting with a letter")
+			}
 		}
 	}
 
@@ -156,10 +214,6 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 	}
 
 	if spec != nil {
-		dataByName := map[string]DataService{}
-		for _, d := range p.Data {
-			dataByName[d.Name] = d
-		}
 		for name, v := range spec.Vars {
 			switch v.Source {
 			case "service":
@@ -174,8 +228,24 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 					continue // reported as unknown kind / missing prefix
 				}
 				var provided []string
-				for key := range k.Env {
-					provided = append(provided, ds.EnvPrefix+"_"+strings.ToUpper(key))
+				bks := p.Buckets(ds.Name)
+				if len(bks) > 0 {
+					for key := range k.Env {
+						if strings.ToUpper(key) == "BUCKET" {
+							continue
+						}
+						provided = append(provided, ds.EnvPrefix+"_"+strings.ToUpper(key))
+					}
+					for _, b := range bks {
+						provided = append(provided, ds.EnvPrefix+"_BUCKET_"+Normalize(b.Name))
+						if b.Public {
+							provided = append(provided, ds.EnvPrefix+"_PUBLIC_URL_"+Normalize(b.Name))
+						}
+					}
+				} else {
+					for key := range k.Env {
+						provided = append(provided, ds.EnvPrefix+"_"+strings.ToUpper(key))
+					}
 				}
 				slices.Sort(provided)
 				if !slices.Contains(provided, name) {
