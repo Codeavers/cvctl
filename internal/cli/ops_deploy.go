@@ -191,25 +191,26 @@ func newRollbackCmd() *cobra.Command {
 
 			var target *state.Desired
 			if toIndex >= 0 {
-				events, err := e.Store.History(inst, toIndex+1)
+				events, err := e.Store.History(inst, 0)
 				if err != nil {
 					return err
 				}
-				if toIndex >= len(events) {
-					return &output.Error{
-						Code:    "E_ROLLBACK_NO_TARGET",
-						Message: fmt.Sprintf("history index %d out of range (history has %d events)", toIndex, len(events)),
-						Hint:    "check history with cvctl history " + inst,
+				// Only completed deploys/rollbacks are valid targets: other events
+				// carry the desired state of a failed or merely attempted change.
+				var targets []state.Event
+				for _, ev := range events {
+					if (ev.Kind == "deploy" || ev.Kind == "rollback") && ev.Result == string(state.StatusOK) && ev.To != nil {
+						targets = append(targets, ev)
 					}
 				}
-				target = events[toIndex].To
-				if target == nil {
+				if toIndex >= len(targets) {
 					return &output.Error{
-						Code:    "E_ROLLBACK_NO_TARGET",
-						Message: "selected event has no target state to roll back to",
-						Hint:    "check history with cvctl history " + inst,
+						Code:    "E_ROLLBACK_TARGET_INVALID",
+						Message: fmt.Sprintf("--to %d is out of range (%d successful deploys in history)", toIndex, len(targets)),
+						Hint:    "list candidates with cvctl history " + inst + "; index 0 is the newest successful deploy",
 					}
 				}
+				target = targets[toIndex].To
 			}
 
 			if e.Deployer.DeployRoot == "" {

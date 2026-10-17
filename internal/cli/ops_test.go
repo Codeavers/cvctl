@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -848,5 +849,45 @@ func TestStatusZeroInstancesJSON(t *testing.T) {
 	}
 	if !strings.Contains(out, `"instances":[]`) {
 		t.Fatalf("expected JSON to contain '\"instances\":[]', got %s", out)
+	}
+}
+
+func TestRollbackToIndexesOnlySuccessfulDeploys(t *testing.T) {
+	_, env := setupOpsFixture(t, "myapp-dev")
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+
+	a := state.Desired{InfraCommit: "commitAAAAAAA"}
+	b := state.Desired{InfraCommit: "commitBBBBBBB"}
+	bad := state.Desired{InfraCommit: "commitBADBAD"}
+	cur := state.Desired{InfraCommit: "commitCURCUR"}
+	_ = env.Store.Save(&state.State{Instance: "myapp-dev", Status: state.StatusOK, Current: &cur})
+	for i, ev := range []state.Event{
+		{Kind: "deploy", Result: "OK", To: &a},
+		{Kind: "pause", Result: "PAUSED", To: &bad},
+		{Kind: "failed", Result: "FAILED", To: &bad},
+		{Kind: "rollback", Result: "FAILED", To: &bad},
+		{Kind: "deploy", Result: "OK", To: &b},
+	} {
+		ev.ID = fmt.Sprintf("ev-%d", i)
+		ev.At = time.Now()
+		ev.Actor = "cli"
+		if err := env.Store.Append("myapp-dev", ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if code, out, errb := run(t, "rollback", "myapp-dev", "--to", "1", "--json"); code != 0 {
+		t.Fatalf("code %d: out=%s err=%s", code, out, errb)
+	}
+	st, _ := env.Store.Load("myapp-dev")
+	if st.Current.InfraCommit != "commitAAAAAAA" {
+		t.Fatalf("expected rollback to A, got %s", st.Current.InfraCommit)
+	}
+
+	code, out, _ := run(t, "rollback", "myapp-dev", "--to", "2", "--json")
+	if code == 0 || !strings.Contains(out, "E_ROLLBACK_TARGET_INVALID") {
+		t.Fatalf("expected E_ROLLBACK_TARGET_INVALID, code %d out=%s", code, out)
 	}
 }
