@@ -499,3 +499,48 @@ func TestStoreFSErrorsWrappedInStateIO(t *testing.T) {
 		t.Errorf("expected hint 'check permissions on /var/lib/cvctl', got %q", oe.Hint)
 	}
 }
+
+func TestAppendCapsHugeDetail(t *testing.T) {
+	store := NewStore(systest.NewFS(), "/var/lib/cvctl")
+	big := strings.Repeat("x", 100*1024)
+	if err := store.Append("app", Event{ID: "a", Kind: "failed", Detail: big}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := store.Append("app", Event{ID: "b", Kind: "deploy", Result: "OK"}); err != nil {
+		t.Fatalf("second Append: %v", err)
+	}
+	hist, err := store.History("app", 0)
+	if err != nil || len(hist) != 2 {
+		t.Fatalf("History: %v (%d events)", err, len(hist))
+	}
+	d := hist[1].Detail
+	if len(d) > 4096+len("…[truncated]") || !strings.HasSuffix(d, "…[truncated]") {
+		t.Fatalf("detail not capped: len %d", len(d))
+	}
+}
+
+func TestHistoryReadsLongLines(t *testing.T) {
+	fs := systest.NewFS()
+	line := `{"id":"a","kind":"deploy","result":"OK","detail":"` + strings.Repeat("y", 200*1024) + `"}` + "\n"
+	if err := fs.WriteFile("/var/lib/cvctl/app/history.jsonl", []byte(line), 0o640, sys.Owner{}); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(fs, "/var/lib/cvctl")
+	if hist, err := store.History("app", 0); err != nil || len(hist) != 1 {
+		t.Fatalf("History: %v %d", err, len(hist))
+	}
+	if err := store.Append("app", Event{ID: "b", Kind: "deploy"}); err != nil {
+		t.Fatalf("Append over long line: %v", err)
+	}
+}
+
+func TestLastTransientRoundTrip(t *testing.T) {
+	store := NewStore(systest.NewFS(), "/var/lib/cvctl")
+	if err := store.Save(&State{Instance: "app", Status: StatusFailed, LastTransient: "pull timeout"}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Load("app")
+	if err != nil || st.LastTransient != "pull timeout" {
+		t.Fatalf("got %+v %v", st, err)
+	}
+}

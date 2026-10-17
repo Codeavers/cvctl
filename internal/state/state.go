@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/sys"
@@ -67,6 +68,7 @@ type State struct {
 	PausedReason   string    `json:"paused_reason,omitempty"`
 	PausedWantHash string    `json:"paused_want_hash,omitempty"`
 	RollbackFailed bool      `json:"rollback_failed,omitempty"`
+	LastTransient  string    `json:"last_transient,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
@@ -141,7 +143,32 @@ func (s *Store) Save(st *State) error {
 	return s.fs.WriteFile(statePath, data, 0o640, deployOwner)
 }
 
+const (
+	maxDetailBytes   = 4096
+	truncatedMarker  = "…[truncated]"
+	historyLineLimit = 1 << 20
+)
+
+func newHistoryScanner(data []byte) *bufio.Scanner {
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	sc.Buffer(make([]byte, 0, 64*1024), historyLineLimit)
+	return sc
+}
+
+func capDetail(d string) string {
+	if len(d) <= maxDetailBytes {
+		return d
+	}
+	cut := maxDetailBytes
+	// do not split a multi-byte rune
+	for cut > 0 && !utf8.RuneStart(d[cut]) {
+		cut--
+	}
+	return d[:cut] + truncatedMarker
+}
+
 func (s *Store) Append(inst string, ev Event) error {
+	ev.Detail = capDetail(ev.Detail)
 	instDir := filepath.Join(s.root, inst)
 	if err := s.fs.MkdirAll(instDir, 0o750, deployOwner); err != nil {
 		return err
@@ -153,7 +180,7 @@ func (s *Store) Append(inst string, ev Event) error {
 		return err
 	}
 	if err == nil && len(data) > 0 {
-		sc := bufio.NewScanner(bytes.NewReader(data))
+		sc := newHistoryScanner(data)
 		for sc.Scan() {
 			line := strings.TrimSpace(sc.Text())
 			if line != "" {
@@ -196,7 +223,7 @@ func (s *Store) History(inst string, n int) ([]Event, error) {
 		}
 	}
 	var lines []string
-	sc := bufio.NewScanner(bytes.NewReader(data))
+	sc := newHistoryScanner(data)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line != "" {
