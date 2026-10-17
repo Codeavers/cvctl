@@ -44,15 +44,14 @@ jobs:
           } >> "$GITHUB_ENV"
           docker run -d --name ext-s3 --restart unless-stopped -p 9000:9000 \
             -e MINIO_ROOT_USER="$S3_ACCESS" -e MINIO_ROOT_PASSWORD="$S3_SECRET" \
-            minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+            pgsty/silo:RELEASE.2026-09-16T00-00-00Z server /data
           for _ in $(seq 1 30); do
             curl -sf "http://$S3_IP:9000/minio/health/ready" && break
             sleep 2
           done
           curl -sf "http://$S3_IP:9000/minio/health/ready"
-          docker run --rm --network host --entrypoint sh \
-            -e MC_HOST_ext="http://$S3_ACCESS:$S3_SECRET@$S3_IP:9000" \
-            minio/mc:RELEASE.2025-04-16T18-13-26Z -c "mc mb --ignore-existing ext/cvctl-e2e"
+          docker exec -e MC_HOST_ext="http://$S3_ACCESS:$S3_SECRET@127.0.0.1:9000" \
+            ext-s3 mc mb --ignore-existing ext/cvctl-e2e
 
       - name: Configure /etc/cvctl
         run: |

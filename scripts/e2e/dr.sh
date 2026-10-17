@@ -38,9 +38,8 @@ for v in "$WALG_KEY" "$RESTIC_PW" "$PASSPHRASE" "$S3_SECRET"; do
 done
 
 mcx() {
-  docker run --rm --network host --entrypoint mc \
-    -e MC_HOST_ext="http://${S3_ACCESS}:${S3_SECRET}@${S3_IP}:9000" \
-    minio/mc:RELEASE.2025-04-16T18-13-26Z "$@"
+  # the silo image ships mc; the external S3 runs it against itself
+  docker exec -e MC_HOST_ext="http://${S3_ACCESS}:${S3_SECRET}@127.0.0.1:9000" ext-s3 mc "$@"
 }
 dbc() {
   docker ps --filter "label=com.docker.compose.project=${INST}" --filter "label=com.docker.compose.service=db" --filter status=running --format '{{.Names}}' | head -n1
