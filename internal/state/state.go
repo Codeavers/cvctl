@@ -62,6 +62,7 @@ type State struct {
 	Current        *Desired  `json:"current,omitempty"`
 	Previous       *Desired  `json:"previous,omitempty"`
 	FailedHash     string    `json:"failed_hash,omitempty"`
+	Detail         string    `json:"detail,omitempty"`
 	Blocked        []string  `json:"blocked,omitempty"`
 	PausedReason   string    `json:"paused_reason,omitempty"`
 	PausedWantHash string    `json:"paused_want_hash,omitempty"`

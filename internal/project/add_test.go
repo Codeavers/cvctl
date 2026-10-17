@@ -7,14 +7,17 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/codeavers/cvctl/internal/contract"
+	"github.com/codeavers/cvctl/internal/deploy"
 	"github.com/codeavers/cvctl/internal/gitrepo"
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/hostcfg/hostcfgtest"
 	"github.com/codeavers/cvctl/internal/output"
+	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/internal/sys/systest"
 	"github.com/codeavers/cvctl/kinds"
@@ -75,6 +78,9 @@ func (s *stubRepo) Show(_ context.Context, _, path string) ([]byte, error) {
 	}
 	if d, ok := s.showData[path]; ok {
 		return d, nil
+	}
+	if s.infraSource != "" {
+		return os.ReadFile(filepath.Join(s.infraSource, path))
 	}
 	return nil, os.ErrNotExist
 }
@@ -1463,4 +1469,68 @@ func (r *recordParentRepo) Clone(ctx context.Context, url, branch string) error 
 		r.cloneHook()
 	}
 	return r.stubRepo.Clone(ctx, url, branch)
+}
+
+func TestProjectAddInitialStateSavedBeforeDeploy(t *testing.T) {
+	tmp := t.TempDir()
+	fsys := systest.NewFS()
+	cat := testCatalog(t)
+
+	infraSrc := filepath.Join(tmp, "source-infra")
+	writeTestInfra(t, infraSrc, validCompose, validSpec)
+
+	stateRoot := filepath.Join(tmp, "var-lib-cvctl")
+	store := state.NewStore(fsys, stateRoot)
+
+	// Deployer with nil Compose / Health will fail in Deploy immediately with E_DEPLOY_MISCONFIGURED
+	brokenDeployer := &deploy.Deployer{
+		DeployRoot: tmp,
+		StateRoot:  stateRoot,
+		FS:         fsys,
+		Store:      store,
+		// Compose and Health nil -> deploy fails
+	}
+
+	e := &Env{
+		FS:          fsys,
+		DeployRoot:  tmp,
+		StateRoot:   stateRoot,
+		Interactive: false,
+		Catalog:     cat,
+		Deployer:    brokenDeployer,
+		RepoFactory: func(dir, _ string) RepoLike {
+			return &stubRepo{dir: dir, infraSource: infraSrc, fs: fsys}
+		},
+	}
+
+	_, err := Add(context.Background(), e, "git@github.com:codeavers/infra.git", AddOptions{
+		Project: "demo",
+		Env:     "dev",
+	})
+	if err == nil {
+		t.Fatal("expected deploy error, got nil")
+	}
+
+	// Verify state.json exists and has initial values
+	st, err := store.Load("demo-dev")
+	if err != nil {
+		t.Fatalf("failed to load state: %v", err)
+	}
+	if st.Status != state.StatusFailed {
+		t.Errorf("expected status FAILED, got %s", st.Status)
+	}
+	if st.Detail != "initial deploy pending" {
+		t.Errorf("expected detail 'initial deploy pending', got %q", st.Detail)
+	}
+	if st.FailedHash != "" {
+		t.Errorf("expected empty FailedHash, got %q", st.FailedHash)
+	}
+
+	instances, err := store.Instances()
+	if err != nil {
+		t.Fatalf("failed to list instances: %v", err)
+	}
+	if !slices.Contains(instances, "demo-dev") {
+		t.Errorf("expected store.Instances() to contain demo-dev, got %v", instances)
+	}
 }

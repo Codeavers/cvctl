@@ -506,7 +506,7 @@ func runDeploy(ctx context.Context, e *Env, repo RepoLike, d *instance.Decisions
 		deps.Resolver = e.Resolver
 	}
 	src := deploy.SourceFor(d, deps)
-	desired, err := src.Desired(ctx, d, p)
+	desired, err := src.Desired(ctx, d)
 	if err != nil {
 		return deploy.Result{}, err
 	}
@@ -755,6 +755,20 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	if err := e.fs().WriteFile(appEnvPath, instance.FormatEnv(appEnvValues), 0o640, deployOwner); err != nil {
 		cleanupInst()
 		return nil, err
+	}
+
+	if e.Deployer != nil && e.Deployer.Store != nil {
+		// Persisted before the first deploy so the agent adopts the instance
+		// even when that deploy fails before Deploy saves any state.
+		if err := e.Deployer.Store.Save(&state.State{
+			Instance:  inst,
+			Status:    state.StatusFailed,
+			Detail:    "initial deploy pending",
+			UpdatedAt: time.Now(),
+		}); err != nil {
+			cleanupInst()
+			return nil, err
+		}
 	}
 
 	deployRes, err := runDeploy(ctx, e, repo, d, p, "cli:project-add")

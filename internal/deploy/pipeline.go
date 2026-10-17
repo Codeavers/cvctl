@@ -70,22 +70,22 @@ type Result struct {
 
 // Deployer coordinates instance deployment, promotion, health checks, and rollback.
 type Deployer struct {
-	DeployRoot     string
-	StateRoot      string
-	TraefikDir     string
-	FS             sys.FS
-	Store          *state.Store
-	Compose        func(inst, override, envFile string) ComposeAPI
-	Repo           func(inst string) CheckoutAPI
-	Notify         notify.Notifier
-	Restore        RestorePointer
-	Host           *hostcfg.Config
-	Catalog        kinds.Catalog
-	Clock          func() time.Time
-	Health         func(ctx context.Context, inst, override string) error
+	DeployRoot string
+	StateRoot  string
+	TraefikDir string
+	FS         sys.FS
+	Store      *state.Store
+	Compose    func(inst, override, envFile string) ComposeAPI
+	Repo       func(inst string) CheckoutAPI
+	Notify     notify.Notifier
+	Restore    RestorePointer
+	Host       *hostcfg.Config
+	Catalog    kinds.Catalog
+	Clock      func() time.Time
+	Health     func(ctx context.Context, inst, override string) error
 	// Allowed lists permitted image registries. Nil disables the post-checkout
 	// image check; Wire sets it (non-nil) from the host configuration.
-	Allowed []string
+	Allowed        []string
 	RenderOverride func(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o render.Options) ([]byte, error)
 	RenderTraefik  func(p *contract.Project, d *instance.Decisions, o render.Options) ([]byte, error)
 }
