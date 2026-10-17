@@ -88,7 +88,7 @@ cat << 'EOF' >> /tmp/infra-work/env.spec.yml
 EOF
 git -C /tmp/infra-work add env.spec.yml
 git -C /tmp/infra-work commit -m "add prompt var NEWVAR"
-git -C /tmp/infra-work push origin develop
+git -C /tmp/infra-work push /tmp/infra.git develop
 
 cvctl agent --once --json || true
 test "$(jqs '.status')" = "BLOCKED"
