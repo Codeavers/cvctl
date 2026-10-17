@@ -43,6 +43,7 @@ func (e *OpsEnv) backupRunner() *backup.Runner {
 		FS:         e.fs(),
 		Compose:    func(inst string) *compose.Project { return d.ComposeProject(run, inst) },
 		Load:       backup.LoadInstance(e.deployRoot(), e.Catalog),
+		Catalog:    e.Catalog,
 		Host:       deploy.BackupTargetFrom(e.Host, e.Secrets),
 		Store:      e.Store,
 		Notify:     notifierFor(e.Host, e.Secrets),
@@ -58,7 +59,7 @@ func newBackupCmd() *cobra.Command {
 		Example: `  cvctl backup now myapp-prod
   cvctl backup list myapp-prod`,
 	}
-	cmd.AddCommand(newBackupNowCmd(), newBackupRunCmd(), newBackupListCmd())
+	cmd.AddCommand(newBackupNowCmd(), newBackupRunCmd(), newBackupListCmd(), newBackupVerifyCmd())
 	return cmd
 }
 
@@ -197,6 +198,59 @@ func newBackupListCmd() *cobra.Command {
 				}
 				tw.Flush()
 			})
+			return nil
+		},
+	}
+}
+
+func newBackupVerifyCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "verify [instance]",
+		Short: "Restore the latest backups into throwaway containers and check them",
+		Example: `  cvctl backup verify
+  cvctl backup verify myapp-prod --json`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			e, err := backupEnv(cmd)
+			if err != nil {
+				return err
+			}
+			var insts []string
+			if len(args) == 1 {
+				if err := e.checkInstance(args[0]); err != nil {
+					return err
+				}
+				insts = args
+			} else if insts, err = e.Store.Instances(); err != nil {
+				return err
+			}
+			r := e.backupRunner()
+			var all []backup.Result
+			var warnings []string
+			failed := 0
+			for _, inst := range insts {
+				results, err := r.Verify(cmd.Context(), inst, "")
+				all = append(all, results...)
+				if isStatusWrite(err) {
+					warnings = append(warnings, err.Error())
+				} else if err != nil {
+					failed++
+					if len(results) == 0 {
+						all = append(all, backup.Result{Instance: inst, Error: err.Error()})
+					}
+				}
+			}
+			if failed > 0 {
+				return &output.DataError{
+					Err: &output.Error{
+						Code:    "E_VERIFY_FAILED",
+						Message: fmt.Sprintf("restore verification failed for %d instance(s)", failed),
+						Hint:    "see the per-service errors with cvctl backup verify --json",
+					},
+					Data: backupResultsReport{Results: all, Warnings: warnings},
+				}
+			}
+			printBackupResults(cmd, all, warnings)
 			return nil
 		},
 	}

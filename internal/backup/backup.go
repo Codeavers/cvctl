@@ -120,6 +120,7 @@ type Runner struct {
 	Clock      func() time.Time
 	DeployRoot string
 	HostName   string
+	Catalog    kinds.Catalog
 	// Lock retry: deploys hold the instance lock for minutes, so a status
 	// write waits for them instead of losing the record.
 	LockInterval time.Duration
