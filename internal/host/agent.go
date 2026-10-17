@@ -14,6 +14,16 @@ import (
 	"github.com/codeavers/cvctl/internal/sys"
 )
 
+// agentSandboxDirectives is shared with the backup units so they run with the
+// same privileges and filesystem view as the agent.
+const agentSandboxDirectives = `NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/srv/deploy /var/lib/cvctl /etc/traefik/dynamic
+PrivateTmp=yes
+SupplementaryGroups=docker
+Environment=DOCKER_CONFIG=/var/lib/cvctl/docker
+`
+
 const (
 	agentBinaryPath  = "/usr/local/bin/cvctl"
 	agentServicePath = "/etc/systemd/system/cvctl-agent.service"
@@ -27,13 +37,7 @@ Group=deploy
 ExecStart=/usr/local/bin/cvctl agent
 Restart=always
 RestartSec=10
-NoNewPrivileges=yes
-ProtectSystem=strict
-ReadWritePaths=/srv/deploy /var/lib/cvctl /etc/traefik/dynamic
-PrivateTmp=yes
-SupplementaryGroups=docker
-Environment=DOCKER_CONFIG=/var/lib/cvctl/docker
-TimeoutStopSec=300
+` + agentSandboxDirectives + `TimeoutStopSec=300
 
 [Install]
 WantedBy=multi-user.target
