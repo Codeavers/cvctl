@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/codeavers/cvctl/internal/backup"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1484,6 +1485,34 @@ func TestProdCreatesRestorePoint(t *testing.T) {
 	expectedPrefix := "demo-prod:deploy-"
 	if !strings.HasPrefix(rig.restore.calls[0], expectedPrefix) {
 		t.Fatalf("expected restore call with prefix %s, got %s", expectedPrefix, rig.restore.calls[0])
+	}
+}
+
+func TestProdFreshInstanceSkipsRestorePointWithHistoryNote(t *testing.T) {
+	rig := setupTestRig(t, "prod", "demo-prod")
+	rig.restore.fail = backup.ErrFreshInstance
+	res, err := rig.deployer.Deploy(context.Background(), "demo-prod", defaultDesired(), Options{Actor: "agent"})
+	if err != nil || res.Status != state.StatusOK {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	hist, _ := rig.deployer.Store.History("demo-prod", 10)
+	found := false
+	for _, ev := range hist {
+		if ev.Kind == "restore_point" && ev.Result == "skipped" && ev.Detail == "no restore point: fresh instance" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("history: %+v", hist)
+	}
+}
+
+func TestProdExistingInstanceRestorePointFailureStaysTransient(t *testing.T) {
+	rig := setupTestRig(t, "prod", "demo-prod")
+	rig.restore.fail = errors.New("container not running")
+	res, _ := rig.deployer.Deploy(context.Background(), "demo-prod", defaultDesired(), Options{Actor: "agent"})
+	if res.Status == state.StatusOK || !strings.Contains(res.Detail, "restore point failed") {
+		t.Fatalf("res=%+v", res)
 	}
 }
 

@@ -26,6 +26,7 @@ type fakeData struct {
 	restoreErr   error
 	pushErr      error
 	afterRestore func()
+	removeErr    error
 }
 
 func (f *fakeData) RestoreFresh(_ context.Context, inst, svc string, _ *contract.Project, _ *instance.Decisions, volume string) error {
@@ -41,7 +42,7 @@ func (f *fakeData) RestoreFresh(_ context.Context, inst, svc string, _ *contract
 
 func (f *fakeData) RemoveVolume(_ context.Context, volume string) error {
 	*f.log = append(*f.log, "rm "+volume)
-	return nil
+	return f.removeErr
 }
 
 func (f *fakeData) BaseBackup(_ context.Context, _, svc string) error {
@@ -395,6 +396,7 @@ func TestStorableInfraURL(t *testing.T) {
 		{"https://github.com/org/repo.git", "https://github.com/org/repo.git", false},
 		{"https://github.com/org/a@b.git", "https://github.com/org/a@b.git", false},
 		{"ssh://git@github.com/org/repo.git", "ssh://git@github.com/org/repo.git", false},
+		{"ssh://git:hunter2@github.com/org/repo.git", "ssh://git@github.com/org/repo.git", true},
 		{"git@github.com:org/repo.git", "git@github.com:org/repo.git", false},
 	} {
 		got, stripped := storableInfraURL(tc.in)
@@ -444,5 +446,102 @@ func TestAddStripsCredentialsFromStoredURL(t *testing.T) {
 	}
 	if len(res.Warnings) != 1 || strings.Contains(res.Warnings[0], "ghp_SECRET") {
 		t.Fatalf("warnings: %v", res.Warnings)
+	}
+}
+
+func TestRepoURLErrorRedactsUppercaseSchemeCredentials(t *testing.T) {
+	err := validateRepoURL("HTTPS://tok-SECRET@github.com/org/repo.git")
+	if err == nil || strings.Contains(err.Error(), "tok-SECRET") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// failWrites fails state writes (and, once armed, cvctl.env writes) to drive the
+// failure after the generation write.
+type failWrites struct {
+	sys.FS
+	armed *bool
+}
+
+func (f failWrites) WriteFile(path string, data []byte, mode os.FileMode, o sys.Owner) error {
+	if strings.HasSuffix(path, "state.json") {
+		*f.armed = true
+		return errors.New("state disk full")
+	}
+	if *f.armed && strings.HasSuffix(path, "cvctl.env") {
+		return errors.New("env disk full")
+	}
+	return f.FS.WriteFile(path, data, mode, o)
+}
+
+func failStateSave(rig *restoreRig, revertAlsoFails bool) {
+	armed := false
+	osfs := sys.NewOSFS()
+	rig.env.Deployer.Store = state.NewStore(failWrites{FS: osfs, armed: &armed}, rig.env.StateRoot)
+	if revertAlsoFails {
+		rig.env.FS = failWrites{FS: osfs, armed: &armed}
+	} else {
+		never := false
+		rig.env.FS = failWrites{FS: osfs, armed: &never}
+	}
+}
+
+func TestRestoreFailureAfterGenerationWriteRevertsCvctlEnv(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	failStateSave(rig, false)
+	_, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	raw, _ := os.ReadFile(filepath.Join(rig.instDir, "cvctl.env"))
+	if string(raw) != restoreEnvBase {
+		t.Fatalf("cvctl.env must be back to the original:\n%s", raw)
+	}
+	if !strings.Contains(err.Error(), "backup generations in cvctl.env") || !strings.Contains(err.Error(), "volume demo-dev_db-data") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRestoreRevertFailureNamesTheKeys(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	failStateSave(rig, true)
+	_, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	for _, w := range []string{
+		"could not revert backup generations in cvctl.env",
+		"set CVCTL_SVC_DB_BACKUP_GEN back to 2",
+		"CVCTL_SVC_DB_BACKUP_GEN_MAX back to 3",
+	} {
+		if !strings.Contains(err.Error(), w) {
+			t.Fatalf("err %q lacks %q", err, w)
+		}
+	}
+	if strings.Contains(err.Error(), "existingpass") {
+		t.Fatalf("secret in error: %v", err)
+	}
+}
+
+func TestRestoreReportsWhatCouldNotBeRemoved(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	failStateSave(rig, false)
+	rig.data.removeErr = errors.New("volume in use")
+	_, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	if err == nil || !strings.Contains(err.Error(), "not removed: volume demo-dev_db-data") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRestoreDeployErrorReportsFailedStatusAndHint(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	rig.env.Deployer.Health = func(context.Context, string, string) error { return errors.New("unhealthy") }
+	res, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	if err == nil || res == nil || res.Deploy.Status == "" {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) || !strings.Contains(oe.Hint, "cvctl backup now demo-dev <service> for each wal-g service") {
+		t.Fatalf("err=%v", err)
 	}
 }

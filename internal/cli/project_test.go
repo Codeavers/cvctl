@@ -4,6 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/codeavers/cvctl/internal/contract"
+	"github.com/codeavers/cvctl/internal/deploy"
+	"github.com/codeavers/cvctl/internal/instance"
+	"github.com/codeavers/cvctl/internal/state"
+	"github.com/codeavers/cvctl/internal/sys/systest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -427,5 +432,117 @@ func TestProjectRestoreCLIRefusesLocalStorage(t *testing.T) {
 	code, out, _ := run(t, "project", "restore", "demo-dev", "--json")
 	if code != 1 || !strings.Contains(out, "E_RESTORE_LOCAL_STORAGE") {
 		t.Fatalf("code=%d out=%s", code, out)
+	}
+}
+
+type cliFakeData struct{}
+
+func (cliFakeData) RestoreFresh(context.Context, string, string, *contract.Project, *instance.Decisions, string) error {
+	return nil
+}
+func (cliFakeData) RemoveVolume(context.Context, string) error { return nil }
+func (cliFakeData) BaseBackup(context.Context, string, string) error {
+	return nil
+}
+
+type cliNoopCompose struct{}
+
+func (cliNoopCompose) Config(context.Context) error           { return nil }
+func (cliNoopCompose) Pull(context.Context, ...string) error  { return nil }
+func (cliNoopCompose) UpData(context.Context, []string) error { return nil }
+func (cliNoopCompose) RunHook(context.Context, string, string) (sys.Result, error) {
+	return sys.Result{}, nil
+}
+func (cliNoopCompose) Up(context.Context) error                          { return nil }
+func (cliNoopCompose) Logs(context.Context, string, int) (string, error) { return "", nil }
+
+func setupRestoreDeployFailure(t *testing.T) {
+	t.Helper()
+	tmp := t.TempDir()
+	instDir := filepath.Join(tmp, "demo-dev")
+	if err := os.MkdirAll(instDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	envBody := "CVCTL_INSTANCE=demo-dev\nCVCTL_ENV=dev\nCVCTL_INFRA_BRANCH=develop\nCVCTL_TRACK_TAG=develop\nCVCTL_INFRA_PATH=.\nCVCTL_STRATEGY=recreate\n" +
+		"CVCTL_INFRA_URL=git@github.com:org/demo-infra.git\nCVCTL_SVC_DB_MODE=local\nCVCTL_SVC_DB_VERSION=16\nCVCTL_SVC_DB_USER=db\n" +
+		"CVCTL_SVC_DB_PASSWORD=existingpass123456789012345678\nCVCTL_SVC_DB_DB=db\nCVCTL_DOMAIN_WEB=web.example.com\n"
+	if err := os.WriteFile(filepath.Join(instDir, "cvctl.env"), []byte(envBody), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmp, "traefik"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origin := filepath.Join(tmp, "origin")
+	writeCLIInfra(t, origin)
+	fl := systest.NewFakeLocker()
+	oldLock := sys.LockFile
+	t.Cleanup(func() { sys.LockFile = oldLock })
+	sys.LockFile = fl.LockFile
+
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	osfs := sys.NewOSFS()
+	stateRoot := filepath.Join(tmp, "state")
+	deployer := &deploy.Deployer{
+		DeployRoot: tmp,
+		TraefikDir: filepath.Join(tmp, "traefik"),
+		StateRoot:  stateRoot,
+		FS:         osfs,
+		Store:      state.NewStore(osfs, stateRoot),
+		Catalog:    cat,
+		Compose:    func(_, _, _ string) deploy.ComposeAPI { return cliNoopCompose{} },
+		Health:     func(context.Context, string, string) error { return errors.New("unhealthy") },
+	}
+	oldEnv := newProjectEnv
+	t.Cleanup(func() { newProjectEnv = oldEnv })
+	newProjectEnv = func(projectOpts) (*project.Env, error) {
+		return &project.Env{
+			FS:         osfs,
+			DeployRoot: tmp,
+			StateRoot:  stateRoot,
+			Catalog:    cat,
+			Host:       &hostcfg.Config{Registries: "ghcr.io/codeavers", Storage: "s3"},
+			Deployer:   deployer,
+			Data:       cliFakeData{},
+			Resolver:   &opsFakeResolver{},
+			RepoFactory: func(dir, _ string) project.RepoLike {
+				return &cliStubRepo{dir: dir, infraSource: origin}
+			},
+		}, nil
+	}
+}
+
+func TestProjectRestoreCLIDeployFailureListsVolumes(t *testing.T) {
+	setupRestoreDeployFailure(t)
+	code, out, errb := run(t, "project", "restore", "demo-dev")
+	if code != 1 || !strings.Contains(out, "restored volume: demo-dev_db-data") {
+		t.Fatalf("code=%d out=%s err=%s", code, out, errb)
+	}
+	if strings.Contains(out, "demo-dev: \n") {
+		t.Fatalf("empty status printed: %q", out)
+	}
+	if !strings.Contains(errb+out, "cvctl project update demo-dev") {
+		t.Fatalf("hint missing: out=%s err=%s", out, errb)
+	}
+}
+
+func TestProjectRestoreCLIDeployFailureJSONIncludesVolumes(t *testing.T) {
+	setupRestoreDeployFailure(t)
+	code, out, _ := run(t, "project", "restore", "demo-dev", "--json")
+	var env struct {
+		OK    bool `json:"ok"`
+		Error struct{ Code, Hint string }
+		Data  struct {
+			Volumes []string `json:"volumes"`
+			Status  string   `json:"status"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("json: %v (%s)", err, out)
+	}
+	if code != 1 || env.OK || len(env.Data.Volumes) != 1 || env.Data.Volumes[0] != "demo-dev_db-data" || env.Data.Status == "" {
+		t.Fatalf("code=%d env=%+v out=%s", code, env, out)
 	}
 }

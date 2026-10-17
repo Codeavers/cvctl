@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/codeavers/cvctl/internal/backup"
 	"io/fs"
 	"path/filepath"
 	"slices"
@@ -752,7 +753,15 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 
 	// Step 5: If prod, create restore point
 	if dec.Env == "prod" {
-		if err := d.restore().Create(ctx, inst, deployID); err != nil {
+		if err := d.restore().Create(ctx, inst, deployID); errors.Is(err, backup.ErrFreshInstance) {
+			if aerr := d.Store.Append(inst, state.Event{
+				ID: deployID, At: now, Kind: "restore_point", Result: "skipped",
+				Detail: "no restore point: fresh instance", Actor: actor,
+			}); aerr != nil {
+				d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+				return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("recording the skipped restore point failed: %v", aerr), secrets)
+			}
+		} else if err != nil {
 			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 			return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("restore point failed: %v", err), secrets)
 		}

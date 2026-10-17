@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -44,20 +45,56 @@ type RestoreResult struct {
 	Warnings []string      `json:"warnings,omitempty"`
 }
 
-// withCleanup tells the operator what a failed run undid, so a re-run starts
-// from a known state.
-func withCleanup(err error, cleaned []string) error {
-	var oe *output.Error
-	if len(cleaned) == 0 || !errors.As(err, &oe) {
+// cleanupReport tells what a failed run undid and what it could not undo, so a
+// re-run starts from a known state. Key names only: values may be secrets.
+type cleanupReport struct {
+	cleaned, notRemoved []string
+	manual              string
+}
+
+func (c cleanupReport) apply(err error) error {
+	if len(c.cleaned) == 0 && len(c.notRemoved) == 0 && c.manual == "" {
 		return err
 	}
-	c := *oe
-	c.Message += "; cleaned up: " + strings.Join(cleaned, ", ")
-	return &c
+	var oe *output.Error
+	var out output.Error
+	if errors.As(err, &oe) {
+		out = *oe
+	} else {
+		out = output.Error{Code: "E_RESTORE_FAILED", Message: err.Error(), Hint: "fix the cause and re-run cvctl project restore"}
+	}
+	if len(c.cleaned) > 0 {
+		out.Message += "; cleaned up: " + strings.Join(c.cleaned, ", ")
+	}
+	if len(c.notRemoved) > 0 {
+		out.Message += "; not removed: " + strings.Join(c.notRemoved, ", ")
+	}
+	if c.manual != "" {
+		out.Message += "; " + c.manual
+	}
+	return &out
+}
+
+// revertHint names the cvctl.env keys to set back by hand when the revert write fails.
+func revertHint(updates, orig map[string]string) string {
+	keys := make([]string, 0, len(updates))
+	for k := range updates {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var parts []string
+	for _, k := range keys {
+		if v, ok := orig[k]; ok {
+			parts = append(parts, fmt.Sprintf("set %s back to %s", k, v))
+		} else {
+			parts = append(parts, fmt.Sprintf("remove %s", k))
+		}
+	}
+	return "could not revert backup generations in cvctl.env; " + strings.Join(parts, " and ") + " by hand"
 }
 
 func deployFailedErr(err error, detail, inst string, vols []string) error {
-	hint := fmt.Sprintf("data restored into %s; fix the cause and run cvctl project update %s", strings.Join(vols, ", "), inst)
+	hint := fmt.Sprintf("data restored into %s; fix the cause, run cvctl project update %s, then cvctl backup now %s <service> for each wal-g service", strings.Join(vols, ", "), inst, inst)
 	var oe *output.Error
 	if err != nil && errors.As(err, &oe) {
 		return &output.Error{Code: oe.Code, Message: oe.Message, Hint: hint}
@@ -154,23 +191,32 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 	res := &RestoreResult{Instance: inst}
 	var created []string
 	cloned, envWritten := false, false
+	var genUpdates map[string]string
 	fail := func(err error) (*RestoreResult, error) {
 		cctx := context.WithoutCancel(ctx)
-		var cleaned []string
+		var rep cleanupReport
 		if envWritten {
 			if werr := e.fs().WriteFile(cvctlEnvPath, origEnv, 0o640, deployOwner); werr == nil {
-				cleaned = append(cleaned, "backup generations in cvctl.env")
+				rep.cleaned = append(rep.cleaned, "backup generations in cvctl.env")
+			} else {
+				rep.manual = revertHint(genUpdates, rawEnv)
 			}
 		}
 		for _, v := range created {
 			if rerr := e.Data.RemoveVolume(cctx, v); rerr == nil {
-				cleaned = append(cleaned, "volume "+v)
+				rep.cleaned = append(rep.cleaned, "volume "+v)
+			} else {
+				rep.notRemoved = append(rep.notRemoved, "volume "+v)
 			}
 		}
-		if cloned && removeAll(e.fs(), infraDir) == nil {
-			cleaned = append(cleaned, infraDir)
+		if cloned {
+			if removeAll(e.fs(), infraDir) == nil {
+				rep.cleaned = append(rep.cleaned, infraDir)
+			} else {
+				rep.notRemoved = append(rep.notRemoved, infraDir)
+			}
 		}
-		return nil, withCleanup(err, cleaned)
+		return nil, rep.apply(err)
 	}
 
 	repo := e.repo(infraDir, keyPath)
@@ -206,6 +252,7 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 	// rendered backup env point there, never at the generation restored from.
 	var walg []string
 	updates := map[string]string{}
+	genUpdates = updates
 	for _, t := range targets {
 		if t.Strategy != backup.StrategyWalG {
 			continue
@@ -247,6 +294,7 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 	}
 	res.Deploy, err = runDeploy(ctx, e, repo, d, "cli:project-restore", true)
 	if err != nil {
+		res.Deploy.Status = state.StatusFailed
 		return res, deployFailedErr(err, "", inst, res.Volumes)
 	}
 	if res.Deploy.Status != state.StatusOK {
@@ -266,8 +314,21 @@ func fileExists(fsys sys.FS, p string) bool {
 }
 
 // storableInfraURL drops userinfo from http(s) URLs, which would otherwise put
-// a token into cvctl.env; ssh user names are not secrets and stay.
+// a token into cvctl.env, and drops an ssh password; ssh user names are not
+// secrets and stay.
 func storableInfraURL(raw string) (string, bool) {
+	if rest, ok := strings.CutPrefix(raw, "ssh://"); ok {
+		authority := rest
+		if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+			authority = rest[:i]
+		}
+		if at := strings.LastIndex(authority, "@"); at >= 0 {
+			if user, _, hasPass := strings.Cut(authority[:at], ":"); hasPass {
+				return "ssh://" + user + rest[at:], true
+			}
+		}
+		return raw, false
+	}
 	for _, pre := range []string{"https://", "http://"} {
 		rest, ok := strings.CutPrefix(raw, pre)
 		if !ok {

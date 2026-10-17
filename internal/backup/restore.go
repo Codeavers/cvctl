@@ -241,9 +241,9 @@ func (r *Runner) stopApps(ctx context.Context, inst string, p *contract.Project)
 	return err
 }
 
-func (r *Runner) pgQuery(ctx context.Context, inst, svc string, c kinds.Credentials, sql string) (string, error) {
+func (r *Runner) pgQuery(ctx context.Context, inst, svc, db string, c kinds.Credentials, sql string) (string, error) {
 	res, err := r.exec(ctx, r.Compose(inst).Cmd("exec", "-T", "-u", "postgres", svc,
-		"psql", "-U", c.User, "-d", c.DB, "-v", "ON_ERROR_STOP=1", "-tA", "-c", sql))
+		"psql", "-U", c.User, "-d", db, "-v", "ON_ERROR_STOP=1", "-tA", "-c", sql))
 	if err != nil {
 		return "", err
 	}
@@ -252,17 +252,40 @@ func (r *Runner) pgQuery(ctx context.Context, inst, svc string, c kinds.Credenti
 
 var walFileName = regexp.MustCompile(`^[0-9A-F]{24}$`)
 
+const codeWALFlush = "E_RESTORE_WAL_FLUSH"
+
+func walFlushErr(cause error) error {
+	return &output.Error{
+		Code:    codeWALFlush,
+		Message: "the data service is running but its WAL could not be flushed: " + cause.Error(),
+		Hint:    "the cluster is running but WAL could not be flushed; fix it or re-run with --skip-wal-flush (WAL not yet archived stays in the kept old volume)",
+	}
+}
+
 // flushWAL switches the WAL segment and waits until the archiver has shipped
 // it, so the recovery of "latest" does not lose the last seconds of writes.
 // The -1 keeps the answer correct when no switch was needed: the returned
-// location is then the start of the current (empty) segment. When the running
-// cluster cannot be queried at all (it is the reason for the restore) the
-// flush is skipped and a warning returned: restore must work on a dead
-// cluster. An archiver that lags is still a hard stop.
-func (r *Runner) flushWAL(ctx context.Context, inst, svc string, c kinds.Credentials, oldVolume string) (string, error) {
-	want, err := r.pgQuery(ctx, inst, svc, c, "select pg_walfile_name(pg_switch_wal() - 1)")
+// location is then the start of the current (empty) segment. A data container
+// that is not running (it is often the reason for the restore) or an explicit
+// skip yields a warning instead of a flush. A running cluster that cannot be
+// flushed is a hard stop, never a silent skip: that would hide data loss.
+// Queries use the postgres database because the application database may be
+// the broken part.
+func (r *Runner) flushWAL(ctx context.Context, inst, svc string, c kinds.Credentials, oldVolume string, skip bool) (string, error) {
+	skipped := r.redact(fmt.Sprintf("could not flush WAL from the running cluster; WAL not yet archived stays in the kept old volume %s", oldVolume))
+	if skip {
+		return skipped, nil
+	}
+	_, running, err := serviceState(ctx, r.Compose(inst), svc)
 	if err != nil {
-		return r.redact(fmt.Sprintf("could not flush WAL from the running cluster; WAL not yet archived stays in the kept old volume %s", oldVolume)), nil
+		return "", walFlushErr(err)
+	}
+	if !running {
+		return skipped, nil
+	}
+	want, err := r.pgQuery(ctx, inst, svc, "postgres", c, "select pg_walfile_name(pg_switch_wal() - 1)")
+	if err != nil {
+		return "", walFlushErr(err)
 	}
 	if !walFileName.MatchString(want) {
 		return "", restoreFailedErr("E_RESTORE_ARCHIVE_LAG", fmt.Sprintf("unexpected WAL file name %q from postgres", want), "check that the data service is healthy and retry")
@@ -273,9 +296,9 @@ func (r *Runner) flushWAL(ctx context.Context, inst, svc string, c kinds.Credent
 	}
 	var waited time.Duration
 	for {
-		got, err := r.pgQuery(ctx, inst, svc, c, "select coalesce(last_archived_wal, '') from pg_stat_archiver")
+		got, err := r.pgQuery(ctx, inst, svc, "postgres", c, "select coalesce(last_archived_wal, '') from pg_stat_archiver")
 		if err != nil {
-			return "", err
+			return "", walFlushErr(err)
 		}
 		// .backup, .history and .partial names also land here; only a plain
 		// segment proves the WAL up to want is archived
@@ -304,7 +327,7 @@ func (r *Runner) verifyServing(ctx context.Context, inst, svc string, strategy s
 	if _, err := r.exec(ctx, proj.Cmd("exec", "-T", "-u", "postgres", svc, "pg_isready", "-U", c.User, "-d", c.DB)); err != nil {
 		return err
 	}
-	out, err := r.pgQuery(ctx, inst, svc, c, "select 1")
+	out, err := r.pgQuery(ctx, inst, svc, c.DB, c, "select 1")
 	if err != nil {
 		return err
 	}
@@ -319,6 +342,18 @@ func (r *Runner) verifyServing(ctx context.Context, inst, svc string, strategy s
 // services were stopped. It never deletes a volume. The instance lock is held
 // throughout so the agent cannot deploy mid-restore.
 func (r *Runner) Restore(ctx context.Context, inst, svc, to string) (*RestoreResult, error) {
+	return r.RestoreWith(ctx, inst, svc, to, RestoreOptions{})
+}
+
+// RestoreOptions tunes a restore.
+type RestoreOptions struct {
+	// SkipWALFlush restores without flushing the running cluster's WAL first;
+	// the WAL not yet archived stays in the kept old volume.
+	SkipWALFlush bool
+}
+
+// RestoreWith is Restore with options.
+func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts RestoreOptions) (*RestoreResult, error) {
 	if r.Host == nil {
 		return nil, notConfigured()
 	}
@@ -414,11 +449,10 @@ func (r *Runner) Restore(ctx context.Context, inst, svc, to string) (*RestoreRes
 	if err := r.stopApps(ctx, inst, p); err != nil {
 		return nil, r.rollbackRestore(ctx, restoreRun{inst: inst, svc: svc, res: res, st: st, tgt: tgt}, err)
 	}
+	flushWarn := ""
 	if target.Strategy == StrategyWalG {
-		warn, err := r.flushWAL(ctx, inst, svc, sd.Creds, res.PreviousVolume)
-		if warn != "" {
-			res.Warnings = append(res.Warnings, warn)
-		}
+		warn, err := r.flushWAL(ctx, inst, svc, sd.Creds, res.PreviousVolume, opts.SkipWALFlush)
+		flushWarn = warn
 		if err != nil {
 			rctx := context.WithoutCancel(ctx)
 			msg := r.redact(fmt.Sprintf("restore of %s in %s aborted: %s", svc, inst, err.Error()))
@@ -430,7 +464,7 @@ func (r *Runner) Restore(ctx context.Context, inst, svc, to string) (*RestoreRes
 			}
 			code, hint := "E_RESTORE_FAILED", "check the data service and retry"
 			var oe *output.Error
-			if errors.As(err, &oe) && oe.Code == "E_RESTORE_ARCHIVE_LAG" {
+			if errors.As(err, &oe) && (oe.Code == "E_RESTORE_ARCHIVE_LAG" || oe.Code == codeWALFlush) {
 				code, hint = oe.Code, oe.Hint
 			}
 			if aerr := r.Store.Append(inst, state.Event{
@@ -481,6 +515,9 @@ func (r *Runner) Restore(ctx context.Context, inst, svc, to string) (*RestoreRes
 		return nil, r.rollbackRestore(ctx, run, runErr)
 	}
 
+	if flushWarn != "" {
+		res.Warnings = append(res.Warnings, flushWarn)
+	}
 	if target.Strategy == StrategyWalG {
 		// a base backup in the new generation makes it restorable on its own
 		if _, err := r.exec(ctx, r.Compose(inst).Cmd("exec", "-T", "-u", "postgres", svc, "wal-g", "backup-push", pgData)); err != nil {
@@ -492,7 +529,11 @@ func (r *Runner) Restore(ctx context.Context, inst, svc, to string) (*RestoreRes
 	if r.Notify != nil {
 		_ = r.Notify.Send(ctx, notify.Message{Host: r.HostName, Level: "info", Title: fmt.Sprintf("%s restore of %s done", inst, svc), Text: text})
 		for _, w := range res.Warnings {
-			_ = r.Notify.Send(ctx, notify.Message{Host: r.HostName, Level: "warn", Title: fmt.Sprintf("%s restore of %s: backup needed", inst, svc), Text: w})
+			title := fmt.Sprintf("%s restore of %s: backup needed", inst, svc)
+			if w == flushWarn {
+				title = fmt.Sprintf("%s/%s: WAL flush skipped during restore", inst, svc)
+			}
+			_ = r.Notify.Send(ctx, notify.Message{Host: r.HostName, Level: "warn", Title: title, Text: w})
 		}
 	}
 	if err := r.Store.Append(inst, state.Event{

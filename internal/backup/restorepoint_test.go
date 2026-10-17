@@ -2,6 +2,7 @@ package backup_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -11,14 +12,17 @@ import (
 	"github.com/codeavers/cvctl/internal/sys"
 )
 
+const psAll = "docker compose -p app-prod --env-file /srv/deploy/app-prod/app.env -f /srv/deploy/app-prod/infra/compose.yml -f /srv/deploy/app-prod/compose.cvctl.yml ps -a --format json"
+
 func TestRestorePointCommands(t *testing.T) {
 	g := newRig(t)
 	g.okAll()
+	g.run.On(psAll, sys.Result{Stdout: []byte(`[{"Service":"db","State":"running"}]`)})
 	rp := &backup.RestorePoint{Compose: g.r.Compose, Load: g.r.Load}
 	if err := rp.Create(context.Background(), "app-prod", "deploy-1700000000"); err != nil {
 		t.Fatal(err)
 	}
-	c := g.calls()
+	c := g.calls()[1:]
 	if len(c) != 2 {
 		t.Fatalf("calls: %v", c)
 	}
@@ -61,9 +65,24 @@ func TestRestorePointNoWalgTargetsIsNoop(t *testing.T) {
 func TestRestorePointFailureIsCoded(t *testing.T) {
 	g := newRig(t)
 	g.run.OnPrefix("docker", sys.Result{ExitCode: 1, Stderr: []byte("no")})
+	g.run.On(psAll, sys.Result{Stdout: []byte(`[{"Service":"db","State":"exited"}]`)})
 	rp := &backup.RestorePoint{Compose: g.r.Compose, Load: g.r.Load}
 	err := rp.Create(context.Background(), "app-prod", "deploy-5")
 	if err == nil || !strings.Contains(err.Error(), "E_RESTORE_POINT_FAILED") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRestorePointNeverCreatedContainerIsFreshInstance(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+	g.run.On(psAll, sys.Result{Stdout: []byte(`[]`)})
+	rp := &backup.RestorePoint{Compose: g.r.Compose, Load: g.r.Load}
+	err := rp.Create(context.Background(), "app-prod", "deploy-5")
+	if !errors.Is(err, backup.ErrFreshInstance) {
+		t.Fatalf("err=%v", err)
+	}
+	if len(g.calls()) != 1 {
+		t.Fatalf("only the state probe may run: %v", g.calls())
 	}
 }

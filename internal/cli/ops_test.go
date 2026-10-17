@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/codeavers/cvctl/internal/backup"
 	"github.com/codeavers/cvctl/internal/deploy"
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/instance"
@@ -944,6 +945,25 @@ func TestStatusBackupNotConfiguredWarning(t *testing.T) {
 func TestDBRestoreRequiresTo(t *testing.T) {
 	var stdout, stderr strings.Builder
 	code := Execute(NewRoot("test"), []string{"db", "restore", "app-prod", "db"}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "--to is required") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestDBRestoreHumanOutputPrintsWarnings(t *testing.T) {
+	var b strings.Builder
+	writeDBRestoreHuman(&b, &backup.RestoreResult{
+		Instance: "app-prod", Service: "db", Target: "latest", Volume: "v2", PreviousVolume: "v1",
+		Warnings: []string{"could not flush WAL from the running cluster; WAL not yet archived stays in the kept old volume v1"},
+	})
+	if !strings.Contains(b.String(), "warning: could not flush WAL from the running cluster") {
+		t.Fatalf("output: %s", b.String())
+	}
+}
+
+func TestDBRestoreHasSkipWALFlushFlag(t *testing.T) {
+	var stdout, stderr strings.Builder
+	code := Execute(NewRoot("test"), []string{"db", "restore", "app-prod", "db", "--skip-wal-flush"}, &stdout, &stderr)
 	if code != 2 || !strings.Contains(stderr.String(), "--to is required") {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}

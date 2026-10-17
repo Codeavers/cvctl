@@ -21,11 +21,17 @@ const (
 // EUID is the function used to query the effective user ID, injectable for testing.
 var EUID = os.Geteuid
 
-var urlCredsRe = regexp.MustCompile(`(https?://)(?:[^@/\s]+@)`)
+var (
+	urlCredsRe = regexp.MustCompile(`(?i)(https?://)(?:[^@/\s]+@)`)
+	// ssh user names are not secrets; only a password is masked
+	sshPassRe = regexp.MustCompile(`(?i)(ssh://[^:@/\s]+):[^@/\s]*@`)
+)
 
-// RedactURL masks user:password credentials in HTTP/HTTPS URLs.
+// RedactURL masks credentials in HTTP/HTTPS URLs and passwords in ssh:// URLs,
+// whatever the case of the scheme.
 func RedactURL(s string) string {
-	return urlCredsRe.ReplaceAllString(s, "${1}***@")
+	s = urlCredsRe.ReplaceAllString(s, "${1}***@")
+	return sshPassRe.ReplaceAllString(s, "${1}:***@")
 }
 
 // Repo provides git operations against a repository checkout using an optional deploy key.

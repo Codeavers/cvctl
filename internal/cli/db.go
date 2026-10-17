@@ -27,8 +27,17 @@ func newDBCmd() *cobra.Command {
 	return cmd
 }
 
+func writeDBRestoreHuman(w io.Writer, res *backup.RestoreResult) {
+	fmt.Fprintf(w, "restored %s of %s to %s\nnew volume: %s\nprevious volume (kept): %s\n",
+		res.Service, res.Instance, res.Target, res.Volume, res.PreviousVolume)
+	for _, warn := range res.Warnings {
+		fmt.Fprintf(w, "warning: %s\n", warn)
+	}
+}
+
 func newDBRestoreCmd() *cobra.Command {
 	var to string
+	var skipFlush bool
 	cmd := &cobra.Command{
 		Use:   "restore <instance> <service>",
 		Short: "Restore a data service into a new volume and switch to it",
@@ -61,12 +70,9 @@ backups.`,
 			if err := e.checkInstance(args[0]); err != nil {
 				return err
 			}
-			res, err := e.backupRunner().Restore(cmd.Context(), args[0], args[1], to)
+			res, err := e.backupRunner().RestoreWith(cmd.Context(), args[0], args[1], to, backup.RestoreOptions{SkipWALFlush: skipFlush})
 			if res != nil && err == nil {
-				printerFrom(cmd).Result(res, func(w io.Writer) {
-					fmt.Fprintf(w, "restored %s of %s to %s\nnew volume: %s\nprevious volume (kept): %s\n",
-						res.Service, res.Instance, res.Target, res.Volume, res.PreviousVolume)
-				})
+				printerFrom(cmd).Result(res, func(w io.Writer) { writeDBRestoreHuman(w, res) })
 				return nil
 			}
 			if res != nil {
@@ -75,6 +81,7 @@ backups.`,
 			return err
 		},
 	}
+	cmd.Flags().BoolVar(&skipFlush, "skip-wal-flush", false, "do not flush the running cluster's WAL first (WAL not yet archived stays in the kept old volume)")
 	cmd.Flags().StringVar(&to, "to", "", "restore target: latest, RFC3339 timestamp, deploy-<id> or snapshot id")
 	return cmd
 }

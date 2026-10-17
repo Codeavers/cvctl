@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/codeavers/cvctl/internal/backup"
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/output"
@@ -57,8 +58,10 @@ func newRestoreRig(t *testing.T) *restoreRig {
 	}
 	g.r.Sleep = func(time.Duration) {}
 	pq := cp + "exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c "
-	g.run.OnPrefix(pq+"select pg_walfile_name", sys.Result{Stdout: []byte("000000010000000000000005\n")})
-	g.run.OnPrefix(pq+"select coalesce", sys.Result{Stdout: []byte("000000010000000000000005\n")})
+	pg := cp + "exec -T -u postgres db psql -U app -d postgres -v ON_ERROR_STOP=1 -tA -c "
+	g.run.On(cpBase+" ps -a --format json", sys.Result{Stdout: []byte(`[{"Service":"db","State":"running"}]`)})
+	g.run.OnPrefix(pg+"select pg_walfile_name", sys.Result{Stdout: []byte("000000010000000000000005\n")})
+	g.run.OnPrefix(pg+"select coalesce", sys.Result{Stdout: []byte("000000010000000000000005\n")})
 	g.run.OnPrefix(pq+"select 1", sys.Result{Stdout: []byte("1\n")})
 	g.run.On("docker volume inspect "+newVol, sys.Result{ExitCode: 1})
 	g.run.On("docker inspect -f {{.State.Running}} "+recName, sys.Result{Stdout: []byte("true\n")})
@@ -461,7 +464,7 @@ func TestRestoreRollsBackWhenDataServiceDoesNotServe(t *testing.T) {
 func TestRestoreArchiveLagAbortsWithoutTouchingVolumesOrDecisions(t *testing.T) {
 	g := newRestoreRig(t)
 	g.r.ArchiveTimeout = 10 * time.Second
-	g.run.OnPrefix(cp+"exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select coalesce", sys.Result{Stdout: []byte("000000010000000000000004\n")})
+	g.run.OnPrefix(cp+"exec -T -u postgres db psql -U app -d postgres -v ON_ERROR_STOP=1 -tA -c select coalesce", sys.Result{Stdout: []byte("000000010000000000000004\n")})
 	before, _ := g.fs.ReadFile(envPath)
 	_, err := g.r.Restore(context.Background(), "app-prod", "db", "latest")
 	var oe *output.Error
@@ -502,31 +505,58 @@ func TestVerifyScriptHasNoPersistedRecoverySettings(t *testing.T) {
 	}
 }
 
-func TestRestoreDeadClusterSkipsFlushWithWarning(t *testing.T) {
+func TestRestoreNotRunningClusterSkipsFlushWithWarning(t *testing.T) {
+	for name, ps := range map[string]string{"exited": `[{"Service":"db","State":"exited"}]`, "never created": `[]`} {
+		g := newRestoreRig(t)
+		g.run.On(cpBase+" ps -a --format json", sys.Result{Stdout: []byte(ps)})
+		res, err := g.r.Restore(context.Background(), "app-prod", "db", "latest")
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		found := false
+		for _, w := range res.Warnings {
+			if strings.Contains(w, "could not flush WAL from the running cluster") && strings.Contains(w, "app-prod_db-data") {
+				found = true
+			}
+		}
+		if !found || g.has(cp+"exec -T -u postgres db psql -U app -d postgres") != 0 {
+			t.Fatalf("%s: warnings=%v calls=%v", name, res.Warnings, g.calls())
+		}
+		if len(g.note.msgs) != 2 || g.note.msgs[1].Level != "warn" || !strings.Contains(g.note.msgs[1].Title, "WAL flush skipped during restore") || strings.Contains(g.note.msgs[1].Title, "backup needed") {
+			t.Fatalf("%s: notify: %+v", name, g.note.msgs)
+		}
+	}
+}
+
+func TestRestoreRunningClusterFlushFailureIsHardStop(t *testing.T) {
 	g := newRestoreRig(t)
-	g.run.OnPrefix(cp+"exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select pg_walfile_name", sys.Result{ExitCode: 1, Stderr: []byte("service db is not running")})
-	res, err := g.r.Restore(context.Background(), "app-prod", "db", "latest")
+	g.run.OnPrefix(cp+"exec -T -u postgres db psql -U app -d postgres -v ON_ERROR_STOP=1 -tA -c select pg_walfile_name", sys.Result{ExitCode: 1, Stderr: []byte("FATAL: the database system is starting up")})
+	_, err := g.r.Restore(context.Background(), "app-prod", "db", "latest")
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_RESTORE_WAL_FLUSH" || !strings.Contains(oe.Hint, "--skip-wal-flush") {
+		t.Fatalf("err=%v", err)
+	}
+	if g.has("docker volume create") != 0 || g.applies != 0 {
+		t.Fatalf("nothing may change: %v", g.calls())
+	}
+}
+
+func TestRestoreSkipWALFlushFlag(t *testing.T) {
+	g := newRestoreRig(t)
+	g.run.OnPrefix(cp+"exec -T -u postgres db psql -U app -d postgres", sys.Result{ExitCode: 1, Stderr: []byte("broken")})
+	res, err := g.r.RestoreWith(context.Background(), "app-prod", "db", "latest", backup.RestoreOptions{SkipWALFlush: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
-	for _, w := range res.Warnings {
-		if strings.Contains(w, "could not flush WAL from the running cluster") && strings.Contains(w, "app-prod_db-data") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("warnings: %v", res.Warnings)
-	}
-	if res.Volume != newVol {
-		t.Fatalf("res: %+v", res)
+	if g.has(cp+"exec -T -u postgres db psql -U app -d postgres") != 0 || len(res.Warnings) == 0 || !strings.Contains(res.Warnings[0], "could not flush WAL") {
+		t.Fatalf("warnings=%v calls=%v", res.Warnings, g.calls())
 	}
 }
 
 func TestRestoreArchiveLagRecordsHistory(t *testing.T) {
 	g := newRestoreRig(t)
 	g.r.ArchiveTimeout = 10 * time.Second
-	g.run.OnPrefix(cp+"exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select coalesce", sys.Result{Stdout: []byte("000000010000000000000004\n")})
+	g.run.OnPrefix(cp+"exec -T -u postgres db psql -U app -d postgres -v ON_ERROR_STOP=1 -tA -c select coalesce", sys.Result{Stdout: []byte("000000010000000000000004\n")})
 	if _, err := g.r.Restore(context.Background(), "app-prod", "db", "latest"); err == nil {
 		t.Fatal("expected lag error")
 	}
@@ -539,7 +569,7 @@ func TestRestoreArchiveLagRecordsHistory(t *testing.T) {
 func TestRestorePollIgnoresNonSegmentArchiveNames(t *testing.T) {
 	g := newRestoreRig(t)
 	g.r.ArchiveTimeout = 10 * time.Second
-	g.run.OnPrefix(cp+"exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select coalesce", sys.Result{Stdout: []byte("00000001000000000000000A.00000028.backup\n")})
+	g.run.OnPrefix(cp+"exec -T -u postgres db psql -U app -d postgres -v ON_ERROR_STOP=1 -tA -c select coalesce", sys.Result{Stdout: []byte("00000001000000000000000A.00000028.backup\n")})
 	_, err := g.r.Restore(context.Background(), "app-prod", "db", "latest")
 	var oe *output.Error
 	if !errors.As(err, &oe) || oe.Code != "E_RESTORE_ARCHIVE_LAG" {

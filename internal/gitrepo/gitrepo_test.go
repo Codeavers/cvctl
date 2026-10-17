@@ -755,3 +755,18 @@ func TestGitFailedRedactsEmbeddedHttpsCredentials(t *testing.T) {
 		t.Errorf("expected redacted https URL in message, got: %s", oe.Message)
 	}
 }
+
+func TestRedactURLCaseInsensitiveAndSSHPassword(t *testing.T) {
+	for in, want := range map[string]string{
+		"HTTPS://tok@github.com/o/r.git": "HTTPS://***@github.com/o/r.git",
+		"Http://u:p@host/r":              "Http://***@host/r",
+		"SSH://git:secret@host/o/r.git":  "SSH://git:***@host/o/r.git",
+		"ssh://git@host/o/r.git":         "ssh://git@host/o/r.git",
+		"git@github.com:o/r.git":         "git@github.com:o/r.git",
+		"https://github.com/o/r.git":     "https://github.com/o/r.git",
+	} {
+		if got := gitrepo.RedactURL(in); got != want {
+			t.Errorf("%s: got %s want %s", in, got, want)
+		}
+	}
+}
