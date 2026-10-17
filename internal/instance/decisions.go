@@ -116,9 +116,9 @@ func Read(path string, p *contract.Project) (*Decisions, error) {
 			case rest == "VOLUME":
 				sd.Volume = v
 			case rest == "BACKUP_GEN":
-				sd.BackupGen = atoiNonNeg(v)
+				sd.BackupGen = AtoiNonNeg(v)
 			case rest == "BACKUP_GEN_MAX":
-				sd.BackupGenMax = atoiNonNeg(v)
+				sd.BackupGenMax = AtoiNonNeg(v)
 			case rest == "USER":
 				sd.Creds.User = v
 			case rest == "PASSWORD":
@@ -142,7 +142,8 @@ func Read(path string, p *contract.Project) (*Decisions, error) {
 	return d, nil
 }
 
-func atoiNonNeg(v string) int {
+// AtoiNonNeg parses a non-negative integer; anything else is 0.
+func AtoiNonNeg(v string) int {
 	n, err := strconv.Atoi(v)
 	if err != nil || n < 0 {
 		return 0

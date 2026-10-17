@@ -156,3 +156,13 @@ func TestVerifyResticEmptyFails(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestVerifyContainerDisablesArchiving(t *testing.T) {
+	g := verifyRig(t, "")
+	if _, err := g.r.Verify(context.Background(), "app-prod", "db"); err != nil {
+		t.Fatal(err)
+	}
+	if run := g.calls()[1]; !strings.Contains(run, "archive_mode=off") {
+		t.Fatalf("verify script must disable archiving:\n%s", run)
+	}
+}

@@ -35,7 +35,7 @@ chown postgres:postgres "$PGDATA"
 chmod 700 "$PGDATA"
 gosu postgres wal-g backup-fetch "$PGDATA" LATEST
 gosu postgres touch "$PGDATA/recovery.signal"
-exec gosu postgres postgres -c listen_addresses= -c "restore_command=wal-g wal-fetch %f %p" -c recovery_target_action=promote
+exec gosu postgres postgres -c listen_addresses= -c archive_mode=off -c "restore_command=wal-g wal-fetch %f %p" -c recovery_target_action=promote
 `
 
 const resticVerifyScript = `set -e

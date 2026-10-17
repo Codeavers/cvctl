@@ -54,7 +54,7 @@ chown postgres:postgres "$PGDATA"
 chmod 700 "$PGDATA"
 gosu postgres wal-g backup-fetch "$PGDATA" "$RESTORE_BACKUP"
 gosu postgres touch "$PGDATA/recovery.signal"
-set -- -c listen_addresses= -c "restore_command=wal-g wal-fetch %f %p" -c recovery_target_action=promote
+set -- -c listen_addresses= -c archive_mode=off -c "restore_command=wal-g wal-fetch %f %p" -c recovery_target_action=promote
 if [ -n "$RESTORE_TARGET_TIME" ]; then
   set -- "$@" -c recovery_target_inclusive=true -c "recovery_target_time=$RESTORE_TARGET_TIME"
 fi
@@ -137,7 +137,7 @@ func restoreFailedErr(code, msg, hint string) *output.Error {
 	return &output.Error{Code: code, Message: msg, Hint: hint}
 }
 
-func (r *Runner) pickBackup(ctx context.Context, inst string, t Target, tgt restoreTarget) (string, error) {
+func (r *Runner) pickBackup(ctx context.Context, inst string, t Target, gen int, tgt restoreTarget) (string, error) {
 	bound, ok := tgt.boundTime()
 	if !ok {
 		return "LATEST", nil
@@ -159,7 +159,7 @@ func (r *Runner) pickBackup(ctx context.Context, inst string, t Target, tgt rest
 	if best == "" {
 		return "", restoreFailedErr("E_RESTORE_NO_BACKUP",
 			fmt.Sprintf("no base backup of %s finished before %s", t.Service, bound.Format(time.RFC3339)),
-			"pick a later target or check cvctl backup list")
+			fmt.Sprintf("pick a later target or check cvctl backup list; the target may predate the current backup generation (gen %d): older generations live under <prefix>/g<k> with k < %d and can be restored manually with wal-g", gen, gen))
 	}
 	return best, nil
 }
@@ -255,14 +255,17 @@ var walFileName = regexp.MustCompile(`^[0-9A-F]{24}$`)
 // flushWAL switches the WAL segment and waits until the archiver has shipped
 // it, so the recovery of "latest" does not lose the last seconds of writes.
 // The -1 keeps the answer correct when no switch was needed: the returned
-// location is then the start of the current (empty) segment.
-func (r *Runner) flushWAL(ctx context.Context, inst, svc string, c kinds.Credentials) error {
+// location is then the start of the current (empty) segment. When the running
+// cluster cannot be queried at all (it is the reason for the restore) the
+// flush is skipped and a warning returned: restore must work on a dead
+// cluster. An archiver that lags is still a hard stop.
+func (r *Runner) flushWAL(ctx context.Context, inst, svc string, c kinds.Credentials, oldVolume string) (string, error) {
 	want, err := r.pgQuery(ctx, inst, svc, c, "select pg_walfile_name(pg_switch_wal() - 1)")
 	if err != nil {
-		return err
+		return r.redact(fmt.Sprintf("could not flush WAL from the running cluster; WAL not yet archived stays in the kept old volume %s", oldVolume)), nil
 	}
 	if !walFileName.MatchString(want) {
-		return restoreFailedErr("E_RESTORE_ARCHIVE_LAG", fmt.Sprintf("unexpected WAL file name %q from postgres", want), "check that the data service is healthy and retry")
+		return "", restoreFailedErr("E_RESTORE_ARCHIVE_LAG", fmt.Sprintf("unexpected WAL file name %q from postgres", want), "check that the data service is healthy and retry")
 	}
 	timeout := r.ArchiveTimeout
 	if timeout <= 0 {
@@ -272,13 +275,15 @@ func (r *Runner) flushWAL(ctx context.Context, inst, svc string, c kinds.Credent
 	for {
 		got, err := r.pgQuery(ctx, inst, svc, c, "select coalesce(last_archived_wal, '') from pg_stat_archiver")
 		if err != nil {
-			return err
+			return "", err
 		}
-		if len(got) >= 24 && got[:24] >= want {
-			return nil
+		// .backup, .history and .partial names also land here; only a plain
+		// segment proves the WAL up to want is archived
+		if walFileName.MatchString(got) && got >= want {
+			return "", nil
 		}
 		if waited >= timeout {
-			return restoreFailedErr("E_RESTORE_ARCHIVE_LAG",
+			return "", restoreFailedErr("E_RESTORE_ARCHIVE_LAG",
 				fmt.Sprintf("WAL segment %s was not archived within %s", want, timeout),
 				"check archive_command, the storage endpoint and cvctl backup list; nothing was changed, retry later")
 		}
@@ -307,14 +312,6 @@ func (r *Runner) verifyServing(ctx context.Context, inst, svc string, strategy s
 		return restoreFailedErr("E_RESTORE_FAILED", fmt.Sprintf("restored postgres answered %q to select 1", out), "inspect the kept volume")
 	}
 	return nil
-}
-
-func atoi(s string) int {
-	n, err := strconv.Atoi(s)
-	if err != nil || n < 0 {
-		return 0
-	}
-	return n
 }
 
 // Restore recovers a data service into a NEW volume, switches the instance to
@@ -382,7 +379,7 @@ func (r *Runner) Restore(ctx context.Context, inst, svc, to string) (*RestoreRes
 	volKey, genKey, maxKey := envKey(svc, "VOLUME"), envKey(svc, "BACKUP_GEN"), envKey(svc, "BACKUP_GEN_MAX")
 	prevVol, hadVol := raw[volKey]
 	prevGen, hadGen := raw[genKey]
-	newMax := max(atoi(raw[maxKey]), atoi(prevGen)) + 1
+	newMax := max(instance.AtoiNonNeg(raw[maxKey]), instance.AtoiNonNeg(prevGen)) + 1
 	res := &RestoreResult{
 		Instance: inst, Service: svc, Target: to,
 		PreviousVolume: render.VolumeName(d, svc),
@@ -407,7 +404,7 @@ func (r *Runner) Restore(ctx context.Context, inst, svc, to string) (*RestoreRes
 	var backupName string
 	if target.Strategy == StrategyWalG {
 		// listing needs the running data container, so it precedes the stop
-		if backupName, err = r.pickBackup(ctx, inst, *target, tgt); err != nil {
+		if backupName, err = r.pickBackup(ctx, inst, *target, d.Services[svc].BackupGen, tgt); err != nil {
 			return nil, err
 		}
 	}
@@ -418,7 +415,11 @@ func (r *Runner) Restore(ctx context.Context, inst, svc, to string) (*RestoreRes
 		return nil, r.rollbackRestore(ctx, restoreRun{inst: inst, svc: svc, res: res, st: st, tgt: tgt}, err)
 	}
 	if target.Strategy == StrategyWalG {
-		if err := r.flushWAL(ctx, inst, svc, sd.Creds); err != nil {
+		warn, err := r.flushWAL(ctx, inst, svc, sd.Creds, res.PreviousVolume)
+		if warn != "" {
+			res.Warnings = append(res.Warnings, warn)
+		}
+		if err != nil {
 			rctx := context.WithoutCancel(ctx)
 			msg := r.redact(fmt.Sprintf("restore of %s in %s aborted: %s", svc, inst, err.Error()))
 			if _, upErr := r.exec(rctx, r.Compose(inst).Cmd("up", "-d")); upErr != nil {
@@ -431,6 +432,12 @@ func (r *Runner) Restore(ctx context.Context, inst, svc, to string) (*RestoreRes
 			var oe *output.Error
 			if errors.As(err, &oe) && oe.Code == "E_RESTORE_ARCHIVE_LAG" {
 				code, hint = oe.Code, oe.Hint
+			}
+			if aerr := r.Store.Append(inst, state.Event{
+				At: now, ID: fmt.Sprintf("restore-%d", now.Unix()), Kind: "restore", From: st.Current, To: st.Current,
+				Result: "restore_failed", Detail: code + ": " + msg, Actor: "cli",
+			}); aerr != nil {
+				return nil, errors.Join(&output.Error{Code: code, Message: msg, Hint: hint}, aerr)
 			}
 			return nil, &output.Error{Code: code, Message: msg, Hint: hint}
 		}

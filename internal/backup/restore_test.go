@@ -249,7 +249,7 @@ func TestRestoreTimestampWithoutEarlierBackupFailsBeforeStopping(t *testing.T) {
 	g.run.OnPrefix("docker compose -p app-prod", sys.Result{Stdout: []byte(`[{"backup_name":"base_0000000100000000000000C3","time":"2026-01-02T01:00:00Z"}]`)})
 	_, err := g.r.Restore(context.Background(), "app-prod", "db", "2026-01-01T12:00:00Z")
 	var oe *output.Error
-	if !errors.As(err, &oe) || oe.Code != "E_RESTORE_NO_BACKUP" {
+	if !errors.As(err, &oe) || oe.Code != "E_RESTORE_NO_BACKUP" || !strings.Contains(oe.Hint, "older generations") {
 		t.Fatalf("err=%v", err)
 	}
 	if g.has(cp+"stop") != 0 || g.applies != 0 {
@@ -499,5 +499,60 @@ func TestVerifyScriptHasNoPersistedRecoverySettings(t *testing.T) {
 	run := g.calls()[1]
 	if strings.Contains(run, "postgresql.auto.conf") || !strings.Contains(run, `-c "restore_command=wal-g wal-fetch %f %p"`) || !strings.Contains(run, "-c recovery_target_action=promote") {
 		t.Fatalf("run:\n%s", run)
+	}
+}
+
+func TestRestoreDeadClusterSkipsFlushWithWarning(t *testing.T) {
+	g := newRestoreRig(t)
+	g.run.OnPrefix(cp+"exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select pg_walfile_name", sys.Result{ExitCode: 1, Stderr: []byte("service db is not running")})
+	res, err := g.r.Restore(context.Background(), "app-prod", "db", "latest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "could not flush WAL from the running cluster") && strings.Contains(w, "app-prod_db-data") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("warnings: %v", res.Warnings)
+	}
+	if res.Volume != newVol {
+		t.Fatalf("res: %+v", res)
+	}
+}
+
+func TestRestoreArchiveLagRecordsHistory(t *testing.T) {
+	g := newRestoreRig(t)
+	g.r.ArchiveTimeout = 10 * time.Second
+	g.run.OnPrefix(cp+"exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select coalesce", sys.Result{Stdout: []byte("000000010000000000000004\n")})
+	if _, err := g.r.Restore(context.Background(), "app-prod", "db", "latest"); err == nil {
+		t.Fatal("expected lag error")
+	}
+	hist, _ := g.store.History("app-prod", 5)
+	if len(hist) != 1 || hist[0].Kind != "restore" || hist[0].Result != "restore_failed" || !strings.Contains(hist[0].Detail, "E_RESTORE_ARCHIVE_LAG") {
+		t.Fatalf("history: %+v", hist)
+	}
+}
+
+func TestRestorePollIgnoresNonSegmentArchiveNames(t *testing.T) {
+	g := newRestoreRig(t)
+	g.r.ArchiveTimeout = 10 * time.Second
+	g.run.OnPrefix(cp+"exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select coalesce", sys.Result{Stdout: []byte("00000001000000000000000A.00000028.backup\n")})
+	_, err := g.r.Restore(context.Background(), "app-prod", "db", "latest")
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_RESTORE_ARCHIVE_LAG" {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRecoveryContainersDisableArchiving(t *testing.T) {
+	g := newRestoreRig(t)
+	if _, err := g.r.Restore(context.Background(), "app-prod", "db", "latest"); err != nil {
+		t.Fatal(err)
+	}
+	if run := g.calls()[g.index("docker run -d")]; !strings.Contains(run, "archive_mode=off") {
+		t.Fatalf("restore script must disable archiving:\n%s", run)
 	}
 }

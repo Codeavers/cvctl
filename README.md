@@ -63,3 +63,16 @@ $ cvctl render --instance-dir /srv/deploy/demo-dev --json
 ```
 
 `examples/demo` is a complete sample project (an API, a worker, Postgres, Redis and S3).
+
+## Backup generations
+
+`cvctl db restore` brings a data service back into a new volume and starts a new WAL-G backup
+generation: the restored cluster is on a new timeline, so it archives under
+`<bucket>/<host>/<instance>/<service>/g<N>` instead of mixing timelines in the old prefix
+(generation 0 is the original, unsuffixed prefix). `cvctl.env` keeps the current generation in
+`CVCTL_SVC_<SVC>_BACKUP_GEN` and the highest one ever used in `..._BACKUP_GEN_MAX`.
+
+A restore target (timestamp or `deploy-<id>`) older than the current generation's first base
+backup fails with `E_RESTORE_NO_BACKUP`. Older generations stay in storage under `g<k>`, `k < N`;
+restore them manually with `wal-g` using that prefix. `cvctl project restore` on a new host does
+the same: it reads the latest backup of the current generation, then advances to a new one.
