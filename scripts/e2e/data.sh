@@ -21,7 +21,7 @@ for v in "$WALG_KEY" "$RESTIC_PW" "$PASSPHRASE"; do
 done
 
 dbc() {
-  docker ps --filter "name=${INST}" --filter "name=db" --format '{{.Names}}' | head -n1
+  docker ps --filter "label=com.docker.compose.project=${INST}" --filter "label=com.docker.compose.service=db" --filter status=running --format '{{.Names}}' | head -n1
 }
 psql_db() {
   docker exec "$(dbc)" psql -At -c "$1"
