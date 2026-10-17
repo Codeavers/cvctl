@@ -12,6 +12,7 @@ import (
 	"github.com/codeavers/cvctl/internal/deploy"
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/instance"
+	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/render"
 	"github.com/codeavers/cvctl/internal/state"
@@ -27,13 +28,30 @@ type fakeData struct {
 	pushErr      error
 	afterRestore func()
 	removeErr    error
+	// used/withBase are what the bucket holds; zero values mean the defaults
+	// of restoreEnvBase (generation 2 with a base backup).
+	used, withBase *int
+	gensErr        error
+	restoredGen    int
 }
 
-func (f *fakeData) RestoreFresh(_ context.Context, inst, svc string, _ *contract.Project, _ *instance.Decisions, volume string) error {
+func (f *fakeData) BucketGenerations(_ context.Context, _, _ string) (int, int, error) {
+	used, withBase := 2, 2
+	if f.used != nil {
+		used = *f.used
+	}
+	if f.withBase != nil {
+		withBase = *f.withBase
+	}
+	return used, withBase, f.gensErr
+}
+
+func (f *fakeData) RestoreFresh(_ context.Context, inst, svc string, _ *contract.Project, d *instance.Decisions, volume string) error {
 	if _, err := f.store.Lock(inst); err == nil {
 		f.t.Error("instance lock must be held during RestoreFresh")
 	}
 	*f.log = append(*f.log, "restore "+svc+" "+volume)
+	f.restoredGen = d.Services[svc].BackupGen
 	if f.afterRestore != nil && f.restoreErr == nil {
 		f.afterRestore()
 	}
@@ -546,5 +564,68 @@ func TestRestoreDeployErrorReportsFailedStatusAndHint(t *testing.T) {
 	var oe *output.Error
 	if !errors.As(err, &oe) || !strings.Contains(oe.Hint, "cvctl backup now demo-dev <service> for each wal-g service") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+type recNotify struct{ msgs []notify.Message }
+
+func (n *recNotify) Send(_ context.Context, m notify.Message) error {
+	n.msgs = append(n.msgs, m)
+	return nil
+}
+
+func intp(n int) *int { return &n }
+
+func TestRestoreStaleBundleRestoresNewestGenerationFromBucket(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	rig.data.used, rig.data.withBase = intp(5), intp(5)
+	note := &recNotify{}
+	rig.env.Deployer.Notify = note
+	res, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rig.data.restoredGen != 5 {
+		t.Fatalf("restored from gen %d, want 5", rig.data.restoredGen)
+	}
+	raw, _ := os.ReadFile(filepath.Join(rig.instDir, "cvctl.env"))
+	if !strings.Contains(string(raw), "CVCTL_SVC_DB_BACKUP_GEN=6\n") || !strings.Contains(string(raw), "CVCTL_SVC_DB_BACKUP_GEN_MAX=6\n") {
+		t.Fatalf("cvctl.env:\n%s", raw)
+	}
+	const want = "secrets bundle was stale: restoring generation 5 from the bucket"
+	found := false
+	for _, w := range res.Warnings {
+		found = found || strings.Contains(w, want)
+	}
+	notified := false
+	for _, m := range note.msgs {
+		notified = notified || (m.Level == "warn" && strings.Contains(m.Text, want))
+	}
+	if !found || !notified {
+		t.Fatalf("warnings=%v notes=%+v", res.Warnings, note.msgs)
+	}
+}
+
+func TestRestoreNewGenerationNeverCollidesWithAUsedOne(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	// g9 holds WAL only (its base backup never finished)
+	rig.data.used, rig.data.withBase = intp(9), intp(5)
+	if _, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(rig.instDir, "cvctl.env"))
+	if rig.data.restoredGen != 5 || !strings.Contains(string(raw), "CVCTL_SVC_DB_BACKUP_GEN=10\n") || !strings.Contains(string(raw), "CVCTL_SVC_DB_BACKUP_GEN_MAX=10\n") {
+		t.Fatalf("restored=%d cvctl.env:\n%s", rig.data.restoredGen, raw)
+	}
+}
+
+func TestRestoreBucketListFailureCleansUp(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	rig.data.gensErr = &output.Error{Code: "E_BACKUP_FAILED", Message: "list failed", Hint: "check storage"}
+	if _, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{}); codeOf(t, err) != "E_BACKUP_FAILED" {
+		t.Fatalf("err=%v", err)
+	}
+	if strings.Contains(strings.Join(*rig.log, ","), "restore db") || fileExists(rig.env.fs(), filepath.Join(rig.instDir, "infra")) {
+		t.Fatalf("log=%v", *rig.log)
 	}
 }

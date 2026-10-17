@@ -129,7 +129,8 @@ func TestRestoreHappyPathOrder(t *testing.T) {
 	if len(hist) != 1 || hist[0].Kind != "restore" || hist[0].Result != "ok" || hist[0].Actor != "cli" {
 		t.Fatalf("history: %+v", hist)
 	}
-	if len(g.note.msgs) != 1 || g.note.msgs[0].Level != "info" || !strings.Contains(g.note.msgs[0].Text, "app-prod_db-data") {
+	if len(g.note.msgs) != 2 || g.note.msgs[0].Level != "info" || !strings.Contains(g.note.msgs[0].Text, "app-prod_db-data") ||
+		g.note.msgs[1].Level != "warn" || !strings.Contains(g.note.msgs[1].Text, "re-run cvctl secrets export") {
 		t.Fatalf("notify: %+v", g.note.msgs)
 	}
 	for _, c := range g.run.Calls {
@@ -435,7 +436,7 @@ func TestRestoreBackupPushFailureIsWarningNotRollback(t *testing.T) {
 	g := newRestoreRig(t)
 	g.run.OnPrefix(cp+"exec -T -u postgres db wal-g backup-push", sys.Result{ExitCode: 1, Stderr: []byte("s3 down " + secretKey)})
 	res, err := g.r.Restore(context.Background(), "app-prod", "db", "latest")
-	if err != nil || len(res.Warnings) != 1 || strings.Contains(res.Warnings[0], secretKey) || g.applies != 1 {
+	if err != nil || len(res.Warnings) != 2 || !strings.Contains(res.Warnings[0], "base backup of the new generation failed") || strings.Contains(res.Warnings[0], secretKey) || g.applies != 1 {
 		t.Fatalf("res=%+v err=%v applies=%d", res, err, g.applies)
 	}
 	warned := false
@@ -474,7 +475,7 @@ func TestRestoreArchiveLagAbortsWithoutTouchingVolumesOrDecisions(t *testing.T) 
 		t.Fatalf("err=%v", err)
 	}
 	after, _ := g.fs.ReadFile(envPath)
-	if string(before) != string(after) || g.applies != 0 || g.has("docker volume create") != 0 || g.has("docker run") != 0 {
+	if string(before) != string(after) || g.applies != 0 || g.has("docker volume create") != 0 || g.has("docker run -d") != 0 {
 		t.Fatalf("state changed: %v", g.calls())
 	}
 	if g.index(cp+"stop db") >= 0 {
@@ -524,7 +525,7 @@ func TestRestoreNotRunningClusterSkipsFlushWithWarning(t *testing.T) {
 		if !found || g.has(cp+"exec -T -u postgres db psql -U app -d postgres") != 0 {
 			t.Fatalf("%s: warnings=%v calls=%v", name, res.Warnings, g.calls())
 		}
-		if len(g.note.msgs) != 2 || g.note.msgs[1].Level != "warn" || !strings.Contains(g.note.msgs[1].Title, "WAL flush skipped during restore") || strings.Contains(g.note.msgs[1].Title, "backup needed") {
+		if len(g.note.msgs) != 3 || g.note.msgs[1].Level != "warn" || !strings.Contains(g.note.msgs[1].Title, "WAL flush skipped during restore") || strings.Contains(g.note.msgs[1].Title, "backup needed") {
 			t.Fatalf("%s: notify: %+v", name, g.note.msgs)
 		}
 	}

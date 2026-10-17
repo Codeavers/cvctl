@@ -15,6 +15,7 @@ import (
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/deploy"
 	"github.com/codeavers/cvctl/internal/instance"
+	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/render"
 	"github.com/codeavers/cvctl/internal/state"
@@ -31,6 +32,9 @@ type DataRestorer interface {
 	RemoveVolume(ctx context.Context, volume string) error
 	// BaseBackup pushes a wal-g base backup of the running service.
 	BaseBackup(ctx context.Context, inst, svc string) error
+	// BucketGenerations returns the highest wal-g generation of svc holding
+	// any data and the highest holding a base backup (-1: none).
+	BucketGenerations(ctx context.Context, inst, svc string) (highestUsed, highestWithBase int, err error)
 }
 
 type RestoreOptions struct {
@@ -238,6 +242,37 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 	}
 
 	targets := backup.Targets(p, d)
+	// The bucket, not the bundle, knows the newest generation: a bundle
+	// exported before a db restore names an older one. Every new generation
+	// goes above anything the bucket holds.
+	usedGen := map[string]int{}
+	for _, t := range targets {
+		if t.Strategy != backup.StrategyWalG {
+			continue
+		}
+		used, withBase, err := e.Data.BucketGenerations(ctx, inst, t.Service)
+		if err != nil {
+			return fail(err)
+		}
+		usedGen[t.Service] = used
+		sd := d.Services[t.Service]
+		if withBase >= 0 && withBase != sd.BackupGen {
+			var w string
+			if withBase > sd.BackupGen {
+				w = fmt.Sprintf("%s: secrets bundle was stale: restoring generation %d from the bucket (the bundle names %d); re-run cvctl secrets export after the restore", t.Service, withBase, sd.BackupGen)
+			} else {
+				w = fmt.Sprintf("%s: generation %d named by the secrets bundle has no base backup: restoring generation %d from the bucket", t.Service, sd.BackupGen, withBase)
+			}
+			res.Warnings = append(res.Warnings, w)
+			if e.Deployer.Notify != nil {
+				_ = e.Deployer.Notify.Send(ctx, notify.Message{
+					Host: e.Host.HostName, Level: "warn", Title: fmt.Sprintf("%s restore of %s: generation from the bucket", inst, t.Service), Text: w,
+				})
+			}
+			sd.BackupGen = withBase
+			d.Services[t.Service] = sd
+		}
+	}
 	for _, t := range targets {
 		vol := render.VolumeName(d, t.Service)
 		if err := e.Data.RestoreFresh(ctx, inst, t.Service, p, d, vol); err != nil {
@@ -258,7 +293,7 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 			continue
 		}
 		sd := d.Services[t.Service]
-		next := max(sd.BackupGenMax, sd.BackupGen) + 1
+		next := max(sd.BackupGenMax, sd.BackupGen, usedGen[t.Service]) + 1
 		sd.BackupGen, sd.BackupGenMax = next, next
 		d.Services[t.Service] = sd
 		key := "CVCTL_SVC_" + contract.Normalize(t.Service) + "_BACKUP_GEN"

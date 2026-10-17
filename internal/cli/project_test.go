@@ -441,6 +441,9 @@ func (cliFakeData) RestoreFresh(context.Context, string, string, *contract.Proje
 	return nil
 }
 func (cliFakeData) RemoveVolume(context.Context, string) error { return nil }
+func (cliFakeData) BucketGenerations(context.Context, string, string) (int, int, error) {
+	return -1, -1, nil
+}
 func (cliFakeData) BaseBackup(context.Context, string, string) error {
 	return nil
 }

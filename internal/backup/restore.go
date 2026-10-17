@@ -446,6 +446,13 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 		if backupName, err = r.pickBackup(ctx, inst, *target, d.Services[svc].BackupGen, tgt); err != nil {
 			return nil, err
 		}
+		// cvctl.env may lag the bucket (another host restored from a stale
+		// bundle); a reused generation would mix timelines in one prefix.
+		used, _, err := r.bucketGenerations(ctx, inst, svc, p, d)
+		if err != nil {
+			return nil, err
+		}
+		newMax = max(newMax, used+1)
 	}
 
 	// Nothing but the app services is touched until the WAL is archived, so a
@@ -519,25 +526,29 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 		return nil, r.rollbackRestore(ctx, run, runErr)
 	}
 
+	type warning struct{ title, text string }
+	var warns []warning
 	if flushWarn != "" {
-		res.Warnings = append(res.Warnings, flushWarn)
+		warns = append(warns, warning{fmt.Sprintf("%s/%s: WAL flush skipped during restore", inst, svc), flushWarn})
 	}
 	if target.Strategy == StrategyWalG {
 		// a base backup in the new generation makes it restorable on its own
 		if _, err := r.exec(ctx, r.Compose(inst).Cmd("exec", "-T", "-u", "postgres", svc, "wal-g", "backup-push", pgData)); err != nil {
-			res.Warnings = append(res.Warnings, r.redact("base backup of the new generation failed: "+err.Error()+"; run cvctl backup now "+inst+" "+svc))
+			warns = append(warns, warning{fmt.Sprintf("%s restore of %s: backup needed", inst, svc),
+				r.redact("base backup of the new generation failed: " + err.Error() + "; run cvctl backup now " + inst + " " + svc)})
 		}
+		warns = append(warns, warning{fmt.Sprintf("%s/%s: backup generation changed", inst, svc),
+			fmt.Sprintf("backup generation changed to %d; re-run cvctl secrets export so a rebuilt host restores the new data", newMax)})
+	}
+	for _, w := range warns {
+		res.Warnings = append(res.Warnings, w.text)
 	}
 	text := fmt.Sprintf("%s of %s restored to %s into volume %s; previous volume %s is kept (cvctl db cleanup removes unused volumes)",
 		svc, inst, to, res.Volume, res.PreviousVolume)
 	if r.Notify != nil {
 		_ = r.Notify.Send(ctx, notify.Message{Host: r.HostName, Level: "info", Title: fmt.Sprintf("%s restore of %s done", inst, svc), Text: text})
-		for _, w := range res.Warnings {
-			title := fmt.Sprintf("%s restore of %s: backup needed", inst, svc)
-			if w == flushWarn {
-				title = fmt.Sprintf("%s/%s: WAL flush skipped during restore", inst, svc)
-			}
-			_ = r.Notify.Send(ctx, notify.Message{Host: r.HostName, Level: "warn", Title: title, Text: w})
+		for _, w := range warns {
+			_ = r.Notify.Send(ctx, notify.Message{Host: r.HostName, Level: "warn", Title: w.title, Text: w.text})
 		}
 	}
 	if err := r.Store.Append(inst, state.Event{
