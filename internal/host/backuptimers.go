@@ -17,11 +17,13 @@ type timerUnit struct {
 	desc     string
 	command  string
 	calendar string
+	// timeout stops a hung wal-g or restic run; oneshot units have none by default.
+	timeout string
 }
 
 var backupTimerUnits = []timerUnit{
-	{name: "cvctl-backup", desc: "cvctl daily backup", command: "backup run", calendar: "*-*-* 03:30:00"},
-	{name: "cvctl-backup-verify", desc: "cvctl weekly backup verification", command: "backup verify", calendar: "Sun 04:30"},
+	{name: "cvctl-backup", desc: "cvctl daily backup", command: "backup run", calendar: "*-*-* 03:30:00", timeout: "6h"},
+	{name: "cvctl-backup-verify", desc: "cvctl weekly backup verification", command: "backup verify", calendar: "Sun 04:30", timeout: "4h"},
 }
 
 func (u timerUnit) serviceContent() string {
@@ -34,7 +36,8 @@ Type=oneshot
 User=deployer
 Group=deploy
 ExecStart=%s %s
-%s`, u.desc, agentBinaryPath, u.command, agentSandboxDirectives)
+TimeoutStartSec=%s
+%s`, u.desc, agentBinaryPath, u.command, u.timeout, agentSandboxDirectives)
 }
 
 func (u timerUnit) timerContent() string {

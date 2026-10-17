@@ -32,6 +32,8 @@ const (
 	backupNetwork = "cvctl-backup"
 	dockerConfig  = "DOCKER_CONFIG=/var/lib/cvctl/docker"
 	walgRetain    = "7"
+	backupTimeout = 3 * time.Hour
+	verifyTimeout = 2 * time.Hour
 	maxErrBytes   = 2048
 )
 
@@ -265,13 +267,15 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 	var results []Result
 	var failed, statusErrs []string
 	for _, t := range ts {
-		var runErr error
-		switch t.Strategy {
-		case StrategyWalG:
-			runErr = r.walgBackup(ctx, inst, t)
-		default:
-			runErr = r.resticBackup(ctx, inst, t)
-		}
+		runErr := func() error {
+			// a hung wal-g or restic must not hold the remaining services
+			tctx, cancel := context.WithTimeout(ctx, backupTimeout)
+			defer cancel()
+			if t.Strategy == StrategyWalG {
+				return r.walgBackup(tctx, inst, t)
+			}
+			return r.resticBackup(tctx, inst, t)
+		}()
 		res := Result{Instance: inst, Service: t.Service, Strategy: t.Strategy, OK: runErr == nil}
 		if runErr != nil {
 			res.Error = r.redact(runErr.Error())

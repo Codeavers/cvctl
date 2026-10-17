@@ -84,13 +84,14 @@ func (r *Runner) Verify(ctx context.Context, inst, only string) ([]Result, error
 	var results []Result
 	var failed, statusErrs []string
 	for _, t := range ts {
-		var runErr error
-		switch t.Strategy {
-		case StrategyWalG:
-			runErr = r.walgVerify(ctx, inst, p, d, cat, t)
-		default:
-			runErr = r.resticVerify(ctx, inst, t)
-		}
+		runErr := func() error {
+			tctx, cancel := context.WithTimeout(ctx, verifyTimeout)
+			defer cancel()
+			if t.Strategy == StrategyWalG {
+				return r.walgVerify(tctx, inst, p, d, cat, t)
+			}
+			return r.resticVerify(tctx, inst, t)
+		}()
 		res := Result{Instance: inst, Service: t.Service, Strategy: t.Strategy, OK: runErr == nil}
 		if runErr != nil {
 			res.Error = r.redact(runErr.Error())

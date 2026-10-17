@@ -26,6 +26,7 @@ Type=oneshot
 User=deployer
 Group=deploy
 ExecStart=/usr/local/bin/cvctl backup run
+TimeoutStartSec=6h
 ` + sandbox
 
 const goldenVerifyService = `[Unit]
@@ -37,6 +38,7 @@ Type=oneshot
 User=deployer
 Group=deploy
 ExecStart=/usr/local/bin/cvctl backup verify
+TimeoutStartSec=4h
 ` + sandbox
 
 const goldenBackupTimer = `[Unit]

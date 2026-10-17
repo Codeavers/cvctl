@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"github.com/codeavers/cvctl/internal/backup"
 	"github.com/codeavers/cvctl/internal/compose"
 	"github.com/codeavers/cvctl/internal/deploy"
+	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/output"
 )
 
@@ -47,10 +49,27 @@ func (e *OpsEnv) backupRunner() *backup.Runner {
 		Apply:      d.Reapply,
 		Host:       deploy.BackupTargetFrom(e.Host, e.Secrets),
 		Store:      e.Store,
-		Notify:     notifierFor(e.Host, e.Secrets),
+		Notify:     e.notifier(),
 		DeployRoot: e.deployRoot(),
 		HostName:   host,
 	}
+}
+
+func (e *OpsEnv) notifier() notify.Notifier {
+	if e.Deployer != nil && e.Deployer.Notify != nil {
+		return e.Deployer.Notify
+	}
+	return notifierFor(e.Host, e.Secrets)
+}
+
+// alertTimer pages for failures the per-service status never records: the
+// timers run unattended, so a journal entry alone goes unnoticed.
+func (e *OpsEnv) alertTimer(ctx context.Context, title string, err error) {
+	host := ""
+	if e.Host != nil {
+		host = e.Host.HostName
+	}
+	_ = e.notifier().Send(context.WithoutCancel(ctx), notify.Message{Host: host, Level: "error", Title: title, Text: err.Error()})
 }
 
 func newBackupCmd() *cobra.Command {
@@ -134,6 +153,7 @@ func newBackupRunCmd() *cobra.Command {
 			}
 			insts, err := e.Store.Instances()
 			if err != nil {
+				e.alertTimer(cmd.Context(), "backup run failed", err)
 				return err
 			}
 			r := e.backupRunner()
@@ -149,6 +169,7 @@ func newBackupRunCmd() *cobra.Command {
 					failed++
 					if len(results) == 0 {
 						all = append(all, backup.Result{Instance: inst, Error: err.Error()})
+						e.alertTimer(cmd.Context(), inst+" backup failed", err)
 					}
 				}
 			}
@@ -223,6 +244,7 @@ func newBackupVerifyCmd() *cobra.Command {
 				}
 				insts = args
 			} else if insts, err = e.Store.Instances(); err != nil {
+				e.alertTimer(cmd.Context(), "backup verify failed", err)
 				return err
 			}
 			r := e.backupRunner()
@@ -238,6 +260,7 @@ func newBackupVerifyCmd() *cobra.Command {
 					failed++
 					if len(results) == 0 {
 						all = append(all, backup.Result{Instance: inst, Error: err.Error()})
+						e.alertTimer(cmd.Context(), inst+" restore verification failed", err)
 					}
 				}
 			}
