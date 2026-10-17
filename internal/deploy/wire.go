@@ -10,12 +10,17 @@ import (
 	"github.com/codeavers/cvctl/internal/compose"
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/gitrepo"
+	"github.com/codeavers/cvctl/internal/hostcfg"
+	"github.com/codeavers/cvctl/internal/render"
 	"github.com/codeavers/cvctl/internal/sys"
 )
 
 // Wire sets up the production Compose, Health, and Repo factories on the Deployer.
 func Wire(d *Deployer, run sys.Runner) {
 	d.Allowed = AllowedRegistries(d.Host)
+	if d.Backup == nil {
+		d.Backup = BackupTargetFrom(d.Host, d.Secrets)
+	}
 
 	d.Repo = func(inst string) CheckoutAPI {
 		keyPath := filepath.Join(d.stateRoot(), inst, "deploy_key")
@@ -97,4 +102,31 @@ func readInfraPath(fsys sys.FS, deployRoot, inst string) string {
 		return ""
 	}
 	return m["CVCTL_INFRA_PATH"]
+}
+
+// BackupTargetFrom builds the wal-g destination from the host config and
+// secrets. It returns nil (no backups) when any required piece is missing.
+func BackupTargetFrom(cfg *hostcfg.Config, sec *hostcfg.Secrets) *render.BackupTarget {
+	if cfg == nil || sec == nil {
+		return nil
+	}
+	endpoint := cfg.S3EndpointInternal
+	if endpoint == "" {
+		endpoint = cfg.S3Endpoint
+	}
+	ak, _ := sec.Get("s3_access_key")
+	sk, _ := sec.Get("s3_secret_key")
+	key, _ := sec.Get("walg_libsodium_key")
+	pass, _ := sec.Get("restic_password")
+	if endpoint == "" || cfg.S3Bucket == "" || ak == "" || sk == "" || key == "" {
+		return nil
+	}
+	region := cfg.S3Region
+	if region == "" {
+		region = "us-east-1"
+	}
+	return &render.BackupTarget{
+		Host: cfg.HostName, Endpoint: endpoint, Bucket: cfg.S3Bucket, Region: region,
+		AccessKey: ak, SecretKey: sk, LibsodiumKey: key, ResticPassword: pass,
+	}
 }

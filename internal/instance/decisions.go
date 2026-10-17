@@ -20,6 +20,7 @@ import (
 type ServiceDecision struct {
 	Mode     string // local | external
 	Version  string
+	Volume   string // named docker volume; empty means <instance>_<service>-data
 	Creds    kinds.Credentials
 	External map[string]string
 }
@@ -107,6 +108,8 @@ func Read(path string, p *contract.Project) (*Decisions, error) {
 				sd.Mode = v
 			case rest == "VERSION":
 				sd.Version = v
+			case rest == "VOLUME":
+				sd.Volume = v
 			case rest == "USER":
 				sd.Creds.User = v
 			case rest == "PASSWORD":
@@ -147,6 +150,7 @@ func (d *Decisions) Entries() map[string]string {
 		pre := svcPrefix + contract.Normalize(name) + "_"
 		set(pre+"MODE", s.Mode)
 		set(pre+"VERSION", s.Version)
+		set(pre+"VOLUME", s.Volume)
 		set(pre+"USER", s.Creds.User)
 		set(pre+"PASSWORD", s.Creds.Password)
 		set(pre+"DB", s.Creds.DB)
@@ -292,6 +296,8 @@ var (
 	// identRe limits user and db names: they end up inside shell
 	// healthchecks (postgres uses CMD-SHELL with user and db).
 	identRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+	// volumeRe is docker's own volume-name rule.
+	volumeRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 )
 
 // validHostname accepts lowercase RFC 1123 hostnames. Domains are embedded in
@@ -380,6 +386,10 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 					add("E_DECISION_INVALID", ds.Name, fmt.Sprintf("%s must match [A-Za-z0-9_]+", strings.ToLower(f.name)),
 						"set "+pre+f.name+" to letters, digits and underscores only")
 				}
+			}
+			if s.Volume != "" && !volumeRe.MatchString(s.Volume) {
+				add("E_DECISION_INVALID", ds.Name, fmt.Sprintf("volume %q is not a valid docker volume name", s.Volume),
+					"set "+pre+"VOLUME to letters, digits, underscores, dots and hyphens, starting with a letter or digit")
 			}
 			if s.Version != "" && len(kind.Versions) > 0 && !contains(kind.Versions, s.Version) {
 				add("E_DECISION_INVALID", ds.Name, fmt.Sprintf("version %q is not available for kind %s", s.Version, ds.Kind),

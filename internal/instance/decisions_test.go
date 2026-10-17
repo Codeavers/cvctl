@@ -315,3 +315,14 @@ func TestReadMalformedHidesSecrets(t *testing.T) {
 		t.Fatalf("message leaks or lacks marker: %q", e.Message)
 	}
 }
+
+func TestVolumeDecisionRoundTripAndCheck(t *testing.T) {
+	d := &Decisions{Services: map[string]ServiceDecision{"db": {Mode: "local", Volume: "my_vol"}}}
+	if got := d.Entries()["CVCTL_SVC_DB_VOLUME"]; got != "my_vol" {
+		t.Fatalf("entry = %q", got)
+	}
+	d2 := &Decisions{Services: map[string]ServiceDecision{"db": {Mode: "local"}}}
+	if _, ok := d2.Entries()["CVCTL_SVC_DB_VOLUME"]; ok {
+		t.Fatal("empty volume must not be written")
+	}
+}

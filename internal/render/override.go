@@ -21,6 +21,62 @@ type Options struct {
 	InstanceDir string
 	Edge        string // edge | behind-proxy
 	AppEnvPath  string
+	// BackupEnvDir is where backup-<svc>.env files are referenced from;
+	// empty means InstanceDir. Staging renders point it at the staging dir.
+	BackupEnvDir string
+	// Backup nil means no backups configured: no backup env, no backup network.
+	Backup *BackupTarget
+}
+
+// BackupTarget is the object storage destination and key material for wal-g.
+type BackupTarget struct {
+	Host, Endpoint, Bucket, Region, AccessKey, SecretKey, LibsodiumKey, ResticPassword string
+}
+
+const backupNetwork = "cvctl-backup"
+
+// BackupEnvPath is the wal-g env file of one service. WALG_S3_PREFIX differs
+// per service, so each local wal-g service gets its own file.
+func BackupEnvPath(dir, service string) string {
+	return filepath.Join(dir, "backup-"+service+".env")
+}
+
+// Env returns the wal-g environment of service svc of instance inst.
+func (b *BackupTarget) Env(inst, svc string) map[string]string {
+	return map[string]string{
+		"WALG_S3_PREFIX":               "s3://" + b.Bucket + "/" + b.Host + "/" + inst + "/" + svc,
+		"AWS_ACCESS_KEY_ID":            b.AccessKey,
+		"AWS_SECRET_ACCESS_KEY":        b.SecretKey,
+		"AWS_ENDPOINT":                 b.Endpoint,
+		"AWS_REGION":                   b.Region,
+		"AWS_S3_FORCE_PATH_STYLE":      "true",
+		"WALG_LIBSODIUM_KEY":           b.LibsodiumKey,
+		"WALG_LIBSODIUM_KEY_TRANSFORM": "hex",
+		"WALG_COMPRESSION_METHOD":      "zstd",
+	}
+}
+
+// BackupEnvs returns the backup env contents per service name, only for local
+// wal-g services and only when a backup target is configured.
+func BackupEnvs(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o Options) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	if o.Backup == nil {
+		return out
+	}
+	for _, ds := range p.Data {
+		if d.Services[ds.Name].Mode == "local" && cat[ds.Kind].Backup == "wal-g" {
+			out[ds.Name] = o.Backup.Env(d.Instance, ds.Name)
+		}
+	}
+	return out
+}
+
+// VolumeName is the docker volume of a local data service.
+func VolumeName(d *instance.Decisions, service string) string {
+	if v := d.Services[service].Volume; v != "" {
+		return v
+	}
+	return d.Instance + "_" + service + "-data"
 }
 
 func missing(what string) error {
@@ -82,6 +138,7 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 	}
 	services := map[string]any{}
 	volumes := map[string]any{}
+	usesBackupNet := false
 
 	for _, a := range p.Apps {
 		digest := d.Digests[a.Name]
@@ -131,6 +188,17 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 			"networks": []string{"data"},
 			"volumes":  []string{ds.Name + "-data:" + k.VolumePath},
 		}
+		if o.Backup != nil && (k.Backup == "wal-g" || k.Backup == "volume") {
+			svc["networks"] = []string{"data", backupNetwork}
+			usesBackupNet = true
+		}
+		if o.Backup != nil && k.Backup == "wal-g" {
+			dir := o.BackupEnvDir
+			if dir == "" {
+				dir = o.InstanceDir
+			}
+			svc["env_file"] = []string{BackupEnvPath(dir, ds.Name)}
+		}
 		if env := k.ContainerEnvFor(sd.Creds); len(env) > 0 {
 			svc["environment"] = env
 		}
@@ -144,7 +212,7 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 			svc["deploy"] = map[string]any{"resources": map[string]any{"limits": map[string]any{"memory": "512m"}}}
 		}
 		services[ds.Name] = svc
-		volumes[ds.Name+"-data"] = map[string]any{}
+		volumes[ds.Name+"-data"] = map[string]any{"name": VolumeName(d, ds.Name)}
 	}
 
 	doc := map[string]any{
@@ -154,6 +222,9 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 			"data": map[string]any{"internal": true},
 			"edge": map[string]any{"external": true, "name": "cvctl-edge"},
 		},
+	}
+	if usesBackupNet {
+		doc["networks"].(map[string]any)[backupNetwork] = map[string]any{"external": true, "name": backupNetwork}
 	}
 	if len(volumes) > 0 {
 		doc["volumes"] = volumes

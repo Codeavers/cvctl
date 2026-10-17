@@ -2678,3 +2678,43 @@ func TestRollbackFailedHealthFailsAgainStaysFailed(t *testing.T) {
 		t.Fatalf("expected a notification")
 	}
 }
+
+func TestDeployWritesBackupEnv(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	rig.deployer.Backup = &render.BackupTarget{
+		Host: "h1", Endpoint: "http://cvctl-storage:9000", Bucket: "cvctl", Region: "us-east-1",
+		AccessKey: "AKIDSECRET1", SecretKey: "SKSECRETVALUE", LibsodiumKey: "LIBSODIUMSECRET",
+	}
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "cli:andres"})
+	if err != nil || res.Status != state.StatusOK {
+		t.Fatalf("deploy: %v %+v", err, res)
+	}
+	path := filepath.Join(rig.instDir, "backup-main-db.env")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("backup env not promoted: %v", err)
+	}
+	if !strings.Contains(string(raw), "WALG_S3_PREFIX=s3://cvctl/h1/demo-dev/main-db") {
+		t.Fatalf("unexpected backup env:\n%s", raw)
+	}
+	ov, err := os.ReadFile(filepath.Join(rig.instDir, "compose.cvctl.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ov), path) || strings.Contains(string(ov), "SKSECRETVALUE") {
+		t.Fatalf("override must reference %s and hold no secret:\n%s", path, ov)
+	}
+	if _, err := os.Stat(filepath.Join(rig.instDir, ".staging")); err == nil {
+		t.Fatal("staging dir not cleaned")
+	}
+}
+
+func TestDeployWithoutBackupWritesNoBackupEnv(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "cli:andres"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(rig.instDir, "backup-main-db.env")); err == nil {
+		t.Fatal("backup env written without a backup target")
+	}
+}

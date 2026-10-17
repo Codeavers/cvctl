@@ -85,7 +85,10 @@ type Deployer struct {
 	Health     func(ctx context.Context, inst, override string) error
 	// Allowed lists permitted image registries. Nil disables the post-checkout
 	// image check; Wire sets it (non-nil) from the host configuration.
-	Allowed        []string
+	Allowed []string
+	// Secrets feeds Backup in Wire; Backup nil means no backups configured.
+	Secrets        *hostcfg.Secrets
+	Backup         *render.BackupTarget
 	RenderOverride func(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o render.Options) ([]byte, error)
 	RenderTraefik  func(p *contract.Project, d *instance.Decisions, o render.Options) ([]byte, error)
 }
@@ -212,6 +215,13 @@ func (d *Deployer) cleanupStaging(stagingDir, override, appEnv, route string) {
 	_ = fsys.Remove(override)
 	_ = fsys.Remove(appEnv)
 	_ = fsys.Remove(route)
+	if entries, err := fsys.ReadDir(stagingDir); err == nil {
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "backup-") && strings.HasSuffix(e.Name(), ".env") {
+				_ = fsys.Remove(filepath.Join(stagingDir, e.Name()))
+			}
+		}
+	}
 	_ = fsys.Remove(stagingDir)
 }
 
@@ -671,12 +681,15 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	finalOverridePath := filepath.Join(instDir, "compose.cvctl.yml")
 	finalRoutePath := filepath.Join(d.traefikDir(), inst+".yml")
 
-	secrets := withSecrets(resEnv.Values, cvSecrets)
+	secrets := withSecrets(withSecrets(resEnv.Values, cvSecrets), d.backupSecrets())
 	appEnvBytes := instance.FormatEnv(resEnv.Values)
 	stagingOverrideBytes, err := d.renderOverride(p, dec, cat, render.Options{
 		InstanceDir: instDir,
 		Edge:        d.edge(),
 		AppEnvPath:  stagingAppEnvPath,
+
+		BackupEnvDir: stagingDir,
+		Backup:       d.Backup,
 	})
 	if err != nil {
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("render staging override failed: %v", err), secrets)
@@ -685,6 +698,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		InstanceDir: instDir,
 		Edge:        d.edge(),
 		AppEnvPath:  finalAppEnvPath,
+		Backup:      d.Backup,
 	})
 	if err != nil {
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("render final override failed: %v", err), secrets)
@@ -709,6 +723,14 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	if err := fsys.WriteFile(stagingOverridePath, stagingOverrideBytes, 0o640, deployOwner); err != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 		return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("write staging override failed: %v", err), secrets)
+	}
+	backupEnvs := render.BackupEnvs(p, dec, cat, render.Options{Backup: d.Backup})
+	for svc, env := range backupEnvs {
+		path := render.BackupEnvPath(stagingDir, svc)
+		if err := fsys.WriteFile(path, instance.FormatEnv(env), 0o640, deployOwner); err != nil {
+			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+			return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("write staging backup env failed: %v", err), secrets)
+		}
 	}
 	if routeBytes != nil {
 		if err := fsys.WriteFile(stagingRoutePath, routeBytes, 0o640, deployOwner); err != nil {
@@ -796,9 +818,14 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		}
 	}
 
-	// Step 8: Promote staging -> final (order: app.env -> route -> override)
+	// Step 8: Promote staging -> final (order: app.env -> backup envs -> route -> override)
 	if err := fsys.WriteFile(finalAppEnvPath, appEnvBytes, 0o640, deployOwner); err != nil {
 		return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, rollbackEnv, secrets, rollbackEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote app.env failed: %v", err))
+	}
+	for svc, env := range backupEnvs {
+		if err := fsys.WriteFile(render.BackupEnvPath(instDir, svc), instance.FormatEnv(env), 0o640, deployOwner); err != nil {
+			return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, rollbackEnv, secrets, rollbackEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote backup env failed: %v", err))
+		}
 	}
 	if routeBytes != nil {
 		if err := fsys.WriteFile(finalRoutePath, routeBytes, 0o640, deployOwner); err != nil {
@@ -1031,4 +1058,21 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 
 	return res, errors.Join(errs...)
+}
+
+// backupSecrets lists the backup credential values so error text redacts them.
+func (d *Deployer) backupSecrets() map[string]string {
+	if d.Backup == nil {
+		return nil
+	}
+	out := map[string]string{}
+	for k, v := range map[string]string{
+		"backup_secret_key": d.Backup.SecretKey, "backup_libsodium_key": d.Backup.LibsodiumKey,
+		"backup_restic_password": d.Backup.ResticPassword, "backup_access_key": d.Backup.AccessKey,
+	} {
+		if len(v) >= 8 {
+			out[k] = v
+		}
+	}
+	return out
 }

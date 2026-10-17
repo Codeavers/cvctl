@@ -110,6 +110,7 @@ func newAgentCmd() *cobra.Command {
 				FS:         fsys,
 				Store:      store,
 				Host:       hcfg,
+				Secrets:    secrets,
 				Catalog:    cat,
 			}
 			deploy.Wire(deployer, run)

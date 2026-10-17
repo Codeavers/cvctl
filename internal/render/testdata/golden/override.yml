@@ -42,11 +42,22 @@ services:
     volumes:
       - cache-data:/data
   main-db:
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=wal-g wal-push %p
+      - -c
+      - archive_timeout=60
     deploy:
       resources:
         limits:
           memory: 512m
     environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
       POSTGRES_DB: d
       POSTGRES_PASSWORD: p
       POSTGRES_USER: u
@@ -64,5 +75,7 @@ services:
     profiles:
       - cvctl-disabled
 volumes:
-  cache-data: {}
-  main-db-data: {}
+  cache-data:
+    name: proj-dev_cache-data
+  main-db-data:
+    name: proj-dev_main-db-data

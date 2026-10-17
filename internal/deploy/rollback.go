@@ -66,6 +66,7 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 		InstanceDir: instDir,
 		Edge:        d.edge(),
 		AppEnvPath:  finalAppEnvPath,
+		Backup:      d.Backup,
 	}
 
 	overrideBytes, err := d.renderOverride(p, dec, cat, renderOpts)
@@ -78,11 +79,16 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 	}
 
 	fsys := d.fs()
-	// Promote order: app.env -> route -> override
+	// Promote order: app.env -> backup envs -> route -> override
 	if appEnvAbsent {
 		_ = fsys.Remove(finalAppEnvPath)
 	} else if len(appEnv) > 0 {
 		if err := fsys.WriteFile(finalAppEnvPath, instance.FormatEnv(appEnv), 0o640, deployOwner); err != nil {
+			return err
+		}
+	}
+	for svc, env := range render.BackupEnvs(p, dec, cat, renderOpts) {
+		if err := fsys.WriteFile(render.BackupEnvPath(instDir, svc), instance.FormatEnv(env), 0o640, deployOwner); err != nil {
 			return err
 		}
 	}

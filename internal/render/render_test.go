@@ -295,3 +295,98 @@ func TestRenderAppEnvPath(t *testing.T) {
 		t.Fatalf("expected default app.env in override output:\n%s", string(outDef))
 	}
 }
+
+func testBackup() *BackupTarget {
+	return &BackupTarget{
+		Host: "h1", Endpoint: "http://cvctl-storage:9000", Bucket: "cvctl", Region: "us-east-1",
+		AccessKey: "AKIDSECRET1", SecretKey: "SKSECRETVALUE", LibsodiumKey: "LIBSODIUMSECRET", ResticPassword: "RESTICSECRET",
+	}
+}
+
+func TestOverrideBackupGolden(t *testing.T) {
+	p, d, cat := setup(t)
+	out, err := Override(p, d, cat, Options{InstanceDir: "/srv/inst/proj-dev", Edge: "edge", Backup: testBackup()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "override-backup.yml", out)
+	for _, s := range []string{"AKIDSECRET1", "SKSECRETVALUE", "LIBSODIUMSECRET", "RESTICSECRET"} {
+		if strings.Contains(string(out), s) {
+			t.Fatalf("override leaks secret %q", s)
+		}
+	}
+}
+
+func TestBackupEnvs(t *testing.T) {
+	p, d, cat := setup(t)
+	envs := BackupEnvs(p, d, cat, Options{Backup: testBackup()})
+	if len(envs) != 1 {
+		t.Fatalf("want only main-db, got %v", envs)
+	}
+	got := envs["main-db"]
+	want := map[string]string{
+		"WALG_S3_PREFIX":               "s3://cvctl/h1/proj-dev/main-db",
+		"AWS_ACCESS_KEY_ID":            "AKIDSECRET1",
+		"AWS_SECRET_ACCESS_KEY":        "SKSECRETVALUE",
+		"AWS_ENDPOINT":                 "http://cvctl-storage:9000",
+		"AWS_REGION":                   "us-east-1",
+		"AWS_S3_FORCE_PATH_STYLE":      "true",
+		"WALG_LIBSODIUM_KEY":           "LIBSODIUMSECRET",
+		"WALG_LIBSODIUM_KEY_TRANSFORM": "hex",
+		"WALG_COMPRESSION_METHOD":      "zstd",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("%s = %q, want %q", k, got[k], v)
+		}
+	}
+	if len(BackupEnvs(p, d, cat, Options{})) != 0 {
+		t.Fatal("nil backup must produce no env files")
+	}
+}
+
+func TestNoBackupNoNetwork(t *testing.T) {
+	p, d, cat := setup(t)
+	out, err := Override(p, d, cat, Options{InstanceDir: "/srv/inst/proj-dev", Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "cvctl-backup") || strings.Contains(string(out), "backup-main-db.env") {
+		t.Fatalf("backup wiring rendered without a target:\n%s", out)
+	}
+}
+
+func TestVolumeNameDefaultAndOverride(t *testing.T) {
+	p, d, cat := setup(t)
+	out, err := Override(p, d, cat, Options{InstanceDir: "/x", Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "name: proj-dev_main-db-data") {
+		t.Fatalf("default volume name missing:\n%s", out)
+	}
+	sd := d.Services["main-db"]
+	sd.Volume = "restored_vol"
+	d.Services["main-db"] = sd
+	out, err = Override(p, d, cat, Options{InstanceDir: "/x", Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "name: restored_vol") || strings.Contains(string(out), "name: proj-dev_main-db-data") {
+		t.Fatalf("volume override not applied:\n%s", out)
+	}
+}
+
+func TestBackupEnvDirForStaging(t *testing.T) {
+	p, d, cat := setup(t)
+	out, err := Override(p, d, cat, Options{InstanceDir: "/i", BackupEnvDir: "/i/.staging", Edge: "edge", Backup: testBackup()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "/i/.staging/backup-main-db.env") {
+		t.Fatalf("staging backup env path missing:\n%s", out)
+	}
+}

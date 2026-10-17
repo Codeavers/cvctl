@@ -67,6 +67,7 @@ var newProjectEnv = func(o projectOpts) (*project.Env, error) {
 		FS:         fsys,
 		Store:      store,
 		Host:       cfg,
+		Secrets:    secrets,
 		Catalog:    cat,
 		Notify:     notifierFor(cfg, secrets),
 	}
