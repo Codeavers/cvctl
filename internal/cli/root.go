@@ -40,6 +40,7 @@ func NewRoot(version string) *cobra.Command {
 	root.AddCommand(newPauseCmd())
 	root.AddCommand(newResumeCmd())
 	root.AddCommand(newAgentCmd())
+	root.AddCommand(newBackupCmd())
 	return root
 }
 

@@ -58,18 +58,29 @@ func (d Desired) Hash() string {
 }
 
 type State struct {
-	Instance       string    `json:"instance"`
-	Status         Status    `json:"status"`
-	Current        *Desired  `json:"current,omitempty"`
-	Previous       *Desired  `json:"previous,omitempty"`
-	FailedHash     string    `json:"failed_hash,omitempty"`
-	Detail         string    `json:"detail,omitempty"`
-	Blocked        []string  `json:"blocked,omitempty"`
-	PausedReason   string    `json:"paused_reason,omitempty"`
-	PausedWantHash string    `json:"paused_want_hash,omitempty"`
-	RollbackFailed bool      `json:"rollback_failed,omitempty"`
-	LastTransient  string    `json:"last_transient,omitempty"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	Instance       string                  `json:"instance"`
+	Status         Status                  `json:"status"`
+	Current        *Desired                `json:"current,omitempty"`
+	Previous       *Desired                `json:"previous,omitempty"`
+	FailedHash     string                  `json:"failed_hash,omitempty"`
+	Detail         string                  `json:"detail,omitempty"`
+	Blocked        []string                `json:"blocked,omitempty"`
+	PausedReason   string                  `json:"paused_reason,omitempty"`
+	PausedWantHash string                  `json:"paused_want_hash,omitempty"`
+	RollbackFailed bool                    `json:"rollback_failed,omitempty"`
+	LastTransient  string                  `json:"last_transient,omitempty"`
+	Backups        map[string]BackupStatus `json:"backups,omitempty"`
+	UpdatedAt      time.Time               `json:"updated_at"`
+}
+
+// BackupStatus is the last known backup state of one data service. Errors are
+// stored already redacted.
+type BackupStatus struct {
+	LastOK          time.Time `json:"last_ok,omitempty"`
+	LastAttempt     time.Time `json:"last_attempt,omitempty"`
+	LastError       string    `json:"last_error,omitempty"`
+	LastVerifyOK    time.Time `json:"last_verify_ok,omitempty"`
+	LastVerifyError string    `json:"last_verify_error,omitempty"`
 }
 
 type Event struct {

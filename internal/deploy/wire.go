@@ -85,6 +85,17 @@ func Wire(d *Deployer, run sys.Runner) {
 	}
 }
 
+// ComposeProject is the compose project of an instance with the default
+// override and app env paths.
+func (d *Deployer) ComposeProject(run sys.Runner, inst string) *compose.Project {
+	return &compose.Project{
+		Run:       run,
+		Instance:  inst,
+		Dir:       filepath.Join(d.deployRoot(), inst),
+		InfraPath: readInfraPath(d.FS, d.deployRoot(), inst),
+	}
+}
+
 func readInfraPath(fsys sys.FS, deployRoot, inst string) string {
 	cvctlEnvPath := filepath.Join(deployRoot, inst, "cvctl.env")
 	var raw []byte
