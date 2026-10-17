@@ -34,6 +34,14 @@ type stubRepo struct {
 	showData    map[string][]byte
 	showErr     error
 	checkoutErr error
+	onFetch     func()
+	log         *[]string
+}
+
+func (s *stubRepo) record(entry string) {
+	if s.log != nil {
+		*s.log = append(*s.log, entry)
+	}
 }
 
 func (s *stubRepo) Clone(_ context.Context, _, _ string) error {
@@ -62,7 +70,11 @@ func (s *stubRepo) LsRemote(_ context.Context, _ string) error {
 	return s.lsRemoteErr
 }
 
-func (s *stubRepo) Fetch(_ context.Context, _ string) (string, error) {
+func (s *stubRepo) Fetch(_ context.Context, branch string) (string, error) {
+	s.record("fetch " + branch)
+	if s.onFetch != nil {
+		s.onFetch()
+	}
 	if s.fetchErr != nil {
 		return "", s.fetchErr
 	}
@@ -85,8 +97,20 @@ func (s *stubRepo) Show(_ context.Context, _, path string) ([]byte, error) {
 	return nil, os.ErrNotExist
 }
 
-func (s *stubRepo) Checkout(_ context.Context, _ string) error {
-	return s.checkoutErr
+// Checkout mimics a working tree update by copying the simulated origin into dir.
+func (s *stubRepo) Checkout(_ context.Context, commit string) error {
+	s.record("checkout " + commit)
+	if s.checkoutErr != nil {
+		return s.checkoutErr
+	}
+	if s.infraSource != "" && s.dir != "" {
+		for _, name := range []string{"compose.yml", "env.spec.yml"} {
+			if data, err := os.ReadFile(filepath.Join(s.infraSource, name)); err == nil {
+				_ = os.WriteFile(filepath.Join(s.dir, name), data, 0o644)
+			}
+		}
+	}
+	return nil
 }
 
 func testCatalog(t *testing.T) kinds.Catalog {
@@ -1532,5 +1556,175 @@ func TestProjectAddInitialStateSavedBeforeDeploy(t *testing.T) {
 	}
 	if !slices.Contains(instances, "demo-dev") {
 		t.Errorf("expected store.Instances() to contain demo-dev, got %v", instances)
+	}
+}
+
+type noopCompose struct{}
+
+func (noopCompose) Config(context.Context) error           { return nil }
+func (noopCompose) Pull(context.Context, ...string) error  { return nil }
+func (noopCompose) UpData(context.Context, []string) error { return nil }
+func (noopCompose) RunHook(context.Context, string, string) (sys.Result, error) {
+	return sys.Result{}, nil
+}
+func (noopCompose) Up(context.Context) error                          { return nil }
+func (noopCompose) Logs(context.Context, string, int) (string, error) { return "", nil }
+
+type fixedResolver struct{}
+
+func (fixedResolver) Digest(context.Context, string, string) (string, error) {
+	return "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", nil
+}
+
+const updateV1Env = `CVCTL_INSTANCE=demo-dev
+CVCTL_ENV=dev
+CVCTL_INFRA_BRANCH=develop
+CVCTL_TRACK_TAG=develop
+CVCTL_INFRA_PATH=.
+CVCTL_STRATEGY=recreate
+CVCTL_SVC_DB_MODE=local
+CVCTL_SVC_DB_VERSION=16
+CVCTL_SVC_DB_USER=db
+CVCTL_SVC_DB_PASSWORD=existingpass123456789012345678
+CVCTL_SVC_DB_DB=db
+CVCTL_DOMAIN_WEB=web.example.com
+CVCTL_SVC_GONE_MODE=local
+CVCTL_SVC_GONE_PASSWORD=keepmekeepmekeepmekeepmekeepme12
+`
+
+// updateRig simulates an instance deployed from infra v1 whose origin has since
+// gained a second postgres service ("extra").
+type updateRig struct {
+	env      *Env
+	prompter *hostcfgtest.Prompter
+	store    *state.Store
+	instDir  string
+	infraDir string
+	log      *[]string
+	stub     *stubRepo
+}
+
+func newUpdateRig(t *testing.T, answers map[string]string) *updateRig {
+	t.Helper()
+	tmp := t.TempDir()
+	instDir := filepath.Join(tmp, "demo-dev")
+	infraDir := filepath.Join(instDir, "infra")
+	originDir := filepath.Join(tmp, "origin")
+
+	writeTestInfra(t, infraDir, validCompose, validSpec)
+	v2Compose := strings.Replace(validCompose, "x-cvctl:", `  extra:
+    image: postgres:16
+    labels:
+      cvctl.kind: postgres
+      cvctl.version: "16"
+      cvctl.env: EXTRA
+      cvctl.external: allowed
+x-cvctl:`, 1)
+	v2Spec := validSpec + `  EXTRA_URL:
+    source: service
+    service: extra
+`
+	writeTestInfra(t, originDir, v2Compose, v2Spec)
+	if err := os.WriteFile(filepath.Join(instDir, "cvctl.env"), []byte(updateV1Env), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(tmp, "traefik"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fl := systest.NewFakeLocker()
+	oldLock := sys.LockFile
+	t.Cleanup(func() { sys.LockFile = oldLock })
+	sys.LockFile = fl.LockFile
+
+	osfs := sys.NewOSFS()
+	stateRoot := filepath.Join(tmp, "state")
+	store := state.NewStore(osfs, stateRoot)
+	cat := testCatalog(t)
+	deployer := &deploy.Deployer{
+		DeployRoot: tmp,
+		TraefikDir: filepath.Join(tmp, "traefik"),
+		StateRoot:  stateRoot,
+		FS:         osfs,
+		Store:      store,
+		Catalog:    cat,
+		Compose:    func(_, _, _ string) deploy.ComposeAPI { return noopCompose{} },
+		Health:     func(context.Context, string, string) error { return nil },
+	}
+
+	log := &[]string{}
+	stub := &stubRepo{dir: infraDir, infraSource: originDir, fetchCommit: "feedface00000000", log: log}
+	prompter := hostcfgtest.NewPrompter(t, answers)
+	e := &Env{
+		FS:          osfs,
+		DeployRoot:  tmp,
+		StateRoot:   stateRoot,
+		Interactive: true,
+		Catalog:     cat,
+		Prompt:      prompter,
+		Host:        &hostcfg.Config{Registries: "ghcr.io/codeavers"},
+		Deployer:    deployer,
+		Resolver:    fixedResolver{},
+		RepoFactory: func(string, string) RepoLike { return stub },
+	}
+	return &updateRig{env: e, prompter: prompter, store: store, instDir: instDir, infraDir: infraDir, log: log, stub: stub}
+}
+
+func TestUpdateFetchesChecksOutAndAsksOnlyForNewService(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+
+	res, err := Update(context.Background(), rig.env, "demo-dev")
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if res.Deploy.Status != state.StatusOK {
+		t.Fatalf("expected deploy OK, got %v (%s)", res.Deploy.Status, res.Deploy.Detail)
+	}
+	if len(rig.prompter.Asked) != 1 || rig.prompter.Asked[0] != "data_extra_mode" {
+		t.Fatalf("expected only data_extra_mode to be asked, got %v", rig.prompter.Asked)
+	}
+	if got := strings.Join(*rig.log, ","); !strings.HasPrefix(got, "fetch develop,checkout feedface00000000") {
+		t.Fatalf("expected fetch then checkout of the fetched commit first, got %s", got)
+	}
+	st, err := rig.store.Load("demo-dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Current == nil || st.Current.InfraCommit != "feedface00000000" {
+		t.Fatalf("expected current commit feedface00000000, got %+v", st.Current)
+	}
+}
+
+func TestUpdateHoldsInstanceLockDuringDeploy(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+	rig.stub.onFetch = func() {
+		if _, err := rig.store.Lock("demo-dev"); err == nil {
+			t.Error("instance lock must be held while Update fetches")
+		}
+	}
+	if _, err := Update(context.Background(), rig.env, "demo-dev"); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	unlock, err := rig.store.Lock("demo-dev")
+	if err != nil {
+		t.Fatalf("lock must be released after Update: %v", err)
+	}
+	unlock()
+}
+
+func TestUpdatePreservesUnknownCvctlEnvKeys(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+	if _, err := Update(context.Background(), rig.env, "demo-dev"); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(rig.instDir, "cvctl.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"CVCTL_SVC_GONE_MODE=local", "CVCTL_SVC_GONE_PASSWORD=keepmekeepmekeepmekeepmekeepme12", "CVCTL_SVC_EXTRA_MODE=local", "CVCTL_SVC_DB_PASSWORD=existingpass123456789012345678"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("cvctl.env missing %q:\n%s", want, raw)
+		}
 	}
 }

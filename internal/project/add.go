@@ -489,7 +489,10 @@ func promptEnvSpec(ctx context.Context, e *Env, spec *envspec.Spec, appEnvValues
 	return nil
 }
 
-func runDeploy(ctx context.Context, e *Env, repo RepoLike, d *instance.Decisions, p *contract.Project, actor string) (deploy.Result, error) {
+// runDeploy resolves desired state and deploys it. With locked, the caller holds
+// the instance lock and the deploy is forced, because an explicit update must
+// redeploy even when the desired state hash is unchanged.
+func runDeploy(ctx context.Context, e *Env, repo RepoLike, d *instance.Decisions, actor string, locked bool) (deploy.Result, error) {
 	if e.Deployer == nil {
 		return deploy.Result{Status: state.StatusOK}, nil
 	}
@@ -509,6 +512,9 @@ func runDeploy(ctx context.Context, e *Env, repo RepoLike, d *instance.Decisions
 	desired, err := src.Desired(ctx, d)
 	if err != nil {
 		return deploy.Result{}, err
+	}
+	if locked {
+		return e.Deployer.DeployLocked(ctx, d.Instance, desired, deploy.Options{Actor: actor, Force: true})
 	}
 	return e.Deployer.Deploy(ctx, d.Instance, desired, deploy.Options{Actor: actor})
 }
@@ -771,7 +777,7 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		}
 	}
 
-	deployRes, err := runDeploy(ctx, e, repo, d, p, "cli:project-add")
+	deployRes, err := runDeploy(ctx, e, repo, d, "cli:project-add", false)
 	if err != nil {
 		return nil, err
 	}
@@ -782,6 +788,24 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		DeployKeyPub: pubKey,
 		Decisions:    d,
 	}, nil
+}
+
+// readRawEnv returns every key in a dotenv file. Parse errors never echo the
+// content because cvctl.env holds credentials.
+func readRawEnv(fsys sys.FS, path string) (map[string]string, error) {
+	data, err := fsys.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	m, err := godotenv.Unmarshal(string(data))
+	if err != nil {
+		return nil, &output.Error{
+			Code:    "E_DECISION_INVALID",
+			Message: fmt.Sprintf("%s is malformed (details hidden: the file holds secrets)", path),
+			Hint:    "fix the KEY=value syntax in cvctl.env",
+		}
+	}
+	return m, nil
 }
 
 func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
@@ -800,6 +824,15 @@ func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
 		}
 	}
 
+	locked := e.Deployer != nil && e.Deployer.Store != nil
+	if locked {
+		unlock, err := e.Deployer.Store.Lock(inst)
+		if err != nil {
+			return nil, err
+		}
+		defer unlock()
+	}
+
 	keyPath := filepath.Join(e.stateRoot(), inst, "deploy_key")
 	pubKey := ""
 	if pub, err := e.fs().ReadFile(keyPath + ".pub"); err == nil {
@@ -811,6 +844,28 @@ func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
 
 	infraDir := filepath.Join(instDir, "infra")
 	repo := e.repo(infraDir, keyPath)
+
+	rawEnv, err := readRawEnv(e.fs(), cvctlEnvPath)
+	if err != nil {
+		return nil, err
+	}
+	branch := rawEnv["CVCTL_INFRA_BRANCH"]
+	if branch == "" {
+		branch = "develop"
+		if rawEnv["CVCTL_ENV"] == "prod" {
+			branch = "main"
+		}
+	}
+
+	// Decisions must be asked against the contract that will be deployed, so the
+	// working tree is moved to the origin tip before anything is loaded.
+	commit, err := repo.Fetch(ctx, branch)
+	if err != nil {
+		return nil, err
+	}
+	if err := repo.Checkout(ctx, commit); err != nil {
+		return nil, err
+	}
 
 	cat, err := e.catalog()
 	if err != nil {
@@ -859,14 +914,23 @@ func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
 		return nil, err
 	}
 
-	if err := e.fs().WriteFile(cvctlEnvPath, instance.FormatEnv(d.Entries()), 0o640, deployOwner); err != nil {
+	// Overlay onto the raw file: keys of services that left the contract (and any
+	// key this version does not model) must survive an update.
+	merged := make(map[string]string, len(rawEnv))
+	for k, v := range rawEnv {
+		merged[k] = v
+	}
+	for k, v := range d.Entries() {
+		merged[k] = v
+	}
+	if err := e.fs().WriteFile(cvctlEnvPath, instance.FormatEnv(merged), 0o640, deployOwner); err != nil {
 		return nil, err
 	}
 	if err := e.fs().WriteFile(appEnvPath, instance.FormatEnv(appEnvValues), 0o640, deployOwner); err != nil {
 		return nil, err
 	}
 
-	deployRes, err := runDeploy(ctx, e, repo, d, p, "cli:project-update")
+	deployRes, err := runDeploy(ctx, e, repo, d, "cli:project-update", locked)
 	if err != nil {
 		return nil, err
 	}
