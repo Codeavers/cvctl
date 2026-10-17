@@ -683,6 +683,25 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), resEnv.Values)
 	}
 
+	// Generated randoms are persisted before hooks run: a migration may already
+	// have consumed them, so a later retry or rollback must reuse the same values.
+	rollbackEnv := existingEnv
+	rollbackEnvAbsent := appEnvAbsent
+	if len(resEnv.Generated) > 0 {
+		rollbackEnv = make(map[string]string, len(existingEnv)+len(resEnv.Generated))
+		for k, v := range existingEnv {
+			rollbackEnv[k] = v
+		}
+		for _, k := range resEnv.Generated {
+			rollbackEnv[k] = resEnv.Values[k]
+		}
+		rollbackEnvAbsent = false
+		if err := fsys.WriteFile(finalAppEnvPath, instance.FormatEnv(rollbackEnv), 0o640, deployOwner); err != nil {
+			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+			return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("persist generated app.env keys failed: %v", err), resEnv.Values)
+		}
+	}
+
 	// Step 7: Pre-deploy hooks
 	preHooksRan := false
 	for _, hook := range p.X.Hooks.PreDeploy {
@@ -705,17 +724,17 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 
 	// Step 8: Promote staging -> final (order: app.env -> route -> override)
 	if err := fsys.WriteFile(finalAppEnvPath, appEnvBytes, 0o640, deployOwner); err != nil {
-		return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, existingEnv, resEnv.Values, appEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote app.env failed: %v", err))
+		return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, rollbackEnv, resEnv.Values, rollbackEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote app.env failed: %v", err))
 	}
 	if routeBytes != nil {
 		if err := fsys.WriteFile(finalRoutePath, routeBytes, 0o640, deployOwner); err != nil {
-			return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, existingEnv, resEnv.Values, appEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote route failed: %v", err))
+			return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, rollbackEnv, resEnv.Values, rollbackEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote route failed: %v", err))
 		}
 	} else {
 		_ = fsys.Remove(finalRoutePath)
 	}
 	if err := fsys.WriteFile(finalOverridePath, finalOverrideBytes, 0o640, deployOwner); err != nil {
-		return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, existingEnv, resEnv.Values, appEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote override failed: %v", err))
+		return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, rollbackEnv, resEnv.Values, rollbackEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote override failed: %v", err))
 	}
 	d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 	promoted = true
@@ -841,7 +860,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 
 	rollbackTarget := *st.Current
-	rollbackErr := d.executeSwap(ctx, inst, &rollbackTarget, existingEnv, false)
+	rollbackErr := d.executeSwap(ctx, inst, &rollbackTarget, rollbackEnv, false)
 
 	st.Status = state.StatusFailed
 	st.FailedHash = want.Hash()

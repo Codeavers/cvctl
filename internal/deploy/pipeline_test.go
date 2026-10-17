@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/joho/godotenv"
+
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/instance"
@@ -2332,5 +2334,84 @@ func TestDeployLockedAssumesCallerHoldsLock(t *testing.T) {
 
 	if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Force: true}); err == nil {
 		t.Fatal("Deploy must take the lock itself and fail while it is held")
+	}
+}
+
+func withRandomSpec(t *testing.T, rig *testRig) {
+	t.Helper()
+	spec := `vars:
+  DATABASE_URL: { source: service, service: main-db }
+  JWT_SECRET: { source: random, length: 24 }
+`
+	if err := os.WriteFile(filepath.Join(rig.infraDir, "env.spec.yml"), []byte(spec), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readEnvFile(t *testing.T, rig *testRig) map[string]string {
+	t.Helper()
+	raw, err := rig.fs.ReadFile(filepath.Join(rig.instDir, "app.env"))
+	if err != nil {
+		t.Fatalf("read app.env: %v", err)
+	}
+	vals, err := godotenv.Unmarshal(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return vals
+}
+
+func TestGeneratedRandomPersistsWhenHookFails(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	withRandomSpec(t, rig)
+	rig.compose.failHook["api:node dist/migrate.js"] = struct {
+		res sys.Result
+		err error
+	}{res: sys.Result{ExitCode: 1, Stderr: []byte("boom")}, err: fmt.Errorf("exit 1")}
+
+	want := defaultDesired()
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{})
+	if err != nil || res.Status != state.StatusFailed {
+		t.Fatalf("expected failed deploy, got %v %v", res.Status, err)
+	}
+	first := readEnvFile(t, rig)["JWT_SECRET"]
+	if len(first) != 24 {
+		t.Fatalf("expected persisted random, got %q", first)
+	}
+	delete(rig.compose.failHook, "api:node dist/migrate.js")
+	if res, err = rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Force: true}); err != nil || res.Status != state.StatusOK {
+		t.Fatalf("redeploy: %v %v", res.Status, err)
+	}
+	if got := readEnvFile(t, rig)["JWT_SECRET"]; got != first {
+		t.Fatalf("random changed across deploys: %q vs %q", first, got)
+	}
+}
+
+func TestGeneratedRandomSurvivesAutoRollback(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	withRandomSpec(t, rig)
+	old := state.Desired{InfraCommit: "0000000000000000000000000000000000000000"}
+	if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusOK, Current: &old}); err != nil {
+		t.Fatal(err)
+	}
+	pre := "DATABASE_URL=postgres://x\nPRE_VAR=pre_value_12345\n"
+	if err := rig.fs.WriteFile(filepath.Join(rig.instDir, "app.env"), []byte(pre), 0o640, sys.Owner{}); err != nil {
+		t.Fatal(err)
+	}
+	var seen string
+	rig.deployer.Health = func(ctx context.Context, inst, override string) error {
+		if rig.compose.upCount == 1 {
+			seen = readEnvFile(t, rig)["JWT_SECRET"]
+			return errors.New("unhealthy")
+		}
+		return nil
+	}
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{})
+	if err != nil || res.Status != state.StatusFailed {
+		t.Fatalf("expected failed deploy, got %v %v", res.Status, err)
+	}
+	vals := readEnvFile(t, rig)
+	if vals["PRE_VAR"] != "pre_value_12345" || seen == "" || vals["JWT_SECRET"] != seen {
+		t.Fatalf("rollback env lost keys: %v (generated %q)", vals, seen)
 	}
 }
