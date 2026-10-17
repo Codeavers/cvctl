@@ -44,6 +44,7 @@ func (e *OpsEnv) backupRunner() *backup.Runner {
 		Compose:    func(inst string) *compose.Project { return d.ComposeProject(run, inst) },
 		Load:       backup.LoadInstance(e.deployRoot(), e.Catalog),
 		Catalog:    e.Catalog,
+		Apply:      d.Reapply,
 		Host:       deploy.BackupTargetFrom(e.Host, e.Secrets),
 		Store:      e.Store,
 		Notify:     notifierFor(e.Host, e.Secrets),

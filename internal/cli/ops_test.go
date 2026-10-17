@@ -940,3 +940,11 @@ func TestStatusBackupNotConfiguredWarning(t *testing.T) {
 		t.Fatalf("configured: code=%d out=%s err=%s", code, out, errb)
 	}
 }
+
+func TestDBRestoreRequiresTo(t *testing.T) {
+	var stdout, stderr strings.Builder
+	code := Execute(NewRoot("test"), []string{"db", "restore", "app-prod", "db"}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "--to is required") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
