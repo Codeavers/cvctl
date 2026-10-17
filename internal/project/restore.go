@@ -135,6 +135,14 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 			Hint:    "run cvctl secrets import <bundle> first",
 		}
 	}
+	// An import may have left it root-owned; the deployer clones into it.
+	if err := e.fs().MkdirAll(instDir, 0o2775, deployOwner); err != nil {
+		return nil, &output.Error{
+			Code:    "E_FILE_WRITE",
+			Message: fmt.Sprintf("cannot fix the owner of %s: %v", instDir, err),
+			Hint:    "run as root (sudo cvctl project restore)",
+		}
+	}
 	if e.Data == nil || e.Deployer == nil || e.Deployer.Store == nil {
 		return nil, &output.Error{
 			Code:    "E_RESTORE_MISCONFIGURED",

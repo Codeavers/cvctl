@@ -273,3 +273,47 @@ func TestRestoreRefusesSymlinkedParent(t *testing.T) {
 		t.Fatal("wrote before refusing")
 	}
 }
+
+func TestRestoreCreatesInstanceDirsOwnedByDeployer(t *testing.T) {
+	entries := []Entry{
+		{Path: "/srv/deploy/shop-prod/cvctl.env", Mode: 0o640, User: "deployer", Group: "deploy", Data: []byte("A=1\n")},
+		{Path: "/var/lib/cvctl/shop-prod/deploy_key", Mode: 0o600, User: "deployer", Group: "deploy", Data: []byte("K")},
+	}
+	dst := systest.NewFS()
+	if _, err := Restore(dst, "", entries, false); err != nil {
+		t.Fatal(err)
+	}
+	for dir, mode := range map[string]uint32{"/srv/deploy/shop-prod": 0o2775, "/var/lib/cvctl/shop-prod": 0o750} {
+		fi, err := dst.Stat(dir)
+		if err != nil || !fi.IsDir || uint32(fi.Mode) != mode || fi.User != "deployer" || fi.Group != "deploy" {
+			t.Fatalf("%s: %+v %v", dir, fi, err)
+		}
+	}
+}
+
+func TestRestoreFixesRootOwnedInstanceDir(t *testing.T) {
+	dst := systest.NewFS()
+	if err := dst.MkdirAll("/srv/deploy/shop-prod", 0o750, sys.Owner{User: "root", Group: "root"}); err != nil {
+		t.Fatal(err)
+	}
+	entries := []Entry{{Path: "/srv/deploy/shop-prod/cvctl.env", Mode: 0o640, User: "deployer", Group: "deploy", Data: []byte("A=1\n")}}
+	if _, err := Restore(dst, "", entries, false); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := dst.Stat("/srv/deploy/shop-prod")
+	if fi.Mode != 0o2775 || fi.User != "deployer" || fi.Group != "deploy" {
+		t.Fatalf("%+v", fi)
+	}
+}
+
+func TestRestoreLooksUpDeployOwnerBeforeWriting(t *testing.T) {
+	dst := systest.NewFS()
+	delete(dst.Users, "deployer")
+	entries := []Entry{{Path: "/srv/deploy/shop-prod/cvctl.env", Mode: 0o640, User: "root", Group: "root", Data: []byte("A=1\n")}}
+	if _, err := Restore(dst, "", entries, false); code(err) != "E_SYS_OWNER_LOOKUP" {
+		t.Fatalf("%v", err)
+	}
+	if n := len(dst.Files()); n != 0 {
+		t.Fatalf("wrote %d paths", n)
+	}
+}

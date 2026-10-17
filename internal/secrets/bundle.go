@@ -362,8 +362,13 @@ func Restore(fsys sys.FS, root string, entries []Entry, force bool) ([]string, e
 		}
 	}
 	owners := map[sys.Owner]bool{}
+	instDirs := map[string]os.FileMode{}
 	for _, e := range entries {
 		owners[sys.Owner{User: e.User, Group: e.Group}] = true
+		if dir, mode, ok := instanceDir(e.Path); ok {
+			instDirs[dir] = mode
+			owners[deployOwner] = true
+		}
 		if err := checkParents(fsys, root, e.Path); err != nil {
 			return nil, err
 		}
@@ -371,6 +376,18 @@ func Restore(fsys sys.FS, root string, entries []Entry, force bool) ([]string, e
 	for o := range owners {
 		if err := fsys.LookupOwner(o); err != nil {
 			return nil, err
+		}
+	}
+	// The deployer clones into and the agent reads these directories, so they
+	// get the same owner and mode as project add and the state store give them.
+	dirs := make([]string, 0, len(instDirs))
+	for d := range instDirs {
+		dirs = append(dirs, d)
+	}
+	sort.Strings(dirs)
+	for _, d := range dirs {
+		if err := fsys.MkdirAll(root+d, instDirs[d], deployOwner); err != nil {
+			return nil, writeErr(d, err)
 		}
 	}
 	paths := make([]string, 0, len(entries))
@@ -390,6 +407,23 @@ func Restore(fsys sys.FS, root string, entries []Entry, force bool) ([]string, e
 		paths = append(paths, e.Path)
 	}
 	return paths, nil
+}
+
+var deployOwner = sys.Owner{User: "deployer", Group: "deploy"}
+
+// instanceDir returns the per-instance directory p lives in and its mode.
+func instanceDir(p string) (string, os.FileMode, bool) {
+	for top, mode := range map[string]os.FileMode{deployDir: 0o2775, stateDir: 0o750} {
+		rest, ok := strings.CutPrefix(p, top+"/")
+		if !ok {
+			continue
+		}
+		inst, _, nested := strings.Cut(rest, "/")
+		if nested && inst != "" {
+			return top + "/" + inst, mode, true
+		}
+	}
+	return "", 0, false
 }
 
 // checkParents refuses a symlink anywhere between the allowed root and the

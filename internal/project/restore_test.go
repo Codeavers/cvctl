@@ -3,6 +3,7 @@ package project
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -627,5 +628,27 @@ func TestRestoreBucketListFailureCleansUp(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(*rig.log, ","), "restore db") || fileExists(rig.env.fs(), filepath.Join(rig.instDir, "infra")) {
 		t.Fatalf("log=%v", *rig.log)
+	}
+}
+
+type mkdirRecFS struct {
+	sys.FS
+	mkdirs map[string]string
+}
+
+func (f *mkdirRecFS) MkdirAll(p string, mode os.FileMode, o sys.Owner) error {
+	f.mkdirs[p] = fmt.Sprintf("%o %s:%s", uint32(mode), o.User, o.Group)
+	return f.FS.MkdirAll(p, mode, o)
+}
+
+func TestRestoreFixesInstanceDirOwner(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	rec := &mkdirRecFS{FS: rig.env.FS, mkdirs: map[string]string{}}
+	rig.env.FS = rec
+	if _, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.mkdirs[rig.instDir]; got != "2775 deployer:deploy" {
+		t.Fatalf("instance dir: %q (%v)", got, rec.mkdirs)
 	}
 }
