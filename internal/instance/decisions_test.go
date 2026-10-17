@@ -316,7 +316,7 @@ func TestReadMalformedHidesSecrets(t *testing.T) {
 	}
 }
 
-func TestVolumeDecisionRoundTripAndCheck(t *testing.T) {
+func TestVolumeDecisionEntries(t *testing.T) {
 	d := &Decisions{Services: map[string]ServiceDecision{"db": {Mode: "local", Volume: "my_vol"}}}
 	if got := d.Entries()["CVCTL_SVC_DB_VOLUME"]; got != "my_vol" {
 		t.Fatalf("entry = %q", got)
@@ -324,5 +324,33 @@ func TestVolumeDecisionRoundTripAndCheck(t *testing.T) {
 	d2 := &Decisions{Services: map[string]ServiceDecision{"db": {Mode: "local"}}}
 	if _, ok := d2.Entries()["CVCTL_SVC_DB_VOLUME"]; ok {
 		t.Fatal("empty volume must not be written")
+	}
+}
+
+func TestVolumeReadAndCheck(t *testing.T) {
+	p, cat := load(t)
+	d := full()
+	sd := d.Services["main-db"]
+	sd.Volume = "restored_vol-1"
+	d.Services["main-db"] = sd
+	path := filepath.Join(t.TempDir(), "cvctl.env")
+	if err := Write(path, d); err != nil {
+		t.Fatal(err)
+	}
+	back, err := Read(path, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Services["main-db"].Volume != "restored_vol-1" {
+		t.Fatalf("volume lost: %+v", back.Services["main-db"])
+	}
+	if is := Check(back, p, cat); len(is) != 0 {
+		t.Fatalf("valid volume rejected: %v", is)
+	}
+	sd.Volume = "bad name/../x"
+	d.Services["main-db"] = sd
+	got := codes(Check(d, p, cat))
+	if !reflect.DeepEqual(got, []string{"E_DECISION_INVALID:main-db"}) {
+		t.Fatalf("got %v", got)
 	}
 }

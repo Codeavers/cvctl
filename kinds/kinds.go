@@ -33,11 +33,13 @@ type Kind struct {
 	VolumePath     string            `yaml:"volume_path"`
 	ContainerEnv   map[string]string `yaml:"container_env"`
 	Command        []string          `yaml:"command"`
-	Env            map[string]string `yaml:"env"`
-	Backup         string            `yaml:"backup"`
-	External       []string          `yaml:"external"`
-	Health         []string          `yaml:"health"`
-	RestoreCheck   string            `yaml:"restore_check"`
+	// BackupCommandArgs are appended to Command only when backups are wired.
+	BackupCommandArgs []string          `yaml:"backup_command_args"`
+	Env               map[string]string `yaml:"env"`
+	Backup            string            `yaml:"backup"`
+	External          []string          `yaml:"external"`
+	Health            []string          `yaml:"health"`
+	RestoreCheck      string            `yaml:"restore_check"`
 }
 
 type Catalog map[string]Kind

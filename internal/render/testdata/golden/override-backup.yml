@@ -62,7 +62,6 @@ services:
     env_file:
       - /srv/inst/proj-dev/backup-main-db.env
     environment:
-      PGDATA: /var/lib/postgresql/data/pgdata
       POSTGRES_DB: d
       POSTGRES_PASSWORD: p
       POSTGRES_USER: u

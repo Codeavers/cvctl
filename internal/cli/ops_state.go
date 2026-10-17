@@ -14,8 +14,10 @@ import (
 
 	"github.com/codeavers/cvctl/internal/compose"
 	"github.com/codeavers/cvctl/internal/contract"
+	"github.com/codeavers/cvctl/internal/deploy"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/state"
+	"github.com/codeavers/cvctl/kinds"
 )
 
 type instanceStatusItem struct {
@@ -151,6 +153,10 @@ func newStatusCmd() *cobra.Command {
 			warnings := make([]string, 0)
 			if (e.Host != nil && e.Host.Storage == "local") || os.Getenv("CVCTL_STORAGE") == "local" {
 				warnings = append(warnings, "CVCTL_STORAGE=local: backups are stored on local disk; configure S3 for offsite backup")
+			}
+
+			if deploy.BackupTargetFrom(e.Host, e.Secrets) == nil && e.backupsNeeded(instances) {
+				warnings = append(warnings, "backups are not configured: check CVCTL_S3_* and /etc/cvctl/secrets (run cvctl init)")
 			}
 
 			rep := statusReport{
@@ -295,4 +301,41 @@ func newLogsCmd() *cobra.Command {
 	}
 	cmd.Flags().Int("tail", 100, "number of lines to show")
 	return cmd
+}
+
+// backupsNeeded reports whether any instance has a local data service whose
+// kind is backed up (wal-g or volume).
+func (e *OpsEnv) backupsNeeded(instances []string) bool {
+	cat := e.Catalog
+	if cat == nil {
+		var err error
+		if cat, err = kinds.Load(); err != nil {
+			return false
+		}
+	}
+	for _, inst := range instances {
+		envPath := filepath.Join(e.deployRoot(), inst, "cvctl.env")
+		d0, err := instance.Read(envPath, &contract.Project{})
+		if err != nil {
+			continue
+		}
+		infra := d0.InfraPath
+		if infra == "" {
+			infra = "."
+		}
+		p, err := contract.Load(filepath.Join(e.deployRoot(), inst, "infra", infra), cat)
+		if err != nil {
+			continue
+		}
+		d, err := instance.Read(envPath, p)
+		if err != nil {
+			continue
+		}
+		for _, ds := range p.Data {
+			if b := cat[ds.Kind].Backup; d.Services[ds.Name].Mode == "local" && (b == "wal-g" || b == "volume") {
+				return true
+			}
+		}
+	}
+	return false
 }

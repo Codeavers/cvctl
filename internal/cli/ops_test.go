@@ -910,3 +910,33 @@ func TestRollbackFailureUsesRollbackCode(t *testing.T) {
 		t.Fatalf("code %d out=%s", code, out)
 	}
 }
+
+func TestStatusBackupNotConfiguredWarning(t *testing.T) {
+	_, env := setupOpsFixture(t, "myapp-dev")
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+	const msg = "backups are not configured: check CVCTL_S3_* and /etc/cvctl/secrets (run cvctl init)"
+
+	code, out, errb := run(t, "status")
+	if code != 0 || !strings.Contains(out, msg) {
+		t.Fatalf("human: code=%d out=%s err=%s", code, out, errb)
+	}
+	code, out, errb = run(t, "status", "--json")
+	if code != 0 || !strings.Contains(out, msg) {
+		t.Fatalf("json: code=%d out=%s err=%s", code, out, errb)
+	}
+
+	sec := hostcfg.NewSecrets()
+	for _, k := range []string{"s3_access_key", "s3_secret_key", "walg_libsodium_key"} {
+		sec.Set(k, "value-"+k)
+	}
+	cfg := hostcfg.NewConfig()
+	_ = cfg.Set("S3_ENDPOINT", "http://s3:9000")
+	_ = cfg.Set("S3_BUCKET", "b")
+	env.Host, env.Secrets = cfg, sec
+	code, out, errb = run(t, "status", "--json")
+	if code != 0 || strings.Contains(out, msg) {
+		t.Fatalf("configured: code=%d out=%s err=%s", code, out, errb)
+	}
+}

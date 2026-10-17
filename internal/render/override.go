@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -203,7 +204,11 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 			svc["environment"] = env
 		}
 		if len(k.Command) > 0 {
-			svc["command"] = substituteAll(k, k.Command, sd.Creds)
+			cmd := k.Command
+			if o.Backup != nil && k.Backup == "wal-g" {
+				cmd = append(slices.Clone(cmd), k.BackupCommandArgs...)
+			}
+			svc["command"] = substituteAll(k, cmd, sd.Creds)
 		}
 		if len(k.Health) > 0 {
 			svc["healthcheck"] = map[string]any{"test": substituteAll(k, k.Health, sd.Creds)}

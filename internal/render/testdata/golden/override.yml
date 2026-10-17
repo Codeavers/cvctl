@@ -46,18 +46,11 @@ services:
       - postgres
       - -c
       - wal_level=replica
-      - -c
-      - archive_mode=on
-      - -c
-      - archive_command=wal-g wal-push %p
-      - -c
-      - archive_timeout=60
     deploy:
       resources:
         limits:
           memory: 512m
     environment:
-      PGDATA: /var/lib/postgresql/data/pgdata
       POSTGRES_DB: d
       POSTGRES_PASSWORD: p
       POSTGRES_USER: u

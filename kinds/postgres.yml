@@ -4,9 +4,9 @@ versions: ["15", "16", "17"]
 default_version: "16"
 port: 5432
 volume_path: /var/lib/postgresql/data
-command: ["postgres","-c","wal_level=replica","-c","archive_mode=on","-c","archive_command=wal-g wal-push %p","-c","archive_timeout=60"]
+command: ["postgres","-c","wal_level=replica"]
+backup_command_args: ["-c","archive_mode=on","-c","archive_command=wal-g wal-push %p","-c","archive_timeout=60"]
 container_env:
-  PGDATA: /var/lib/postgresql/data/pgdata
   POSTGRES_USER: "{user}"
   POSTGRES_PASSWORD: "{password}"
   POSTGRES_DB: "{db}"

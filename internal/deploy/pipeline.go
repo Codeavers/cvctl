@@ -827,6 +827,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, rollbackEnv, secrets, rollbackEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote backup env failed: %v", err))
 		}
 	}
+	d.removeStaleBackupEnvs(instDir, backupEnvs)
 	if routeBytes != nil {
 		if err := fsys.WriteFile(finalRoutePath, routeBytes, 0o640, deployOwner); err != nil {
 			return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, rollbackEnv, secrets, rollbackEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote route failed: %v", err))
@@ -1075,4 +1076,23 @@ func (d *Deployer) backupSecrets() map[string]string {
 		}
 	}
 	return out
+}
+
+// removeStaleBackupEnvs deletes backup-<svc>.env files of services that are no
+// longer wired for wal-g, so old credentials do not linger on disk.
+func (d *Deployer) removeStaleBackupEnvs(instDir string, keep map[string]map[string]string) {
+	fsys := d.fs()
+	entries, err := fsys.ReadDir(instDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasPrefix(n, "backup-") || !strings.HasSuffix(n, ".env") {
+			continue
+		}
+		if _, ok := keep[strings.TrimSuffix(strings.TrimPrefix(n, "backup-"), ".env")]; !ok {
+			_ = fsys.Remove(filepath.Join(instDir, n))
+		}
+	}
 }

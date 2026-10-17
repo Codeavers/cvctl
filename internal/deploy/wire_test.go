@@ -168,3 +168,38 @@ func TestWireSetsAllowedFromHost(t *testing.T) {
 		t.Fatalf("no host registries must yield an empty non-nil list, got %#v", d2.Allowed)
 	}
 }
+
+func TestBackupTargetFrom(t *testing.T) {
+	sec := hostcfg.NewSecrets()
+	sec.Set("s3_access_key", "ak")
+	sec.Set("s3_secret_key", "sk")
+	sec.Set("walg_libsodium_key", "lk")
+	sec.Set("restic_password", "rp")
+	cfg := hostcfg.NewConfig()
+	_ = cfg.Set("HOST_NAME", "h1")
+	_ = cfg.Set("S3_ENDPOINT", "http://ext:9000")
+	_ = cfg.Set("S3_BUCKET", "b")
+
+	got := deploy.BackupTargetFrom(cfg, sec)
+	if got == nil || got.Endpoint != "http://ext:9000" || got.Region != "us-east-1" || got.Host != "h1" || got.ResticPassword != "rp" {
+		t.Fatalf("fallback/default wrong: %+v", got)
+	}
+	_ = cfg.Set("S3_ENDPOINT_INTERNAL", "http://cvctl-storage:9000")
+	_ = cfg.Set("S3_REGION", "eu-west-1")
+	got = deploy.BackupTargetFrom(cfg, sec)
+	if got.Endpoint != "http://cvctl-storage:9000" || got.Region != "eu-west-1" {
+		t.Fatalf("internal endpoint/region not used: %+v", got)
+	}
+	if deploy.BackupTargetFrom(nil, sec) != nil || deploy.BackupTargetFrom(cfg, nil) != nil {
+		t.Fatal("nil cfg/secrets must give nil")
+	}
+	sec.Set("walg_libsodium_key", "")
+	if deploy.BackupTargetFrom(cfg, sec) != nil {
+		t.Fatal("missing libsodium key must give nil")
+	}
+	sec.Set("walg_libsodium_key", "lk")
+	_ = cfg.Set("S3_BUCKET", "")
+	if deploy.BackupTargetFrom(cfg, sec) != nil {
+		t.Fatal("missing bucket must give nil")
+	}
+}

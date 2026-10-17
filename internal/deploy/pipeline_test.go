@@ -2718,3 +2718,74 @@ func TestDeployWithoutBackupWritesNoBackupEnv(t *testing.T) {
 		t.Fatal("backup env written without a backup target")
 	}
 }
+
+func testBackupTarget() *render.BackupTarget {
+	return &render.BackupTarget{
+		Host: "h1", Endpoint: "http://cvctl-storage:9000", Bucket: "cvctl", Region: "us-east-1",
+		AccessKey: "AKIDSECRET1", SecretKey: "SKSECRETVALUE", LibsodiumKey: "LIBSODIUMSECRET",
+	}
+}
+
+func TestRollbackRewritesBackupEnv(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	rig.deployer.Backup = testBackupTarget()
+	curr := state.Desired{InfraCommit: "1111111111111111111111111111111111111111", Digests: map[string]string{"api": "sha256:111"}}
+	prev := state.Desired{InfraCommit: "0000000000000000000000000000000000000000", Digests: map[string]string{"api": "sha256:000"}}
+	if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusOK, Current: &curr, Previous: &prev}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(rig.instDir, "backup-main-db.env")
+	if err := os.WriteFile(path, []byte("STALE=1\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rig.deployer.Rollback(context.Background(), "demo-dev", nil, "cli:admin"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(raw), "WALG_S3_PREFIX=s3://cvctl/h1/demo-dev/main-db") || strings.Contains(string(raw), "STALE") {
+		t.Fatalf("backup env not rewritten: %v\n%s", err, raw)
+	}
+}
+
+func TestPromoteFailureWithBackupEnvs(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	rig.deployer.Backup = testBackupTarget()
+	old := "0000000000000000000000000000000000000000"
+	if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusOK, Current: &state.Desired{InfraCommit: old}}); err != nil {
+		t.Fatal(err)
+	}
+	rig.deployer.FS = &errorFS{FS: rig.fs, failWriteFile: map[string]error{
+		filepath.Join(rig.instDir, "compose.cvctl.yml"): errors.New("disk full"),
+	}}
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != state.StatusFailed {
+		t.Fatalf("status %v", res.Status)
+	}
+	if strings.Contains(res.Detail, "SKSECRETVALUE") || strings.Contains(res.Detail, "LIBSODIUMSECRET") {
+		t.Fatalf("secret leaked in detail: %s", res.Detail)
+	}
+	if _, err := os.Stat(filepath.Join(rig.instDir, ".staging")); err == nil {
+		t.Fatal("staging not cleaned (backup env left behind)")
+	}
+}
+
+func TestStaleBackupEnvRemovedOnPromote(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	rig.deployer.Backup = testBackupTarget()
+	stale := filepath.Join(rig.instDir, "backup-gone.env")
+	if err := os.WriteFile(stale, []byte("X=1\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"}); err != nil || res.Status != state.StatusOK {
+		t.Fatalf("deploy: %v %+v", err, res)
+	}
+	if _, err := os.Stat(stale); err == nil {
+		t.Fatal("stale backup env not removed")
+	}
+	if _, err := os.Stat(filepath.Join(rig.instDir, "backup-main-db.env")); err != nil {
+		t.Fatalf("wired backup env missing: %v", err)
+	}
+}

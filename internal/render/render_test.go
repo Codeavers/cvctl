@@ -390,3 +390,28 @@ func TestBackupEnvDirForStaging(t *testing.T) {
 		t.Fatalf("staging backup env path missing:\n%s", out)
 	}
 }
+
+func TestArchiveFlagsOnlyWhenBackupWired(t *testing.T) {
+	p, d, cat := setup(t)
+	off, err := Override(p, d, cat, Options{InstanceDir: "/i", Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"archive_mode", "archive_command", "archive_timeout", "env_file:\n      - /i/backup"} {
+		if strings.Contains(string(off), s) {
+			t.Fatalf("%q rendered without a backup target", s)
+		}
+	}
+	if !strings.Contains(string(off), "wal_level=replica") || strings.Contains(string(off), "PGDATA") {
+		t.Fatalf("base command or PGDATA wrong:\n%s", off)
+	}
+	on, err := Override(p, d, cat, Options{InstanceDir: "/i", Edge: "edge", Backup: testBackup()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"archive_mode=on", "archive_command=wal-g wal-push %p", "archive_timeout=60", "/i/backup-main-db.env"} {
+		if !strings.Contains(string(on), s) {
+			t.Fatalf("%q missing with a backup target", s)
+		}
+	}
+}
