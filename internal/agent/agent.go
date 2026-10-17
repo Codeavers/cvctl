@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/codeavers/cvctl/internal/contract"
@@ -19,36 +18,6 @@ import (
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/kinds"
 )
-
-var (
-	lastErrorsMu sync.Mutex
-	lastErrors   = make(map[string]string)
-)
-
-// ResetErrors clears the in-memory error map (primarily for testing).
-func ResetErrors() {
-	lastErrorsMu.Lock()
-	defer lastErrorsMu.Unlock()
-	lastErrors = make(map[string]string)
-}
-
-func getLastError(inst string) string {
-	lastErrorsMu.Lock()
-	defer lastErrorsMu.Unlock()
-	return lastErrors[inst]
-}
-
-func setLastError(inst, errStr string) {
-	lastErrorsMu.Lock()
-	defer lastErrorsMu.Unlock()
-	lastErrors[inst] = errStr
-}
-
-func clearLastError(inst string) {
-	lastErrorsMu.Lock()
-	defer lastErrorsMu.Unlock()
-	delete(lastErrors, inst)
-}
 
 // Store abstracts state operations for instances.
 type Store interface {
@@ -86,7 +55,6 @@ type Config struct {
 	StateRoot  string
 	FS         sys.FS
 	Catalog    kinds.Catalog
-	LastErrors map[string]string
 }
 
 // Run executes the agent monitoring loop.
@@ -180,6 +148,21 @@ func Run(ctx context.Context, cfg Config) error {
 		_ = json.NewEncoder(out).Encode(entry)
 	}
 
+	lastErrors := make(map[string]string)
+
+	recordError := func(inst, reason string) {
+		if lastErrors[inst] != reason {
+			lastErrors[inst] = reason
+			logDecision(inst, "error", reason)
+			_ = notif.Send(ctx, notify.Message{
+				Host:  hostName,
+				Level: "error",
+				Title: fmt.Sprintf("%s agent error", inst),
+				Text:  reason,
+			})
+		}
+	}
+
 	runTick := func() {
 		instances, err := cfg.Store.Instances()
 		if err != nil {
@@ -192,79 +175,73 @@ func Run(ctx context.Context, cfg Config) error {
 				return
 			}
 
-			dec, p, err := loadFn(inst)
-			if err != nil {
-				errStr := err.Error()
-				if getLastError(inst) != errStr {
-					setLastError(inst, errStr)
-					logDecision(inst, "error", errStr)
-					_ = notif.Send(ctx, notify.Message{
-						Host:  hostName,
-						Level: "error",
-						Title: fmt.Sprintf("%s agent error", inst),
-						Text:  errStr,
-					})
+			func(inst string) {
+				defer func() {
+					if r := recover(); r != nil {
+						recordError(inst, fmt.Sprintf("panic: %v", r))
+					}
+				}()
+
+				dec, p, err := loadFn(inst)
+				if err != nil {
+					recordError(inst, err.Error())
+					return
 				}
-				continue
-			}
 
-			src := sourcesFn(dec)
-			want, err := src.Desired(ctx, dec, p)
-			if err != nil {
-				errStr := err.Error()
-				if getLastError(inst) != errStr {
-					setLastError(inst, errStr)
-					logDecision(inst, "error", errStr)
-					_ = notif.Send(ctx, notify.Message{
-						Host:  hostName,
-						Level: "error",
-						Title: fmt.Sprintf("%s desired state error", inst),
-						Text:  errStr,
-					})
+				src := sourcesFn(dec)
+				want, err := src.Desired(ctx, dec, p)
+				if err != nil {
+					recordError(inst, err.Error())
+					return
 				}
-				continue
-			}
 
-			clearLastError(inst)
-
-			st, err := cfg.Store.Load(inst)
-			if err != nil {
-				logDecision(inst, "error", fmt.Sprintf("cannot load state: %v", err))
-				continue
-			}
-
-			wantHash := want.Hash()
-			currentHash := ""
-			if st.Current != nil {
-				currentHash = st.Current.Hash()
-			}
-
-			if st.Status == state.StatusPaused {
-				if st.PausedWantHash == "" || wantHash == st.PausedWantHash || (st.FailedHash != "" && wantHash == st.FailedHash) {
-					logDecision(inst, "skip", "instance is paused")
-					continue
+				st, err := cfg.Store.Load(inst)
+				if err != nil {
+					recordError(inst, fmt.Sprintf("cannot load state: %v", err))
+					return
 				}
-			}
 
-			isBlocked := st.Status == state.StatusBlocked
-			hashChanged := (wantHash != currentHash) && (st.FailedHash == "" || wantHash != st.FailedHash)
-
-			if !isBlocked && !hashChanged {
-				reason := "already at desired state"
-				if st.FailedHash != "" && wantHash == st.FailedHash {
-					reason = "desired state previously failed"
+				wantHash := want.Hash()
+				currentHash := ""
+				if st.Current != nil {
+					currentHash = st.Current.Hash()
 				}
-				logDecision(inst, "skip", reason)
-				continue
-			}
 
-			reason := "new desired state"
-			if isBlocked {
-				reason = "retrying blocked instance"
-			}
-			logDecision(inst, "deploy", reason)
+				if st.Status == state.StatusPaused {
+					if st.PausedWantHash == "" || wantHash == st.PausedWantHash || (st.FailedHash != "" && wantHash == st.FailedHash) {
+						delete(lastErrors, inst)
+						logDecision(inst, "skip", "instance is paused")
+						return
+					}
+				}
 
-			_, _ = cfg.Deployer.Deploy(ctx, inst, want, deploy.Options{Actor: "agent"})
+				isBlocked := st.Status == state.StatusBlocked
+				hashChanged := (wantHash != currentHash) && (st.FailedHash == "" || wantHash != st.FailedHash)
+
+				if !isBlocked && !hashChanged {
+					delete(lastErrors, inst)
+					reason := "already at desired state"
+					if st.FailedHash != "" && wantHash == st.FailedHash {
+						reason = "desired state previously failed"
+					}
+					logDecision(inst, "skip", reason)
+					return
+				}
+
+				deployCtx := context.WithoutCancel(ctx)
+				res, err := cfg.Deployer.Deploy(deployCtx, inst, want, deploy.Options{Actor: "agent"})
+				if err != nil {
+					recordError(inst, err.Error())
+					return
+				}
+
+				delete(lastErrors, inst)
+				status := string(res.Status)
+				if status == "" {
+					status = "ok"
+				}
+				logDecision(inst, "deploy", status)
+			}(inst)
 		}
 	}
 

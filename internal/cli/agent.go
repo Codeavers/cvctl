@@ -128,7 +128,6 @@ func newAgentCmd() *cobra.Command {
 			var logOut io.Writer = cmd.OutOrStdout()
 			var buf bytes.Buffer
 			if asJSON && once {
-				logOut = io.MultiWriter(&buf, cmd.OutOrStdout())
 				// We capture to buffer so we can emit single JSON document if json mode
 				logOut = &buf
 			}
