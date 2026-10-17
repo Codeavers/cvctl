@@ -55,6 +55,11 @@ func newRestoreRig(t *testing.T) *restoreRig {
 		}
 		return nil
 	}
+	g.r.Sleep = func(time.Duration) {}
+	pq := cp + "exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c "
+	g.run.OnPrefix(pq+"select pg_walfile_name", sys.Result{Stdout: []byte("000000010000000000000005\n")})
+	g.run.OnPrefix(pq+"select coalesce", sys.Result{Stdout: []byte("000000010000000000000005\n")})
+	g.run.OnPrefix(pq+"select 1", sys.Result{Stdout: []byte("1\n")})
 	g.run.On("docker volume inspect "+newVol, sys.Result{ExitCode: 1})
 	g.run.On("docker inspect -f {{.State.Running}} "+recName, sys.Result{Stdout: []byte("true\n")})
 	g.run.OnPrefix("docker exec "+recName+" psql -U app -d appdb -tA -c select pg_is_in_recovery()", sys.Result{Stdout: []byte("f\n")})
@@ -87,6 +92,10 @@ func TestRestoreHappyPathOrder(t *testing.T) {
 		"docker stop -t 120 " + recName,
 		"docker rm -f " + recName,
 		"APPLY",
+		cp + "up -d --wait db",
+		cp + "exec -T -u postgres db pg_isready -U app -d appdb",
+		cp + "exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select 1",
+		cp + "exec -T -u postgres db wal-g backup-push /var/lib/postgresql/data",
 	}
 	last := -1
 	for _, want := range order {
@@ -97,7 +106,7 @@ func TestRestoreHappyPathOrder(t *testing.T) {
 		last = i
 	}
 	run := g.calls()[g.index("docker run -d")]
-	for _, want := range []string{"-v " + newVol + ":/var/lib/postgresql/data", "-e RESTORE_BACKUP=LATEST", "recovery_target_action = 'promote'"} {
+	for _, want := range []string{"-v " + newVol + ":/var/lib/postgresql/data", "-e RESTORE_BACKUP=LATEST", "-c recovery_target_action=promote", `-c "restore_command=wal-g wal-fetch %f %p"`} {
 		if !strings.Contains(run, want) {
 			t.Fatalf("run missing %q:\n%s", want, run)
 		}
@@ -198,10 +207,10 @@ func TestRestoreDeployIDUsesRecoveryTargetName(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := g.calls()[g.index("docker run -d")]
-	if !strings.Contains(run, "-e RESTORE_TARGET_NAME=deploy-42") || !strings.Contains(run, "recovery_target_name = '$RESTORE_TARGET_NAME'") || !strings.Contains(run, "recovery_target_inclusive = true") {
+	if !strings.Contains(run, "-e RESTORE_TARGET_NAME=deploy-42") || !strings.Contains(run, `-c "recovery_target_name=$RESTORE_TARGET_NAME"`) || !strings.Contains(run, "-c recovery_target_inclusive=true") {
 		t.Fatalf("run:\n%s", run)
 	}
-	if g.index(cp+"exec") >= 0 {
+	if g.index(cp+"exec -T -u postgres db wal-g backup-list") >= 0 {
 		t.Fatalf("an unbounded id must use LATEST without listing: %v", g.calls())
 	}
 }
@@ -360,5 +369,135 @@ func TestCleanupFailsClosedWhenInUseCheckFails(t *testing.T) {
 	g.run.OnPrefix("docker ps -a -q --filter volume=", sys.Result{ExitCode: 1, Stderr: []byte("daemon down")})
 	if _, err := g.r.Cleanup(context.Background(), "app-prod", true); err == nil || g.has("docker volume rm") != 0 {
 		t.Fatalf("err=%v calls=%v", err, g.calls())
+	}
+}
+
+func TestRestoreRecoveryFlagsNeverTouchAutoConf(t *testing.T) {
+	g := newRestoreRig(t)
+	if _, err := g.r.Restore(context.Background(), "app-prod", "db", "latest"); err != nil {
+		t.Fatal(err)
+	}
+	run := g.calls()[g.index("docker run -d")]
+	if strings.Contains(run, "postgresql.auto.conf") || strings.Contains(run, "tee") {
+		t.Fatalf("recovery settings must not be persisted:\n%s", run)
+	}
+	if !strings.Contains(run, `exec gosu postgres postgres "$@"`) || !strings.Contains(run, "recovery.signal") {
+		t.Fatalf("run:\n%s", run)
+	}
+}
+
+func TestRestoreTimeTargetKeepsSubsecondPrecision(t *testing.T) {
+	g := newRestoreRig(t)
+	g.run.OnPrefix(cp+"exec -T -u postgres db wal-g backup-list", sys.Result{Stdout: []byte(`[{"backup_name":"base_0000000100000000000000A1","time":"2026-01-01T01:00:00Z"}]`)})
+	if _, err := g.r.Restore(context.Background(), "app-prod", "db", "2026-01-01T12:00:00.250Z"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(g.calls()[g.index("docker run -d")], "-e RESTORE_TARGET_TIME=2026-01-01T12:00:00.25Z") {
+		t.Fatalf("calls: %v", g.calls())
+	}
+}
+
+func TestRestoreAdvancesGenerationAndBacksUp(t *testing.T) {
+	g := newRestoreRig(t)
+	g.fs.WriteFile(envPath, []byte("CVCTL_INSTANCE=app-prod\nCVCTL_SVC_DB_BACKUP_GEN=2\nCVCTL_SVC_DB_BACKUP_GEN_MAX=3\n"), 0o640, sys.Owner{})
+	if _, err := g.r.Restore(context.Background(), "app-prod", "db", "latest"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(g.envAt[0], "CVCTL_SVC_DB_BACKUP_GEN=4") || !strings.Contains(g.envAt[0], "CVCTL_SVC_DB_BACKUP_GEN_MAX=4") {
+		t.Fatalf("env: %s", g.envAt[0])
+	}
+	if g.index(cp+"exec -T -u postgres db wal-g backup-push") < g.index("APPLY") {
+		t.Fatalf("backup-push must follow the switch: %v", g.calls())
+	}
+}
+
+func TestRestoreRollbackRestoresGenerationButKeepsMax(t *testing.T) {
+	g := newRestoreRig(t)
+	g.fs.WriteFile(envPath, []byte("CVCTL_INSTANCE=app-prod\nCVCTL_SVC_DB_BACKUP_GEN=2\nCVCTL_SVC_DB_BACKUP_GEN_MAX=3\n"), 0o640, sys.Owner{})
+	g.applyErrs = []error{errors.New("boom"), nil}
+	if _, err := g.r.Restore(context.Background(), "app-prod", "db", "latest"); err == nil {
+		t.Fatal("expected failure")
+	}
+	if !strings.Contains(g.envAt[1], "CVCTL_SVC_DB_BACKUP_GEN=2\n") || !strings.Contains(g.envAt[1], "CVCTL_SVC_DB_BACKUP_GEN_MAX=4") {
+		t.Fatalf("rolled-back env: %s", g.envAt[1])
+	}
+	if g.index(cp+"exec -T -u postgres db wal-g backup-push") >= 0 {
+		t.Fatal("no base backup after a rollback")
+	}
+}
+
+func TestRestoreBackupPushFailureIsWarningNotRollback(t *testing.T) {
+	g := newRestoreRig(t)
+	g.run.OnPrefix(cp+"exec -T -u postgres db wal-g backup-push", sys.Result{ExitCode: 1, Stderr: []byte("s3 down " + secretKey)})
+	res, err := g.r.Restore(context.Background(), "app-prod", "db", "latest")
+	if err != nil || len(res.Warnings) != 1 || strings.Contains(res.Warnings[0], secretKey) || g.applies != 1 {
+		t.Fatalf("res=%+v err=%v applies=%d", res, err, g.applies)
+	}
+	warned := false
+	for _, m := range g.note.msgs {
+		warned = warned || m.Level == "warn"
+	}
+	if !warned {
+		t.Fatalf("notify: %+v", g.note.msgs)
+	}
+}
+
+func TestRestoreRollsBackWhenDataServiceDoesNotServe(t *testing.T) {
+	for name, fail := range map[string]string{
+		"wait":     cp + "up -d --wait db",
+		"isready":  cp + "exec -T -u postgres db pg_isready",
+		"select 1": cp + "exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select 1",
+	} {
+		g := newRestoreRig(t)
+		g.run.OnPrefix(fail, sys.Result{ExitCode: 1, Stderr: []byte("not ready")})
+		_, err := g.r.Restore(context.Background(), "app-prod", "db", "latest")
+		var oe *output.Error
+		if !errors.As(err, &oe) || oe.Code != "E_RESTORE_FAILED" || g.applies != 2 {
+			t.Fatalf("%s: err=%v applies=%d", name, err, g.applies)
+		}
+	}
+}
+
+func TestRestoreArchiveLagAbortsWithoutTouchingVolumesOrDecisions(t *testing.T) {
+	g := newRestoreRig(t)
+	g.r.ArchiveTimeout = 10 * time.Second
+	g.run.OnPrefix(cp+"exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select coalesce", sys.Result{Stdout: []byte("000000010000000000000004\n")})
+	before, _ := g.fs.ReadFile(envPath)
+	_, err := g.r.Restore(context.Background(), "app-prod", "db", "latest")
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_RESTORE_ARCHIVE_LAG" {
+		t.Fatalf("err=%v", err)
+	}
+	after, _ := g.fs.ReadFile(envPath)
+	if string(before) != string(after) || g.applies != 0 || g.has("docker volume create") != 0 || g.has("docker run") != 0 {
+		t.Fatalf("state changed: %v", g.calls())
+	}
+	if g.index(cp+"stop db") >= 0 {
+		t.Fatalf("the database must keep running: %v", g.calls())
+	}
+	if g.index(cp+"up -d") < 0 {
+		t.Fatalf("apps must be restarted: %v", g.calls())
+	}
+}
+
+func TestRestoreStopPointBeforeConsistentIsTargetError(t *testing.T) {
+	g := newRestoreRig(t)
+	g.run.On("docker inspect -f {{.State.Running}} "+recName, sys.Result{Stdout: []byte("false\n")})
+	g.run.OnPrefix("docker logs", sys.Result{Stderr: []byte("FATAL:  requested recovery stop point is before consistent recovery point")})
+	_, err := g.r.Restore(context.Background(), "app-prod", "db", "deploy-42")
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_RESTORE_TARGET" || !strings.Contains(oe.Hint, "newer than the restore point") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestVerifyScriptHasNoPersistedRecoverySettings(t *testing.T) {
+	g := verifyRig(t, "")
+	if _, err := g.r.Verify(context.Background(), "app-prod", "db"); err != nil {
+		t.Fatal(err)
+	}
+	run := g.calls()[1]
+	if strings.Contains(run, "postgresql.auto.conf") || !strings.Contains(run, `-c "restore_command=wal-g wal-fetch %f %p"`) || !strings.Contains(run, "-c recovery_target_action=promote") {
+		t.Fatalf("run:\n%s", run)
 	}
 }

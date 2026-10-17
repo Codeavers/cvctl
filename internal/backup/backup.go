@@ -123,7 +123,10 @@ type Runner struct {
 	Catalog    kinds.Catalog
 	// Apply re-renders and starts target with the current decisions and runs
 	// the health check; restore uses it to switch a volume and to roll back.
-	Apply func(ctx context.Context, inst string, target *state.Desired) error
+	// ArchiveTimeout bounds the wait for the last WAL segment to be archived
+	// before a restore; zero means 120s.
+	ArchiveTimeout time.Duration
+	Apply          func(ctx context.Context, inst string, target *state.Desired) error
 	// Lock retry: deploys hold the instance lock for minutes, so a status
 	// write waits for them instead of losing the record.
 	LockInterval time.Duration

@@ -354,3 +354,23 @@ func TestVolumeReadAndCheck(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+func TestBackupGenerationKeysRoundTrip(t *testing.T) {
+	p := &contract.Project{Data: []contract.DataService{{Name: "db", Kind: "postgres"}}}
+	path := filepath.Join(t.TempDir(), "cvctl.env")
+	d := &Decisions{Instance: "a-dev", Services: map[string]ServiceDecision{"db": {Mode: "local", BackupGen: 2, BackupGenMax: 5}}}
+	if err := Write(path, d); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(path, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := got.Services["db"]; s.BackupGen != 2 || s.BackupGenMax != 5 {
+		t.Fatalf("got %+v", s)
+	}
+	d.Services["db"] = ServiceDecision{Mode: "local"}
+	if m := d.Entries(); m["CVCTL_SVC_DB_BACKUP_GEN"] != "" || m["CVCTL_SVC_DB_BACKUP_GEN_MAX"] != "" {
+		t.Fatalf("zero generation must stay absent: %v", m)
+	}
+}

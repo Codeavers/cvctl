@@ -26,15 +26,16 @@ const (
 // verifyScript runs inside the throwaway container as root and drops to the
 // postgres user, because the image entrypoint is bypassed. PGDATA comes from
 // the container environment. The restored cluster replays archived WAL up to
-// the end of the archive and then promotes.
+// the end of the archive and then promotes. Recovery settings are command-line
+// flags, never written to postgresql.auto.conf: a later base backup would
+// carry them and break the next restore.
 const verifyScript = `set -e
 mkdir -p "$PGDATA"
 chown postgres:postgres "$PGDATA"
 chmod 700 "$PGDATA"
 gosu postgres wal-g backup-fetch "$PGDATA" LATEST
 gosu postgres touch "$PGDATA/recovery.signal"
-printf '%s\n' "restore_command = 'wal-g wal-fetch %f %p'" "recovery_target_action = 'promote'" | gosu postgres tee -a "$PGDATA/postgresql.auto.conf" >/dev/null
-exec gosu postgres postgres -c listen_addresses=
+exec gosu postgres postgres -c listen_addresses= -c "restore_command=wal-g wal-fetch %f %p" -c recovery_target_action=promote
 `
 
 const resticVerifyScript = `set -e

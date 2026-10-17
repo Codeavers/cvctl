@@ -25,9 +25,14 @@ const (
 	restoreReadyTimeout = 2 * time.Hour
 	restoreStopTimeout  = "120"
 
+	archivePollInterval   = 2 * time.Second
+	defaultArchiveTimeout = 120 * time.Second
+
 	// targetNotReachedMsg is what postgres logs when WAL ends before the
 	// configured recovery target.
 	targetNotReachedMsg = "recovery ended before configured recovery target was reached"
+
+	targetBeforeConsistentMsg = "requested recovery stop point is before consistent recovery point"
 
 	codeRestoreTarget = "E_RESTORE_TARGET"
 )
@@ -49,28 +54,24 @@ chown postgres:postgres "$PGDATA"
 chmod 700 "$PGDATA"
 gosu postgres wal-g backup-fetch "$PGDATA" "$RESTORE_BACKUP"
 gosu postgres touch "$PGDATA/recovery.signal"
-{
-  echo "restore_command = 'wal-g wal-fetch %f %p'"
-  echo "recovery_target_action = 'promote'"
-  if [ -n "$RESTORE_TARGET_TIME" ]; then
-    echo "recovery_target_inclusive = true"
-    echo "recovery_target_time = '$RESTORE_TARGET_TIME'"
-  fi
-  if [ -n "$RESTORE_TARGET_NAME" ]; then
-    echo "recovery_target_inclusive = true"
-    echo "recovery_target_name = '$RESTORE_TARGET_NAME'"
-  fi
-} | gosu postgres tee -a "$PGDATA/postgresql.auto.conf" >/dev/null
-exec gosu postgres postgres -c listen_addresses=
+set -- -c listen_addresses= -c "restore_command=wal-g wal-fetch %f %p" -c recovery_target_action=promote
+if [ -n "$RESTORE_TARGET_TIME" ]; then
+  set -- "$@" -c recovery_target_inclusive=true -c "recovery_target_time=$RESTORE_TARGET_TIME"
+fi
+if [ -n "$RESTORE_TARGET_NAME" ]; then
+  set -- "$@" -c recovery_target_inclusive=true -c "recovery_target_name=$RESTORE_TARGET_NAME"
+fi
+exec gosu postgres postgres "$@"
 `
 
 // RestoreResult describes a finished restore.
 type RestoreResult struct {
-	Instance       string `json:"instance"`
-	Service        string `json:"service"`
-	Target         string `json:"target"`
-	Volume         string `json:"volume"`
-	PreviousVolume string `json:"previous_volume"`
+	Instance       string   `json:"instance"`
+	Service        string   `json:"service"`
+	Target         string   `json:"target"`
+	Volume         string   `json:"volume"`
+	PreviousVolume string   `json:"previous_volume"`
+	Warnings       []string `json:"warnings,omitempty"`
 }
 
 type restoreTarget struct {
@@ -163,8 +164,8 @@ func (r *Runner) pickBackup(ctx context.Context, inst string, t Target, tgt rest
 	return best, nil
 }
 
-func envKey(svc string) string {
-	return "CVCTL_SVC_" + contract.Normalize(svc) + "_VOLUME"
+func envKey(svc, suffix string) string {
+	return "CVCTL_SVC_" + contract.Normalize(svc) + "_" + suffix
 }
 
 func (r *Runner) readRaw(path string) (map[string]string, error) {
@@ -187,17 +188,19 @@ func (r *Runner) readRaw(path string) (map[string]string, error) {
 	return m, nil
 }
 
-// setEnvKey rewrites cvctl.env keeping every other key; present=false removes
+// patchEnv rewrites cvctl.env keeping every other key; a nil value removes
 // the key.
-func (r *Runner) setEnvKey(path, key, val string, present bool) error {
+func (r *Runner) patchEnv(path string, updates map[string]*string) error {
 	m, err := r.readRaw(path)
 	if err != nil {
 		return err
 	}
-	if present {
-		m[key] = val
-	} else {
-		delete(m, key)
+	for k, v := range updates {
+		if v == nil {
+			delete(m, k)
+		} else {
+			m[k] = *v
+		}
 	}
 	if err := r.FS.WriteFile(path, instance.FormatEnv(m), 0o640, deployOwner); err != nil {
 		return &output.Error{
@@ -209,6 +212,15 @@ func (r *Runner) setEnvKey(path, key, val string, present bool) error {
 	return nil
 }
 
+func strp(s string) *string { return &s }
+
+func optp(v string, present bool) *string {
+	if !present {
+		return nil
+	}
+	return &v
+}
+
 func (r *Runner) volumeExists(ctx context.Context, name string) (bool, error) {
 	res, err := r.Run.Run(ctx, r.docker("volume", "inspect", name))
 	if err != nil {
@@ -217,19 +229,92 @@ func (r *Runner) volumeExists(ctx context.Context, name string) (bool, error) {
 	return res.ExitCode == 0, nil
 }
 
-func (r *Runner) stopServices(ctx context.Context, inst string, p *contract.Project, svc string) error {
-	proj := r.Compose(inst)
-	if len(p.Apps) > 0 {
-		args := []string{"stop"}
-		for _, a := range p.Apps {
-			args = append(args, a.Name)
-		}
-		if _, err := r.exec(ctx, proj.Cmd(args...)); err != nil {
+func (r *Runner) stopApps(ctx context.Context, inst string, p *contract.Project) error {
+	if len(p.Apps) == 0 {
+		return nil
+	}
+	args := []string{"stop"}
+	for _, a := range p.Apps {
+		args = append(args, a.Name)
+	}
+	_, err := r.exec(ctx, r.Compose(inst).Cmd(args...))
+	return err
+}
+
+func (r *Runner) pgQuery(ctx context.Context, inst, svc string, c kinds.Credentials, sql string) (string, error) {
+	res, err := r.exec(ctx, r.Compose(inst).Cmd("exec", "-T", "-u", "postgres", svc,
+		"psql", "-U", c.User, "-d", c.DB, "-v", "ON_ERROR_STOP=1", "-tA", "-c", sql))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(res.Stdout)), nil
+}
+
+var walFileName = regexp.MustCompile(`^[0-9A-F]{24}$`)
+
+// flushWAL switches the WAL segment and waits until the archiver has shipped
+// it, so the recovery of "latest" does not lose the last seconds of writes.
+// The -1 keeps the answer correct when no switch was needed: the returned
+// location is then the start of the current (empty) segment.
+func (r *Runner) flushWAL(ctx context.Context, inst, svc string, c kinds.Credentials) error {
+	want, err := r.pgQuery(ctx, inst, svc, c, "select pg_walfile_name(pg_switch_wal() - 1)")
+	if err != nil {
+		return err
+	}
+	if !walFileName.MatchString(want) {
+		return restoreFailedErr("E_RESTORE_ARCHIVE_LAG", fmt.Sprintf("unexpected WAL file name %q from postgres", want), "check that the data service is healthy and retry")
+	}
+	timeout := r.ArchiveTimeout
+	if timeout <= 0 {
+		timeout = defaultArchiveTimeout
+	}
+	var waited time.Duration
+	for {
+		got, err := r.pgQuery(ctx, inst, svc, c, "select coalesce(last_archived_wal, '') from pg_stat_archiver")
+		if err != nil {
 			return err
 		}
+		if len(got) >= 24 && got[:24] >= want {
+			return nil
+		}
+		if waited >= timeout {
+			return restoreFailedErr("E_RESTORE_ARCHIVE_LAG",
+				fmt.Sprintf("WAL segment %s was not archived within %s", want, timeout),
+				"check archive_command, the storage endpoint and cvctl backup list; nothing was changed, retry later")
+		}
+		r.sleep(archivePollInterval)
+		waited += archivePollInterval
 	}
-	_, err := r.exec(ctx, proj.Cmd("stop", svc))
-	return err
+}
+
+// verifyServing waits for the data service and proves it answers queries.
+func (r *Runner) verifyServing(ctx context.Context, inst, svc string, strategy string, c kinds.Credentials) error {
+	proj := r.Compose(inst)
+	if err := proj.UpData(ctx, []string{svc}); err != nil {
+		return err
+	}
+	if strategy != StrategyWalG {
+		return nil
+	}
+	if _, err := r.exec(ctx, proj.Cmd("exec", "-T", "-u", "postgres", svc, "pg_isready", "-U", c.User, "-d", c.DB)); err != nil {
+		return err
+	}
+	out, err := r.pgQuery(ctx, inst, svc, c, "select 1")
+	if err != nil {
+		return err
+	}
+	if out != "1" {
+		return restoreFailedErr("E_RESTORE_FAILED", fmt.Sprintf("restored postgres answered %q to select 1", out), "inspect the kept volume")
+	}
+	return nil
+}
+
+func atoi(s string) int {
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // Restore recovers a data service into a NEW volume, switches the instance to
@@ -247,6 +332,12 @@ func (r *Runner) Restore(ctx context.Context, inst, svc, to string) (*RestoreRes
 			Hint:    "this is a cvctl bug; report it",
 		}
 	}
+	unlock, err := r.Store.Lock(inst)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
 	p, d, err := r.Load(inst)
 	if err != nil {
 		return nil, err
@@ -271,12 +362,6 @@ func (r *Runner) Restore(ctx context.Context, inst, svc, to string) (*RestoreRes
 		return nil, err
 	}
 
-	unlock, err := r.Store.Lock(inst)
-	if err != nil {
-		return nil, err
-	}
-	defer unlock()
-
 	st, err := r.Store.Load(inst)
 	if err != nil {
 		return nil, err
@@ -294,13 +379,16 @@ func (r *Runner) Restore(ctx context.Context, inst, svc, to string) (*RestoreRes
 	if err != nil {
 		return nil, err
 	}
-	key := envKey(svc)
-	prevRaw, hadPrev := raw[key]
+	volKey, genKey, maxKey := envKey(svc, "VOLUME"), envKey(svc, "BACKUP_GEN"), envKey(svc, "BACKUP_GEN_MAX")
+	prevVol, hadVol := raw[volKey]
+	prevGen, hadGen := raw[genKey]
+	newMax := max(atoi(raw[maxKey]), atoi(prevGen)) + 1
 	res := &RestoreResult{
 		Instance: inst, Service: svc, Target: to,
 		PreviousVolume: render.VolumeName(d, svc),
 		Volume:         fmt.Sprintf("%s_%s-data-r%d", inst, svc, now.Unix()),
 	}
+	sd := d.Services[svc]
 
 	// docker volume create is idempotent: refuse to recover onto a volume
 	// that already holds data.
@@ -324,15 +412,42 @@ func (r *Runner) Restore(ctx context.Context, inst, svc, to string) (*RestoreRes
 		}
 	}
 
-	var created, switched bool
+	// Nothing but the app services is touched until the WAL is archived, so a
+	// lag leaves volumes and decisions as they were.
+	if err := r.stopApps(ctx, inst, p); err != nil {
+		return nil, r.rollbackRestore(ctx, restoreRun{inst: inst, svc: svc, res: res, st: st, tgt: tgt}, err)
+	}
+	if target.Strategy == StrategyWalG {
+		if err := r.flushWAL(ctx, inst, svc, sd.Creds); err != nil {
+			rctx := context.WithoutCancel(ctx)
+			msg := r.redact(fmt.Sprintf("restore of %s in %s aborted: %s", svc, inst, err.Error()))
+			if _, upErr := r.exec(rctx, r.Compose(inst).Cmd("up", "-d")); upErr != nil {
+				msg += "; the app services could not be restarted: " + r.redact(upErr.Error())
+			}
+			if r.Notify != nil {
+				_ = r.Notify.Send(rctx, notify.Message{Host: r.HostName, Level: "error", Title: fmt.Sprintf("%s restore of %s aborted", inst, svc), Text: msg})
+			}
+			code, hint := "E_RESTORE_FAILED", "check the data service and retry"
+			var oe *output.Error
+			if errors.As(err, &oe) && oe.Code == "E_RESTORE_ARCHIVE_LAG" {
+				code, hint = oe.Code, oe.Hint
+			}
+			return nil, &output.Error{Code: code, Message: msg, Hint: hint}
+		}
+	}
+
+	run := restoreRun{
+		inst: inst, svc: svc, res: res, st: st, tgt: tgt, envPath: envPath,
+		volKey: volKey, genKey: genKey, prevVol: prevVol, hadVol: hadVol, prevGen: prevGen, hadGen: hadGen,
+	}
 	runErr := func() error {
-		if err := r.stopServices(ctx, inst, p, svc); err != nil {
+		if _, err := r.exec(ctx, r.Compose(inst).Cmd("stop", svc)); err != nil {
 			return err
 		}
 		if _, err := r.exec(ctx, r.docker("volume", "create", res.Volume)); err != nil {
 			return err
 		}
-		created = true
+		run.created = true
 		if target.Strategy == StrategyWalG {
 			if err := r.walgRecover(ctx, inst, svc, p, d, backupName, tgt, res.Volume); err != nil {
 				return err
@@ -340,20 +455,38 @@ func (r *Runner) Restore(ctx context.Context, inst, svc, to string) (*RestoreRes
 		} else if err := r.resticRecover(ctx, inst, svc, tgt, res.Volume); err != nil {
 			return err
 		}
-		if err := r.setEnvKey(envPath, key, res.Volume, true); err != nil {
+		updates := map[string]*string{volKey: strp(res.Volume)}
+		if target.Strategy == StrategyWalG {
+			// the abandoned generation must never be reused, even after a rollback
+			updates[genKey] = strp(strconv.Itoa(newMax))
+			updates[maxKey] = strp(strconv.Itoa(newMax))
+		}
+		if err := r.patchEnv(envPath, updates); err != nil {
 			return err
 		}
-		switched = true
-		return r.Apply(ctx, inst, st.Current)
+		run.switched = true
+		if err := r.Apply(ctx, inst, st.Current); err != nil {
+			return err
+		}
+		return r.verifyServing(ctx, inst, svc, target.Strategy, sd.Creds)
 	}()
 	if runErr != nil {
-		return nil, r.rollbackRestore(ctx, inst, svc, res, envPath, key, prevRaw, hadPrev, switched, created, runErr, st)
+		return nil, r.rollbackRestore(ctx, run, runErr)
 	}
 
+	if target.Strategy == StrategyWalG {
+		// a base backup in the new generation makes it restorable on its own
+		if _, err := r.exec(ctx, r.Compose(inst).Cmd("exec", "-T", "-u", "postgres", svc, "wal-g", "backup-push", pgData)); err != nil {
+			res.Warnings = append(res.Warnings, r.redact("base backup of the new generation failed: "+err.Error()+"; run cvctl backup now "+inst+" "+svc))
+		}
+	}
 	text := fmt.Sprintf("%s of %s restored to %s into volume %s; previous volume %s is kept (cvctl db cleanup removes unused volumes)",
 		svc, inst, to, res.Volume, res.PreviousVolume)
 	if r.Notify != nil {
 		_ = r.Notify.Send(ctx, notify.Message{Host: r.HostName, Level: "info", Title: fmt.Sprintf("%s restore of %s done", inst, svc), Text: text})
+		for _, w := range res.Warnings {
+			_ = r.Notify.Send(ctx, notify.Message{Host: r.HostName, Level: "warn", Title: fmt.Sprintf("%s restore of %s: backup needed", inst, svc), Text: w})
+		}
 	}
 	if err := r.Store.Append(inst, state.Event{
 		At: now, ID: fmt.Sprintf("restore-%d", now.Unix()), Kind: "restore", From: st.Current, To: st.Current,
@@ -364,45 +497,61 @@ func (r *Runner) Restore(ctx context.Context, inst, svc, to string) (*RestoreRes
 	return res, nil
 }
 
-func (r *Runner) rollbackRestore(ctx context.Context, inst, svc string, res *RestoreResult, envPath, key, prevRaw string, hadPrev, switched, created bool, cause error, st *state.State) error {
+type restoreRun struct {
+	inst, svc, envPath, volKey, genKey, prevVol, prevGen string
+	hadVol, hadGen, switched, created                    bool
+	res                                                  *RestoreResult
+	st                                                   *state.State
+	tgt                                                  restoreTarget
+}
+
+// rollbackRestore puts the previous volume and generation back. The maximum
+// generation stays advanced so the abandoned one is never reused.
+func (r *Runner) rollbackRestore(ctx context.Context, run restoreRun, cause error) error {
 	// A cancelled ctx must not leave the instance stopped.
 	rctx := context.WithoutCancel(ctx)
 	var back []string
-	if switched {
-		if err := r.setEnvKey(envPath, key, prevRaw, hadPrev); err != nil {
+	if run.switched {
+		if err := r.patchEnv(run.envPath, map[string]*string{
+			run.volKey: optp(run.prevVol, run.hadVol),
+			run.genKey: optp(run.prevGen, run.hadGen),
+		}); err != nil {
 			back = append(back, "could not restore the previous volume setting: "+err.Error())
 		}
 	}
 	if len(back) == 0 {
-		if err := r.Apply(rctx, inst, st.Current); err != nil {
+		if err := r.Apply(rctx, run.inst, run.st.Current); err != nil {
 			back = append(back, "could not restart the instance on the previous volume: "+err.Error())
 		}
 	}
-	stateMsg := fmt.Sprintf("the instance is back on volume %s", res.PreviousVolume)
+	stateMsg := fmt.Sprintf("the instance is back on volume %s", run.res.PreviousVolume)
 	if len(back) > 0 {
 		stateMsg = "ROLLBACK FAILED, intervene manually: " + strings.Join(back, "; ")
 	}
 	kept := ""
-	if created {
-		kept = fmt.Sprintf(" The recovered volume %s was kept for inspection.", res.Volume)
+	if run.created {
+		kept = fmt.Sprintf(" The recovered volume %s was kept for inspection.", run.res.Volume)
 	}
 	code := "E_RESTORE_FAILED"
 	var oe *output.Error
 	if errors.As(cause, &oe) && oe.Code == codeRestoreTarget {
 		code = codeRestoreTarget
 	}
-	msg := r.redact(fmt.Sprintf("restore of %s in %s failed: %s; %s.%s", svc, inst, cause.Error(), stateMsg, kept))
+	msg := r.redact(fmt.Sprintf("restore of %s in %s failed: %s; %s.%s", run.svc, run.inst, cause.Error(), stateMsg, kept))
 	hint := "inspect the kept volume, fix the cause and retry; cvctl db cleanup removes unused volumes"
 	if code == codeRestoreTarget {
 		hint = "the WAL archive ends before the target; pick an earlier target or --to latest"
+		if _, bounded := run.tgt.boundTime(); run.tgt.kind == "name" && !bounded {
+			hint = "the newest base backup is newer than the restore point; restore with --to <timestamp before the deploy> instead"
+		}
 	}
 	now := r.now()
 	if r.Notify != nil {
-		_ = r.Notify.Send(rctx, notify.Message{Host: r.HostName, Level: "error", Title: fmt.Sprintf("%s restore of %s FAILED", inst, svc), Text: msg})
+		_ = r.Notify.Send(rctx, notify.Message{Host: r.HostName, Level: "error", Title: fmt.Sprintf("%s restore of %s FAILED", run.inst, run.svc), Text: msg})
 	}
 	e := &output.Error{Code: code, Message: msg, Hint: hint}
-	if err := r.Store.Append(inst, state.Event{
-		At: now, ID: fmt.Sprintf("restore-%d", now.Unix()), Kind: "restore", From: st.Current, To: st.Current,
+	if err := r.Store.Append(run.inst, state.Event{
+		At: now, ID: fmt.Sprintf("restore-%d", now.Unix()), Kind: "restore", From: run.st.Current, To: run.st.Current,
 		Result: "restore_failed", Detail: msg, Actor: "cli",
 	}); err != nil {
 		return errors.Join(e, err)
@@ -444,7 +593,7 @@ func (r *Runner) walgRecover(ctx context.Context, inst, svc string, p *contract.
 	}
 	switch tgt.kind {
 	case "time":
-		args = append(args, "-e", "RESTORE_TARGET_TIME="+tgt.at.Format(time.RFC3339))
+		args = append(args, "-e", "RESTORE_TARGET_TIME="+tgt.at.Format(time.RFC3339Nano))
 	case "name":
 		args = append(args, "-e", "RESTORE_TARGET_NAME="+tgt.name)
 	}
@@ -470,7 +619,7 @@ func (r *Runner) waitRestored(ctx context.Context, name string, c kinds.Credenti
 		if running.ExitCode == 0 && strings.TrimSpace(string(running.Stdout)) == "false" {
 			logs, _ := r.Run.Run(ctx, r.docker("logs", "--tail", "50", name))
 			text := string(logs.Stderr) + string(logs.Stdout)
-			if strings.Contains(text, targetNotReachedMsg) {
+			if strings.Contains(text, targetNotReachedMsg) || strings.Contains(text, targetBeforeConsistentMsg) {
 				return restoreFailedErr(codeRestoreTarget, "the WAL archive ends before the requested recovery target", "pick an earlier target or --to latest")
 			}
 			return restoreFailedErr("E_RESTORE_FAILED", "recovery container exited before postgres was ready: "+r.redact(strings.TrimSpace(text)),
