@@ -544,3 +544,29 @@ func TestLastTransientRoundTrip(t *testing.T) {
 		t.Fatalf("got %+v %v", st, err)
 	}
 }
+
+func TestLockDataIsHostWideAndFailsBusy(t *testing.T) {
+	store := NewStore(systest.NewFS(), "/var/lib/cvctl")
+	fl := systest.NewFakeLocker()
+	oldLockFile := sys.LockFile
+	t.Cleanup(func() { sys.LockFile = oldLockFile })
+	sys.LockFile = fl.LockFile
+
+	unlock, err := store.LockData()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := fl.Calls[0]
+	if c.Path != "/var/lib/cvctl/data.lock" || c.Mode != 0o640 || c.Owner != (sys.Owner{User: "deployer", Group: "deploy"}) {
+		t.Fatalf("lock call: %+v", c)
+	}
+	_, err = store.LockData()
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_DATA_BUSY" || !strings.Contains(oe.Hint, "a backup or verify is running; retry when it finishes") {
+		t.Fatalf("err=%v", err)
+	}
+	unlock()
+	if _, err := store.LockData(); err != nil {
+		t.Fatalf("after unlock: %v", err)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/codeavers/cvctl/internal/output"
 )
@@ -15,7 +16,10 @@ func (r *Runner) walgBackup(ctx context.Context, inst string, t Target) error {
 	if _, err := r.exec(ctx, p.Cmd("exec", "-T", "-u", "postgres", t.Service, "wal-g", "backup-push", pgData)); err != nil {
 		return err
 	}
-	_, err := r.exec(ctx, p.Cmd("exec", "-T", "-u", "postgres", t.Service, "wal-g", "delete", "retain", "FULL", walgRetain, "--confirm"))
+	// --after keeps a week of backups however many manual ones were taken,
+	// so a burst of backup now cannot push the older fulls out early.
+	after := r.now().Add(-walgRetainDays * 24 * time.Hour).UTC().Format(time.RFC3339)
+	_, err := r.exec(ctx, p.Cmd("exec", "-T", "-u", "postgres", t.Service, "wal-g", "delete", "retain", "FULL", walgRetain, "--after", after, "--confirm"))
 	return err
 }
 

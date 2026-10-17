@@ -151,6 +151,13 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 		}
 	}
 
+	// Held throughout so wal-g retention of a backup timer cannot delete the
+	// base backup being fetched; the operator retries rather than waits.
+	unlockData, err := e.Deployer.Store.LockData()
+	if err != nil {
+		return nil, err
+	}
+	defer unlockData()
 	unlock, err := e.Deployer.Store.Lock(inst)
 	if err != nil {
 		return nil, err

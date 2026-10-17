@@ -118,7 +118,7 @@ func TestWalgSequence(t *testing.T) {
 	if !strings.HasSuffix(calls[0], "exec -T -u postgres db wal-g backup-push /var/lib/postgresql/data") {
 		t.Fatalf("push: %s", calls[0])
 	}
-	if !strings.HasSuffix(calls[1], "exec -T -u postgres db wal-g delete retain FULL 7 --confirm") {
+	if !strings.HasSuffix(calls[1], "exec -T -u postgres db wal-g delete retain FULL 7 --after 2025-12-26T03:04:05Z --confirm") {
 		t.Fatalf("retain: %s", calls[1])
 	}
 	for _, c := range g.run.Calls {
@@ -282,8 +282,9 @@ func TestListParsesWalgAndRestic(t *testing.T) {
 
 type busyLocker struct{ busy int }
 
-func (b *busyLocker) lockFile(string, os.FileMode, sys.Owner) (func(), error) {
-	if b.busy != 0 {
+// busyLocker keeps the instance lock busy; the host data lock stays free.
+func (b *busyLocker) lockFile(p string, _ os.FileMode, _ sys.Owner) (func(), error) {
+	if b.busy != 0 && strings.HasSuffix(p, "/lock") {
 		if b.busy > 0 {
 			b.busy--
 		}

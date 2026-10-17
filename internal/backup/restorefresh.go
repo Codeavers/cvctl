@@ -14,7 +14,7 @@ import (
 // volume, reading wal-g from the generation recorded in the decisions. It is
 // for rebuilding a lost host: no container of the instance runs yet, so
 // nothing is stopped, switched or rolled back. The caller holds the instance
-// lock.
+// lock and the data lock (state.Store.LockData).
 func (r *Runner) RestoreFresh(ctx context.Context, inst, svc string, p *contract.Project, d *instance.Decisions, volume string) (retErr error) {
 	if r.Host == nil {
 		return notConfigured()

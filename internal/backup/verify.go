@@ -81,6 +81,11 @@ func (r *Runner) Verify(ctx context.Context, inst, only string) ([]Result, error
 	if err != nil {
 		return nil, err
 	}
+	unlock, err := r.lockData(true)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	var results []Result
 	var failed, statusErrs []string
 	for _, t := range ts {

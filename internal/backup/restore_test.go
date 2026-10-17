@@ -280,7 +280,12 @@ func TestRestoreTargetNotReachedIsCodedAndRolledBack(t *testing.T) {
 
 func TestRestoreFailsFastWhenInstanceLocked(t *testing.T) {
 	g := newRestoreRig(t)
-	sys.LockFile = func(string, os.FileMode, sys.Owner) (func(), error) { return nil, sys.ErrLocked }
+	sys.LockFile = func(p string, _ os.FileMode, _ sys.Owner) (func(), error) {
+		if strings.HasSuffix(p, "/data.lock") {
+			return func() {}, nil
+		}
+		return nil, sys.ErrLocked
+	}
 	_, err := g.r.Restore(context.Background(), "app-prod", "db", "latest")
 	var oe *output.Error
 	if !errors.As(err, &oe) || oe.Code != "E_INSTANCE_LOCKED" || len(g.run.Calls) != 0 {

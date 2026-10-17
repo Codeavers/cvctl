@@ -306,6 +306,35 @@ func (s *Store) Instances() ([]string, error) {
 	return instances, nil
 }
 
+// LockData takes the host-wide data lock that keeps backups, verifies and
+// restores apart: wal-g retention could otherwise delete the base backup a
+// restore is fetching. It fails at once with E_DATA_BUSY when held.
+func (s *Store) LockData() (func(), error) {
+	if err := s.fs.MkdirAll(s.root, 0o750, deployOwner); err != nil {
+		return nil, &output.Error{
+			Code:    "E_DATA_LOCK_FAILED",
+			Message: fmt.Sprintf("cannot create %s: %v", s.root, err),
+			Hint:    "check permissions on " + s.root,
+		}
+	}
+	unlock, err := sys.LockFile(filepath.Join(s.root, "data.lock"), 0o640, deployOwner)
+	if err != nil {
+		if errors.Is(err, sys.ErrLocked) {
+			return nil, &output.Error{
+				Code:    "E_DATA_BUSY",
+				Message: "another backup, verify or restore holds the data lock",
+				Hint:    "a backup or verify is running; retry when it finishes",
+			}
+		}
+		return nil, &output.Error{
+			Code:    "E_DATA_LOCK_FAILED",
+			Message: fmt.Sprintf("cannot take the data lock: %v", err),
+			Hint:    "check permissions on " + s.root,
+		}
+	}
+	return unlock, nil
+}
+
 func (s *Store) Lock(inst string) (func(), error) {
 	instDir := filepath.Join(s.root, inst)
 	if err := s.fs.MkdirAll(instDir, 0o750, deployOwner); err != nil {

@@ -27,14 +27,15 @@ const (
 	StrategyVolume = "volume"
 
 	// pgData is the image default; the render step keeps PGDATA at the volume root.
-	pgData        = "/var/lib/postgresql/data"
-	resticImage   = "restic/restic:0.19.1"
-	backupNetwork = "cvctl-backup"
-	dockerConfig  = "DOCKER_CONFIG=/var/lib/cvctl/docker"
-	walgRetain    = "7"
-	backupTimeout = 3 * time.Hour
-	verifyTimeout = 2 * time.Hour
-	maxErrBytes   = 2048
+	pgData         = "/var/lib/postgresql/data"
+	resticImage    = "restic/restic:0.19.1"
+	backupNetwork  = "cvctl-backup"
+	dockerConfig   = "DOCKER_CONFIG=/var/lib/cvctl/docker"
+	walgRetain     = "7"
+	walgRetainDays = 7
+	backupTimeout  = 3 * time.Hour
+	verifyTimeout  = 2 * time.Hour
+	maxErrBytes    = 2048
 )
 
 var deployOwner = sys.Owner{User: "deployer", Group: "deploy"}
@@ -139,7 +140,32 @@ type Runner struct {
 const (
 	defaultLockInterval = 15 * time.Second
 	defaultLockTimeout  = 30 * time.Minute
+
+	dataLockInterval = 30 * time.Second
+	dataLockWait     = 3 * time.Hour
 )
+
+// lockData takes the host-wide data lock. Backups and verifies wait for it
+// (a restore or the other timer may be running); restores pass wait=false
+// and fail at once, since an operator is waiting on them.
+func (r *Runner) lockData(wait bool) (func(), error) {
+	if r.Store == nil {
+		return func() {}, nil
+	}
+	var waited time.Duration
+	for {
+		unlock, err := r.Store.LockData()
+		if err == nil {
+			return unlock, nil
+		}
+		var oe *output.Error
+		if !wait || !errors.As(err, &oe) || oe.Code != "E_DATA_BUSY" || waited >= dataLockWait {
+			return nil, err
+		}
+		r.sleep(dataLockInterval)
+		waited += dataLockInterval
+	}
+}
 
 func (r *Runner) lock(inst string) (func(), error) {
 	interval, timeout := r.LockInterval, r.LockTimeout
@@ -264,6 +290,11 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 	if err != nil {
 		return nil, err
 	}
+	unlock, err := r.lockData(true)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	var results []Result
 	var failed, statusErrs []string
 	for _, t := range ts {

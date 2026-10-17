@@ -652,3 +652,36 @@ func TestRestoreFixesInstanceDirOwner(t *testing.T) {
 		t.Fatalf("instance dir: %q (%v)", got, rec.mkdirs)
 	}
 }
+
+func TestRestoreFailsFastWhenDataBusy(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	unlock, err := sys.LockFile(filepath.Join(rig.env.StateRoot, "data.lock"), 0o640, sys.Owner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if _, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{}); codeOf(t, err) != "E_DATA_BUSY" {
+		t.Fatalf("err=%v", err)
+	}
+	if len(*rig.log) != 0 {
+		t.Fatalf("restore touched something: %v", *rig.log)
+	}
+}
+
+func TestRestoreHoldsDataLockThroughout(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	rig.env.Deployer.Health = func(context.Context, string, string) error {
+		if _, err := rig.store.LockData(); err == nil {
+			t.Error("data lock must be held during deploy")
+		}
+		return nil
+	}
+	if _, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := rig.store.LockData()
+	if err != nil {
+		t.Fatalf("data lock must be released: %v", err)
+	}
+	unlock()
+}

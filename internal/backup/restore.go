@@ -368,6 +368,11 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 			Hint:    "this is a cvctl bug; report it",
 		}
 	}
+	unlockData, err := r.lockData(false)
+	if err != nil {
+		return nil, err
+	}
+	defer unlockData()
 	unlock, err := r.Store.Lock(inst)
 	if err != nil {
 		return nil, err
