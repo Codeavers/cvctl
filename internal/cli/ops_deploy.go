@@ -238,7 +238,7 @@ func newRollbackCmd() *cobra.Command {
 
 			if res.Status == state.StatusFailed {
 				failedErr := &output.Error{
-					Code:    "E_DEPLOY_FAILED",
+					Code:    "E_ROLLBACK_FAILED",
 					Message: fmt.Sprintf("rollback failed: %s", res.Detail),
 					Hint:    "check container logs with cvctl logs " + inst,
 				}

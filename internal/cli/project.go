@@ -68,6 +68,7 @@ var newProjectEnv = func(o projectOpts) (*project.Env, error) {
 		Store:      store,
 		Host:       cfg,
 		Catalog:    cat,
+		Notify:     notifierFor(cfg, secrets),
 	}
 	deploy.Wire(deployer, run)
 
@@ -91,7 +92,11 @@ func parseSet(setFlags []string) (map[string]string, error) {
 	for _, s := range setFlags {
 		k, v, found := strings.Cut(s, "=")
 		if !found || strings.TrimSpace(k) == "" {
-			return nil, &output.UsageError{Err: fmt.Errorf("invalid --set flag %q: expected KEY=VALUE", s)}
+			return nil, &output.UsageError{Err: &output.Error{
+				Code:    "E_USAGE_SET",
+				Message: fmt.Sprintf("invalid --set flag %q: expected KEY=VALUE", s),
+				Hint:    "pass --set KEY=VALUE, for example --set LOG_LEVEL=debug",
+			}}
 		}
 		out[strings.TrimSpace(k)] = v
 	}
@@ -103,7 +108,11 @@ func parseDomains(domainFlags []string) (map[string]string, error) {
 	for _, s := range domainFlags {
 		k, v, found := strings.Cut(s, "=")
 		if !found || strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
-			return nil, &output.UsageError{Err: fmt.Errorf("invalid --domain flag %q: expected svc=host", s)}
+			return nil, &output.UsageError{Err: &output.Error{
+				Code:    "E_USAGE_DOMAIN",
+				Message: fmt.Sprintf("invalid --domain flag %q: expected svc=host", s),
+				Hint:    "pass --domain <service>=<hostname>, for example --domain api=api.example.com",
+			}}
 		}
 		out[strings.TrimSpace(k)] = strings.TrimSpace(v)
 	}
@@ -184,7 +193,7 @@ func newProjectAddCmd() *cobra.Command {
 				failedErr := &output.Error{
 					Code:    "E_DEPLOY_FAILED",
 					Message: fmt.Sprintf("deploy failed: %s", res.Deploy.Detail),
-					Hint:    "check container logs with docker compose logs",
+					Hint:    "check container logs with cvctl logs " + res.Instance,
 				}
 				if asJSON {
 					return &output.DataError{Err: failedErr, Data: rep}
@@ -247,7 +256,7 @@ func newProjectUpdateCmd() *cobra.Command {
 				failedErr := &output.Error{
 					Code:    "E_DEPLOY_FAILED",
 					Message: fmt.Sprintf("deploy failed: %s", res.Deploy.Detail),
-					Hint:    "check container logs with docker compose logs",
+					Hint:    "check container logs with cvctl logs " + res.Instance,
 				}
 				if asJSON {
 					return &output.DataError{Err: failedErr, Data: rep}

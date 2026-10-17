@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/codeavers/cvctl/internal/hostcfg"
+	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/project"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/kinds"
@@ -366,5 +368,46 @@ func TestProjectAddInvalidDomain(t *testing.T) {
 	code, _, _ := run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--domain", "NOEQUALS")
 	if code != 2 {
 		t.Fatalf("code %d, want exit 2 for bad --domain flag", code)
+	}
+}
+
+func TestProjectUsageErrorsCarryCodes(t *testing.T) {
+	code, out, _ := run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--set", "NOEQUALS", "--json")
+	if code != 2 || !strings.Contains(out, "E_USAGE_SET") {
+		t.Fatalf("--set: code %d out=%s", code, out)
+	}
+	code, out, _ = run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--domain", "NOEQUALS", "--json")
+	if code != 2 || !strings.Contains(out, "E_USAGE_DOMAIN") {
+		t.Fatalf("--domain: code %d out=%s", code, out)
+	}
+}
+
+func TestSetEnvValueRequiredCode(t *testing.T) {
+	_, env := setupOpsFixture(t, "myapp-dev")
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) {
+		env.Interactive = false
+		return env, nil
+	}
+	code, out, _ := run(t, "set-env", "myapp-dev", "API_KEY", "--json")
+	if code != 2 || !strings.Contains(out, "E_USAGE_SET") {
+		t.Fatalf("code %d out=%s", code, out)
+	}
+}
+
+func TestNotifierForFallsBackToNoop(t *testing.T) {
+	if _, ok := notifierFor(nil, nil).(notify.NoopNotifier); !ok {
+		t.Fatal("nil config must yield NoopNotifier")
+	}
+	bad := &hostcfg.Config{Notify: "telegram"}
+	if _, ok := notifierFor(bad, hostcfg.NewSecrets()).(notify.NoopNotifier); !ok {
+		t.Fatal("misconfigured notifier must fall back to NoopNotifier")
+	}
+	good := &hostcfg.Config{Notify: "telegram", TelegramChatID: "1"}
+	sec := hostcfg.NewSecrets()
+	sec.Set("telegram_token", "tok")
+	if _, ok := notifierFor(good, sec).(notify.NoopNotifier); ok {
+		t.Fatal("configured notifier must not be Noop")
 	}
 }

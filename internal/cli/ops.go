@@ -13,6 +13,7 @@ import (
 	"github.com/codeavers/cvctl/internal/deploy"
 	"github.com/codeavers/cvctl/internal/gitrepo"
 	"github.com/codeavers/cvctl/internal/hostcfg"
+	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/project"
 	"github.com/codeavers/cvctl/internal/registry"
@@ -99,6 +100,16 @@ func instanceNotFound(inst string) *output.Error {
 	}
 }
 
+// notifierFor builds the host notifier; a misconfigured one must not block
+// operator commands, so it degrades to a no-op.
+func notifierFor(cfg *hostcfg.Config, secrets *hostcfg.Secrets) notify.Notifier {
+	n, err := notify.FromHost(cfg, secrets)
+	if err != nil || n == nil {
+		return notify.NoopNotifier{}
+	}
+	return n
+}
+
 func (e *OpsEnv) checkInstance(inst string) error {
 	if err := project.ValidateInstanceName(e.deployRoot(), e.stateRoot(), inst); err != nil {
 		return instanceNotFound(inst)
@@ -143,6 +154,7 @@ var newOpsEnv = func(o opsOpts) (*OpsEnv, error) {
 		Store:      store,
 		Host:       cfg,
 		Catalog:    cat,
+		Notify:     notifierFor(cfg, secrets),
 	}
 	deploy.Wire(deployer, run)
 

@@ -818,7 +818,7 @@ func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
 
 	if _, err := e.fs().Stat(cvctlEnvPath); err != nil {
 		return nil, &output.Error{
-			Code:    "E_PROJECT_NOT_FOUND",
+			Code:    "E_INSTANCE_NOT_FOUND",
 			Message: fmt.Sprintf("instance %q not found", inst),
 			Hint:    fmt.Sprintf("run cvctl project add <repo-url> --name %s", inst),
 		}

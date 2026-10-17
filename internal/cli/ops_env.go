@@ -112,7 +112,11 @@ func newSetEnvCmd() *cobra.Command {
 			} else {
 				if !e.Interactive || e.Prompt == nil {
 					return &output.UsageError{
-						Err: fmt.Errorf("value argument required in non-interactive mode"),
+						Err: &output.Error{
+							Code:    "E_USAGE_SET",
+							Message: "value argument required in non-interactive mode",
+							Hint:    fmt.Sprintf("pass the value: cvctl set-env %s %s <value>", inst, key),
+						},
 					}
 				}
 				ans, err := e.Prompt.Ask(hostcfg.Question{

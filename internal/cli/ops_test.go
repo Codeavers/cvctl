@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -889,5 +890,23 @@ func TestRollbackToIndexesOnlySuccessfulDeploys(t *testing.T) {
 	code, out, _ := run(t, "rollback", "myapp-dev", "--to", "2", "--json")
 	if code == 0 || !strings.Contains(out, "E_ROLLBACK_TARGET_INVALID") {
 		t.Fatalf("expected E_ROLLBACK_TARGET_INVALID, code %d out=%s", code, out)
+	}
+}
+
+func TestRollbackFailureUsesRollbackCode(t *testing.T) {
+	_, env := setupOpsFixture(t, "myapp-dev")
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+	env.Deployer.Health = func(ctx context.Context, inst, override string) error {
+		return errors.New("unhealthy")
+	}
+	des1 := state.Desired{InfraCommit: "commit1111111"}
+	des2 := state.Desired{InfraCommit: "commit2222222"}
+	_ = env.Store.Save(&state.State{Instance: "myapp-dev", Status: state.StatusOK, Current: &des2, Previous: &des1})
+
+	code, out, _ := run(t, "rollback", "myapp-dev", "--json")
+	if code == 0 || !strings.Contains(out, "E_ROLLBACK_FAILED") || strings.Contains(out, "E_DEPLOY_FAILED") {
+		t.Fatalf("code %d out=%s", code, out)
 	}
 }
