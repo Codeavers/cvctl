@@ -182,14 +182,14 @@ func Run(ctx context.Context, cfg Config) error {
 					}
 				}()
 
-				dec, p, err := loadFn(inst)
+				dec, _, err := loadFn(inst)
 				if err != nil {
 					recordError(inst, err.Error())
 					return
 				}
 
 				src := sourcesFn(dec)
-				want, err := src.Desired(ctx, dec, p)
+				want, err := src.Desired(ctx, dec)
 				if err != nil {
 					recordError(inst, err.Error())
 					return

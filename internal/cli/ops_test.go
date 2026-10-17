@@ -42,7 +42,10 @@ func (s *opsStubRepo) Fetch(_ context.Context, _ string) (string, error) {
 	return "abc1234567890", nil
 }
 
-func (s *opsStubRepo) Show(_ context.Context, _, _ string) ([]byte, error) {
+func (s *opsStubRepo) Show(_ context.Context, _, path string) ([]byte, error) {
+	if strings.HasSuffix(path, "compose.yml") {
+		return os.ReadFile(filepath.Join(s.infraSource, path))
+	}
 	return []byte("CVCTL_DIGEST_WEB=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"), nil
 }
 

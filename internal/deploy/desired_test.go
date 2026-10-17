@@ -3,10 +3,10 @@ package deploy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
-	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/output"
 )
@@ -14,8 +14,19 @@ import (
 type fakeRepo struct {
 	fetchFunc func(ctx context.Context, branch string) (string, error)
 	showFunc  func(ctx context.Context, commit, path string) ([]byte, error)
+	compose   string
 	fetched   []string
 	showed    [][2]string
+}
+
+// composeOf renders a minimal compose.yml with one app per name=image pair.
+func composeOf(pairs ...string) string {
+	var b strings.Builder
+	b.WriteString("services:\n")
+	for i := 0; i+1 < len(pairs); i += 2 {
+		fmt.Fprintf(&b, "  %s:\n    image: %s\n    labels:\n      cvctl.role: app\n", pairs[i], pairs[i+1])
+	}
+	return b.String()
 }
 
 func (f *fakeRepo) Fetch(ctx context.Context, branch string) (string, error) {
@@ -28,6 +39,9 @@ func (f *fakeRepo) Fetch(ctx context.Context, branch string) (string, error) {
 
 func (f *fakeRepo) Show(ctx context.Context, commit, path string) ([]byte, error) {
 	f.showed = append(f.showed, [2]string{commit, path})
+	if strings.HasSuffix(path, "compose.yml") && f.compose != "" {
+		return []byte(f.compose), nil
+	}
 	if f.showFunc != nil {
 		return f.showFunc(ctx, commit, path)
 	}
@@ -81,14 +95,9 @@ func TestDevResolvesTags(t *testing.T) {
 		InfraBranch: "feature-branch",
 		TrackTag:    "edge",
 	}
-	p := &contract.Project{
-		Apps: []contract.AppService{
-			{Name: "api", Image: "ghcr.io/codeavers/api"},
-			{Name: "web", Image: "ghcr.io/codeavers/web"},
-		},
-	}
+	repo.compose = composeOf("api", "ghcr.io/codeavers/api", "web", "ghcr.io/codeavers/web")
 
-	desired, err := src.Desired(context.Background(), d, p)
+	desired, err := src.Desired(context.Background(), d)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -128,13 +137,9 @@ func TestDevRejectsDisallowedRegistry(t *testing.T) {
 		Env:      "dev",
 		TrackTag: "develop",
 	}
-	p := &contract.Project{
-		Apps: []contract.AppService{
-			{Name: "api", Image: "docker.io/untrusted/api"},
-		},
-	}
+	repo.compose = composeOf("api", "docker.io/untrusted/api")
 
-	_, err := src.Desired(context.Background(), d, p)
+	_, err := src.Desired(context.Background(), d)
 	if err == nil {
 		t.Fatal("expected error for disallowed registry, got nil")
 	}
@@ -189,14 +194,9 @@ UNRELATED_VAR=ignored
 		Env:         "prod",
 		InfraBranch: "main",
 	}
-	p := &contract.Project{
-		Apps: []contract.AppService{
-			{Name: "api", Image: "ghcr.io/codeavers/api"},
-			{Name: "web-frontend", Image: "ghcr.io/codeavers/web-frontend"},
-		},
-	}
+	repo.compose = composeOf("api", "ghcr.io/codeavers/api", "web-frontend", "ghcr.io/codeavers/web-frontend")
 
-	desired, err := src.Desired(context.Background(), d, p)
+	desired, err := src.Desired(context.Background(), d)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -241,14 +241,9 @@ CVCTL_DIGEST_API=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 	d := &instance.Decisions{
 		Env: "prod",
 	}
-	p := &contract.Project{
-		Apps: []contract.AppService{
-			{Name: "api", Image: "ghcr.io/codeavers/api"},
-			{Name: "worker-service", Image: "ghcr.io/codeavers/worker"},
-		},
-	}
+	repo.compose = composeOf("api", "ghcr.io/codeavers/api", "worker-service", "ghcr.io/codeavers/worker")
 
-	_, err := src.Desired(context.Background(), d, p)
+	_, err := src.Desired(context.Background(), d)
 	if err == nil {
 		t.Fatal("expected error for missing digest, got nil")
 	}
@@ -295,13 +290,9 @@ CVCTL_DIGEST_API=sha256:44444444444444444444444444444444444444444444444444444444
 		Env:      "prod",
 		TrackTag: "v2.0.0-beta",
 	}
-	p := &contract.Project{
-		Apps: []contract.AppService{
-			{Name: "api", Image: "ghcr.io/codeavers/api"},
-		},
-	}
+	repo.compose = composeOf("api", "ghcr.io/codeavers/api")
 
-	desired, err := src.Desired(context.Background(), d, p)
+	desired, err := src.Desired(context.Background(), d)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -326,13 +317,9 @@ CVCTL_DIGEST_API=not-a-valid-sha256
 	}
 
 	d := &instance.Decisions{Env: "prod"}
-	p := &contract.Project{
-		Apps: []contract.AppService{
-			{Name: "api", Image: "ghcr.io/codeavers/api"},
-		},
-	}
+	repo.compose = composeOf("api", "ghcr.io/codeavers/api")
 
-	_, err := src.Desired(context.Background(), d, p)
+	_, err := src.Desired(context.Background(), d)
 	if err == nil {
 		t.Fatal("expected error for invalid digest, got nil")
 	}
@@ -350,18 +337,15 @@ CVCTL_DIGEST_API=not-a-valid-sha256
 }
 
 func TestProdRejectsDisallowedRegistry(t *testing.T) {
+	repo := &fakeRepo{}
 	src := &ProdSource{
-		Repo:    &fakeRepo{},
+		Repo:    repo,
 		Allowed: []string{"ghcr.io/codeavers"},
 	}
 	d := &instance.Decisions{Env: "prod"}
-	p := &contract.Project{
-		Apps: []contract.AppService{
-			{Name: "api", Image: "docker.io/untrusted/api"},
-		},
-	}
+	repo.compose = composeOf("api", "docker.io/untrusted/api")
 
-	_, err := src.Desired(context.Background(), d, p)
+	_, err := src.Desired(context.Background(), d)
 	if err == nil {
 		t.Fatal("expected error for disallowed registry in prod, got nil")
 	}
@@ -381,13 +365,9 @@ func TestDevDefaults(t *testing.T) {
 	}
 
 	d := &instance.Decisions{Env: "dev"} // InfraBranch and TrackTag empty
-	p := &contract.Project{
-		Apps: []contract.AppService{
-			{Name: "api", Image: "ghcr.io/codeavers/api"},
-		},
-	}
+	repo.compose = composeOf("api", "ghcr.io/codeavers/api")
 
-	_, err := src.Desired(context.Background(), d, p)
+	_, err := src.Desired(context.Background(), d)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -412,13 +392,9 @@ func TestProdDefaults(t *testing.T) {
 	}
 
 	d := &instance.Decisions{Env: "prod"} // InfraBranch empty
-	p := &contract.Project{
-		Apps: []contract.AppService{
-			{Name: "api", Image: "ghcr.io/codeavers/api"},
-		},
-	}
+	repo.compose = composeOf("api", "ghcr.io/codeavers/api")
 
-	_, err := src.Desired(context.Background(), d, p)
+	_, err := src.Desired(context.Background(), d)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -448,7 +424,7 @@ func TestSourceFor(t *testing.T) {
 	}
 
 	unknownSrc := SourceFor(&instance.Decisions{Env: "staging"}, deps)
-	_, err := unknownSrc.Desired(context.Background(), &instance.Decisions{Env: "staging"}, nil)
+	_, err := unknownSrc.Desired(context.Background(), &instance.Decisions{Env: "staging"})
 	if err == nil {
 		t.Fatal("expected error for unknown env, got nil")
 	}
@@ -458,7 +434,7 @@ func TestSourceFor(t *testing.T) {
 	}
 
 	nilSrc := SourceFor(nil, deps)
-	_, err = nilSrc.Desired(context.Background(), nil, nil)
+	_, err = nilSrc.Desired(context.Background(), nil)
 	if err == nil {
 		t.Fatal("expected error for nil decisions, got nil")
 	}

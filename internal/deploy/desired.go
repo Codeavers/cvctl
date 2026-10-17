@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/codeavers/cvctl/internal/registry"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
+	"github.com/codeavers/cvctl/kinds"
 )
 
 var digestRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -29,9 +31,10 @@ type RepoAPI interface {
 	Show(ctx context.Context, commit, path string) ([]byte, error)
 }
 
-// Source resolves desired state for an instance deployment.
+// Source resolves desired state for an instance deployment. The contract used
+// for registry checks and digest resolution is read from the fetched commit.
 type Source interface {
-	Desired(ctx context.Context, d *instance.Decisions, p *contract.Project) (state.Desired, error)
+	Desired(ctx context.Context, d *instance.Decisions) (state.Desired, error)
 }
 
 // Deps encapsulates external dependencies needed to construct a Source.
@@ -39,6 +42,7 @@ type Deps struct {
 	Repo     RepoAPI
 	Resolver registry.Resolver
 	Allowed  []string
+	Catalog  kinds.Catalog
 }
 
 var (
@@ -105,27 +109,44 @@ func SourceDepsWithRoots(inst string, run sys.Runner, host *hostcfg.Config, secr
 	}
 }
 
+// contractAt loads the compose contract as committed at commit, so desired
+// state never depends on the working tree left by a previous deploy.
+func contractAt(ctx context.Context, repo RepoAPI, commit string, d *instance.Decisions, cat kinds.Catalog) (*contract.Project, error) {
+	if cat == nil {
+		var err error
+		if cat, err = kinds.Load(); err != nil {
+			return nil, err
+		}
+	}
+	infraPath := "."
+	if d != nil && d.InfraPath != "" {
+		infraPath = d.InfraPath
+	}
+	data, err := repo.Show(ctx, commit, path.Join(infraPath, "compose.yml"))
+	if err != nil {
+		return nil, err
+	}
+	dir, cleanup, err := sys.MkdirTemp("cvctl-contract-")
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	if err := sys.NewOSFS().WriteFile(filepath.Join(dir, "compose.yml"), data, 0o600, sys.Owner{}); err != nil {
+		return nil, err
+	}
+	return contract.Load(dir, cat)
+}
+
 // DevSource resolves desired state for dev environments by tracking branch refs and image tags.
 type DevSource struct {
 	Repo     RepoAPI
 	Resolver registry.Resolver
 	Allowed  []string
+	Catalog  kinds.Catalog
 }
 
 // Desired resolves tag digests for dev environments.
-func (s *DevSource) Desired(ctx context.Context, d *instance.Decisions, p *contract.Project) (state.Desired, error) {
-	var apps []contract.AppService
-	if p != nil {
-		apps = p.Apps
-	}
-
-	// Allowed registries must be validated before making network calls to resolve digests.
-	for _, a := range apps {
-		if err := registry.Allowed(a.Image, s.Allowed); err != nil {
-			return state.Desired{}, err
-		}
-	}
-
+func (s *DevSource) Desired(ctx context.Context, d *instance.Decisions) (state.Desired, error) {
 	branch := "develop"
 	tag := "develop"
 	if d != nil {
@@ -140,6 +161,19 @@ func (s *DevSource) Desired(ctx context.Context, d *instance.Decisions, p *contr
 	commit, err := s.Repo.Fetch(ctx, branch)
 	if err != nil {
 		return state.Desired{}, err
+	}
+
+	p, err := contractAt(ctx, s.Repo, commit, d, s.Catalog)
+	if err != nil {
+		return state.Desired{}, err
+	}
+	apps := p.Apps
+
+	// Allowed registries must be validated before making network calls to resolve digests.
+	for _, a := range apps {
+		if err := registry.Allowed(a.Image, s.Allowed); err != nil {
+			return state.Desired{}, err
+		}
 	}
 
 	digests := make(map[string]string, len(apps))
@@ -161,21 +195,11 @@ func (s *DevSource) Desired(ctx context.Context, d *instance.Decisions, p *contr
 type ProdSource struct {
 	Repo    RepoAPI
 	Allowed []string
+	Catalog kinds.Catalog
 }
 
 // Desired reads pinned digests from deploy/prod.env at the fetched commit.
-func (s *ProdSource) Desired(ctx context.Context, d *instance.Decisions, p *contract.Project) (state.Desired, error) {
-	var apps []contract.AppService
-	if p != nil {
-		apps = p.Apps
-	}
-
-	for _, a := range apps {
-		if err := registry.Allowed(a.Image, s.Allowed); err != nil {
-			return state.Desired{}, err
-		}
-	}
-
+func (s *ProdSource) Desired(ctx context.Context, d *instance.Decisions) (state.Desired, error) {
 	branch := "main"
 	if d != nil && d.InfraBranch != "" {
 		branch = d.InfraBranch
@@ -184,6 +208,18 @@ func (s *ProdSource) Desired(ctx context.Context, d *instance.Decisions, p *cont
 	commit, err := s.Repo.Fetch(ctx, branch)
 	if err != nil {
 		return state.Desired{}, err
+	}
+
+	p, err := contractAt(ctx, s.Repo, commit, d, s.Catalog)
+	if err != nil {
+		return state.Desired{}, err
+	}
+	apps := p.Apps
+
+	for _, a := range apps {
+		if err := registry.Allowed(a.Image, s.Allowed); err != nil {
+			return state.Desired{}, err
+		}
 	}
 
 	data, err := s.Repo.Show(ctx, commit, "deploy/prod.env")
@@ -240,11 +276,13 @@ func SourceFor(d *instance.Decisions, deps Deps) Source {
 			Repo:     deps.Repo,
 			Resolver: deps.Resolver,
 			Allowed:  deps.Allowed,
+			Catalog:  deps.Catalog,
 		}
 	case "prod":
 		return &ProdSource{
 			Repo:    deps.Repo,
 			Allowed: deps.Allowed,
+			Catalog: deps.Catalog,
 		}
 	default:
 		return invalidSource{env: d.Env}
@@ -255,7 +293,7 @@ type invalidSource struct {
 	env string
 }
 
-func (s invalidSource) Desired(ctx context.Context, d *instance.Decisions, p *contract.Project) (state.Desired, error) {
+func (s invalidSource) Desired(ctx context.Context, d *instance.Decisions) (state.Desired, error) {
 	env := s.env
 	if env == "" && d != nil {
 		env = d.Env

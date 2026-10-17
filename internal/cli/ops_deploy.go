@@ -103,7 +103,7 @@ func newDeployCmd() *cobra.Command {
 			}
 
 			src := deploy.SourceFor(d, deps)
-			desired, err := src.Desired(cmd.Context(), d, p)
+			desired, err := src.Desired(cmd.Context(), d)
 			if err != nil {
 				return err
 			}

@@ -40,7 +40,7 @@ type fakeSource struct {
 	err     error
 }
 
-func (f *fakeSource) Desired(ctx context.Context, d *instance.Decisions, p *contract.Project) (state.Desired, error) {
+func (f *fakeSource) Desired(ctx context.Context, d *instance.Decisions) (state.Desired, error) {
 	if f.err != nil {
 		return state.Desired{}, f.err
 	}
