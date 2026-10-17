@@ -301,3 +301,17 @@ func TestCheckDigest(t *testing.T) {
 		}
 	}
 }
+
+func TestReadMalformedHidesSecrets(t *testing.T) {
+	p, _ := load(t)
+	path := filepath.Join(t.TempDir(), "cvctl.env")
+	os.WriteFile(path, []byte("CVCTL_SVC_X_PASSWORD=\"hunter2hunter2\n"), 0o640)
+	_, err := Read(path, p)
+	var e *output.Error
+	if err == nil || !asErr(err, &e) || e.Code != "E_DECISION_READ" {
+		t.Fatalf("got %v", err)
+	}
+	if strings.Contains(e.Message, "hunter2") || !strings.Contains(e.Message, "malformed") {
+		t.Fatalf("message leaks or lacks marker: %q", e.Message)
+	}
+}

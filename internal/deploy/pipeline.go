@@ -246,6 +246,45 @@ func redact(text string, envValues map[string]string) string {
 	return out
 }
 
+// withSecrets returns a new map holding base plus extra, for redaction only.
+func withSecrets(base, extra map[string]string) map[string]string {
+	out := make(map[string]string, len(base)+len(extra))
+	for k, v := range extra {
+		out[k] = v
+	}
+	for k, v := range base {
+		out[k] = v
+	}
+	return out
+}
+
+// cvctlSecrets collects the secret values stored in cvctl.env (service
+// passwords and external-service settings) so they are redacted like app.env
+// values. Unreadable or malformed files yield no secrets: callers report that
+// failure separately.
+func (d *Deployer) cvctlSecrets(path string) map[string]string {
+	data, err := d.fs().ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	m, err := godotenv.Unmarshal(string(data))
+	if err != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for k, v := range m {
+		if !strings.HasPrefix(k, "CVCTL_SVC_") {
+			continue
+		}
+		if strings.HasSuffix(k, "_PASSWORD") || strings.Contains(k, "_EXT_") {
+			if len(v) >= 8 {
+				out[k] = v
+			}
+		}
+	}
+	return out
+}
+
 func lastLines(text string, n int) string {
 	lines := strings.Split(text, "\n")
 	if len(lines) <= n {
@@ -488,9 +527,10 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	instDir := filepath.Join(d.deployRoot(), inst)
 	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
 
+	cvSecrets := d.cvctlSecrets(cvctlEnvPath)
 	d0, err := instance.Read(cvctlEnvPath, &contract.Project{})
 	if err != nil {
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("cannot read %s: %v", cvctlEnvPath, err), nil)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("cannot read %s: %v", cvctlEnvPath, err), cvSecrets)
 	}
 	infraPath := d0.InfraPath
 	if infraPath == "" {
@@ -505,12 +545,12 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 
 	p, err := contract.Load(infraDir, cat)
 	if err != nil {
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), nil)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), cvSecrets)
 	}
 
 	dec, err := instance.Read(cvctlEnvPath, p)
 	if err != nil {
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("cannot read %s: %v", cvctlEnvPath, err), nil)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("cannot read %s: %v", cvctlEnvPath, err), cvSecrets)
 	}
 	if dec.InfraPath == "" {
 		dec.InfraPath = "."
@@ -519,7 +559,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	if d.Allowed != nil {
 		for _, a := range p.Apps {
 			if aErr := registry.Allowed(a.Image, d.Allowed); aErr != nil {
-				return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("E_REGISTRY_NOT_ALLOWED: %v", aErr), nil)
+				return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("E_REGISTRY_NOT_ALLOWED: %v", aErr), cvSecrets)
 			}
 		}
 	}
@@ -527,7 +567,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	specPath := filepath.Join(infraDir, "env.spec.yml")
 	spec, err := envspec.Load(specPath)
 	if err != nil {
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), nil)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), cvSecrets)
 	}
 
 	// Digests from want.Digests are verified
@@ -546,7 +586,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			issueMsgs = append(issueMsgs, fmt.Sprintf("%s: %s", iss.Code, iss.Message))
 		}
 		detail := "E_DEPLOY_INVALID: " + strings.Join(issueMsgs, "; ")
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, detail, nil)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, detail, cvSecrets)
 	}
 
 	// Step 3: ServiceVars -> Resolve with current app.env
@@ -558,7 +598,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 
 	svcVars, err := render.ServiceVars(p, dec, cat)
 	if err != nil {
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), existingEnv)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), withSecrets(existingEnv, cvSecrets))
 	}
 
 	resEnv, err := envspec.Resolve(spec, envspec.Input{
@@ -568,7 +608,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		Domains:     dec.Domains,
 	})
 	if err != nil {
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), existingEnv)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), withSecrets(existingEnv, cvSecrets))
 	}
 
 	if len(resEnv.Missing) > 0 {
@@ -629,6 +669,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	finalOverridePath := filepath.Join(instDir, "compose.cvctl.yml")
 	finalRoutePath := filepath.Join(d.traefikDir(), inst+".yml")
 
+	secrets := withSecrets(resEnv.Values, cvSecrets)
 	appEnvBytes := instance.FormatEnv(resEnv.Values)
 	stagingOverrideBytes, err := d.renderOverride(p, dec, cat, render.Options{
 		InstanceDir: instDir,
@@ -636,7 +677,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		AppEnvPath:  stagingAppEnvPath,
 	})
 	if err != nil {
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("render staging override failed: %v", err), resEnv.Values)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("render staging override failed: %v", err), secrets)
 	}
 	finalOverrideBytes, err := d.renderOverride(p, dec, cat, render.Options{
 		InstanceDir: instDir,
@@ -644,7 +685,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		AppEnvPath:  finalAppEnvPath,
 	})
 	if err != nil {
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("render final override failed: %v", err), resEnv.Values)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("render final override failed: %v", err), secrets)
 	}
 	routeBytes, err := d.renderTraefik(p, dec, render.Options{
 		InstanceDir: instDir,
@@ -652,44 +693,44 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		AppEnvPath:  finalAppEnvPath,
 	})
 	if err != nil {
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("render traefik route failed: %v", err), resEnv.Values)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("render traefik route failed: %v", err), secrets)
 	}
 
 	fsys := d.fs()
 	if err := fsys.MkdirAll(stagingDir, 0o2775, deployOwner); err != nil {
-		return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("mkdir staging failed: %v", err), resEnv.Values)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("mkdir staging failed: %v", err), secrets)
 	}
 	if err := fsys.WriteFile(stagingAppEnvPath, appEnvBytes, 0o640, deployOwner); err != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-		return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("write staging app.env failed: %v", err), resEnv.Values)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("write staging app.env failed: %v", err), secrets)
 	}
 	if err := fsys.WriteFile(stagingOverridePath, stagingOverrideBytes, 0o640, deployOwner); err != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-		return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("write staging override failed: %v", err), resEnv.Values)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("write staging override failed: %v", err), secrets)
 	}
 	if routeBytes != nil {
 		if err := fsys.WriteFile(stagingRoutePath, routeBytes, 0o640, deployOwner); err != nil {
 			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-			return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("write staging route failed: %v", err), resEnv.Values)
+			return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("write staging route failed: %v", err), secrets)
 		}
 	}
 
 	stagingCompose := d.Compose(inst, stagingOverridePath, stagingAppEnvPath)
 	if stagingCompose == nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, "deployer misconfigured: Compose returned nil", resEnv.Values)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, "deployer misconfigured: Compose returned nil", secrets)
 	}
 
 	if err := stagingCompose.Config(ctx); err != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), resEnv.Values)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
 	}
 
 	// Step 5: If prod, create restore point
 	if dec.Env == "prod" {
 		if err := d.restore().Create(ctx, inst, deployID); err != nil {
 			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-			return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("restore point failed: %v", err), resEnv.Values)
+			return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("restore point failed: %v", err), secrets)
 		}
 	}
 
@@ -707,11 +748,11 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 
 	if err := stagingCompose.Pull(ctx, appServices...); err != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), resEnv.Values)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
 	}
 	if err := stagingCompose.UpData(ctx, localDataServices); err != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), resEnv.Values)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
 	}
 
 	// Generated randoms are persisted before hooks run: a migration may already
@@ -729,7 +770,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		rollbackEnvAbsent = false
 		if err := fsys.WriteFile(finalAppEnvPath, instance.FormatEnv(rollbackEnv), 0o640, deployOwner); err != nil {
 			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-			return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("persist generated app.env keys failed: %v", err), resEnv.Values)
+			return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("persist generated app.env keys failed: %v", err), secrets)
 		}
 	}
 
@@ -748,31 +789,31 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			if strings.TrimSpace(rawOutput) == "" && err != nil {
 				rawOutput = err.Error()
 			}
-			redactedOut := lastLines(redact(rawOutput, resEnv.Values), 20)
-			return d.failPermanent(ctx, inst, st, want, deployID, actor, now, redactedOut, resEnv.Values)
+			redactedOut := lastLines(redact(rawOutput, secrets), 20)
+			return d.failPermanent(ctx, inst, st, want, deployID, actor, now, redactedOut, secrets)
 		}
 	}
 
 	// Step 8: Promote staging -> final (order: app.env -> route -> override)
 	if err := fsys.WriteFile(finalAppEnvPath, appEnvBytes, 0o640, deployOwner); err != nil {
-		return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, rollbackEnv, resEnv.Values, rollbackEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote app.env failed: %v", err))
+		return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, rollbackEnv, secrets, rollbackEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote app.env failed: %v", err))
 	}
 	if routeBytes != nil {
 		if err := fsys.WriteFile(finalRoutePath, routeBytes, 0o640, deployOwner); err != nil {
-			return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, rollbackEnv, resEnv.Values, rollbackEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote route failed: %v", err))
+			return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, rollbackEnv, secrets, rollbackEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote route failed: %v", err))
 		}
 	} else {
 		_ = fsys.Remove(finalRoutePath)
 	}
 	if err := fsys.WriteFile(finalOverridePath, finalOverrideBytes, 0o640, deployOwner); err != nil {
-		return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, rollbackEnv, resEnv.Values, rollbackEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote override failed: %v", err))
+		return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, rollbackEnv, secrets, rollbackEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote override failed: %v", err))
 	}
 	d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 	promoted = true
 
 	finalCompose := d.Compose(inst, finalOverridePath, finalAppEnvPath)
 	if finalCompose == nil {
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, "deployer misconfigured: Compose returned nil", resEnv.Values)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, "deployer misconfigured: Compose returned nil", secrets)
 	}
 	upErr := finalCompose.Up(ctx)
 
@@ -794,7 +835,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 				if strings.TrimSpace(rawHook) == "" && hErr != nil {
 					rawHook = hErr.Error()
 				}
-				redactedHook := lastLines(redact(rawHook, resEnv.Values), 20)
+				redactedHook := lastLines(redact(rawHook, secrets), 20)
 				_ = d.notifier().Send(ctx, notify.Message{
 					Host:  d.hostName(),
 					Level: "warn",
@@ -857,7 +898,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			logs = healthErr.Error()
 		}
 	}
-	redactedLogs := lastLines(redact(logs, resEnv.Values), 20)
+	redactedLogs := lastLines(redact(logs, secrets), 20)
 
 	if st.Current == nil || st.Current.InfraCommit == "" {
 		st.Status = state.StatusFailed
@@ -904,7 +945,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	if rollbackErr != nil {
 		st.RollbackFailed = true
 		rbDetail := fmt.Sprintf("rollback failed: %v\noriginal error: %s", rollbackErr, redactedLogs)
-		rbRedacted := redact(rbDetail, resEnv.Values)
+		rbRedacted := redact(rbDetail, secrets)
 		res := Result{
 			Status: state.StatusFailed,
 			ID:     deployID,

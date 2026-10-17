@@ -60,9 +60,18 @@ func readErr(path string, err error) error {
 // Read maps normalized keys back to service names using p. Keys for services
 // that no longer exist in the contract are dropped on purpose.
 func Read(path string, p *contract.Project) (*Decisions, error) {
-	m, err := godotenv.Read(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, readErr(path, err)
+	}
+	m, err := godotenv.Unmarshal(string(raw))
+	if err != nil {
+		// godotenv parse errors echo the offending value, and this file holds secrets.
+		return nil, &output.Error{
+			Code:    "E_DECISION_READ",
+			Message: fmt.Sprintf("%s is malformed (details hidden: the file holds secrets)", path),
+			Hint:    "fix the KEY=value syntax in cvctl.env",
+		}
 	}
 	d := &Decisions{
 		Instance:    m[keyInstance],

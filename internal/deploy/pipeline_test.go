@@ -2500,3 +2500,42 @@ func TestDeploySuccessSaveFailureStillNotifies(t *testing.T) {
 		t.Fatalf("expected deploy OK notification, got %v", rig.notifier.messages)
 	}
 }
+
+func TestHookOutputRedactsCvctlEnvSecrets(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	extra := "CVCTL_SVC_CACHE_EXT_URL=redis://user:extsecretvalue99@cache\nCVCTL_SVC_CACHE_PASSWORD=cachepass-1234567\n"
+	envPath := filepath.Join(rig.instDir, "cvctl.env")
+	cur, _ := os.ReadFile(envPath)
+	if err := os.WriteFile(envPath, append(cur, []byte(extra)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hookOut := "cannot reach redis://user:extsecretvalue99@cache using cachepass-1234567"
+	rig.compose.failHook["api:node dist/migrate.js"] = struct {
+		res sys.Result
+		err error
+	}{res: sys.Result{ExitCode: 1, Stderr: []byte(hookOut)}, err: fmt.Errorf("exit 1")}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{})
+	if err != nil || res.Status != state.StatusFailed {
+		t.Fatalf("got %v %v", res.Status, err)
+	}
+	all := res.Detail
+	for _, m := range rig.notifier.messages {
+		all += m.Text
+	}
+	if strings.Contains(all, "extsecretvalue99") || strings.Contains(all, "cachepass-1234567") {
+		t.Fatalf("cvctl.env secret leaked: %s", all)
+	}
+}
+
+func TestMalformedCvctlEnvHidesSecrets(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	envPath := filepath.Join(rig.instDir, "cvctl.env")
+	if err := os.WriteFile(envPath, []byte("CVCTL_SVC_X_PASSWORD=\"hunter2hunter2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, _ := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{})
+	if strings.Contains(res.Detail, "hunter2") || !strings.Contains(res.Detail, "malformed") {
+		t.Fatalf("detail: %q", res.Detail)
+	}
+}

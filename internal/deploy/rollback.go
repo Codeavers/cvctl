@@ -168,7 +168,7 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 		st.RollbackFailed = true
 		st.UpdatedAt = now
 
-		redactedSwapErr := redact(swapErr.Error(), existingEnv)
+		redactedSwapErr := redact(swapErr.Error(), withSecrets(existingEnv, d.cvctlSecrets(filepath.Join(instDir, "cvctl.env"))))
 		res := Result{
 			Status: state.StatusFailed,
 			ID:     deployID,

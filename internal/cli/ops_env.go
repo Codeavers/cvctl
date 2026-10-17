@@ -309,7 +309,7 @@ func newSetStrategyCmd() *cobra.Command {
 			if err != nil {
 				return &output.Error{
 					Code:    "E_DECISION_READ",
-					Message: fmt.Sprintf("cannot read %s: %v", cvctlEnvPath, err),
+					Message: fmt.Sprintf("%s is malformed (details hidden: the file holds secrets)", cvctlEnvPath),
 					Hint:    "fix syntax in cvctl.env",
 				}
 			}
