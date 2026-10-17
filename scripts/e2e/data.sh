@@ -144,7 +144,8 @@ cvctl status --json > /tmp/leak-status.json
 cvctl history "$INST" --json > /tmp/leak-history.json
 journalctl --no-pager > /tmp/leak-journal.txt 2>&1 || true
 sleep 2
-cp "$LOG" /tmp/leak-script.txt
+# The ::add-mask:: commands carry the values by design; Actions never prints them.
+grep -av "^::add-mask::" "$LOG" > /tmp/leak-script.txt || true
 for f in /tmp/leak-status.json /tmp/leak-history.json /tmp/leak-journal.txt /tmp/leak-script.txt; do
   if grep -aqF -e "$WALG_KEY" -e "$RESTIC_PW" -e "$PASSPHRASE" "$f"; then
     echo "secret value found in $f" >&2
