@@ -241,7 +241,7 @@ func TestRestoreTimestampPicksNewestBackupBeforeTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := g.calls()[g.index("docker run -d")]
-	if !strings.Contains(run, "-e RESTORE_BACKUP=base_0000000100000000000000B2") || !strings.Contains(run, "-e RESTORE_TARGET_TIME=2026-01-01T12:00:00Z") {
+	if !strings.Contains(run, "-e RESTORE_BACKUP=base_0000000100000000000000B2") || !strings.Contains(run, "-e RESTORE_TARGET_TIME=2026-01-01 12:00:00+00") {
 		t.Fatalf("run:\n%s", run)
 	}
 	if g.index(cp+"exec") > g.index(cp+"stop") {
@@ -397,7 +397,7 @@ func TestRestoreTimeTargetKeepsSubsecondPrecision(t *testing.T) {
 	if _, err := g.r.Restore(context.Background(), "app-prod", "db", "2026-01-01T12:00:00.250Z"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(g.calls()[g.index("docker run -d")], "-e RESTORE_TARGET_TIME=2026-01-01T12:00:00.25Z") {
+	if !strings.Contains(g.calls()[g.index("docker run -d")], "-e RESTORE_TARGET_TIME=2026-01-01 12:00:00.25+00") {
 		t.Fatalf("calls: %v", g.calls())
 	}
 }

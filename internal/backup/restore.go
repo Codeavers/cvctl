@@ -48,6 +48,10 @@ var (
 // from RESTORE_TARGET_TIME / RESTORE_TARGET_NAME (both empty means replay all
 // archived WAL); they are validated by the caller before reaching the
 // container environment.
+// recoveryTimeLayout uses a numeric UTC offset: postgres parses -c settings
+// before timezone_abbreviations is loaded, so "Z" is rejected at startup.
+const recoveryTimeLayout = "2006-01-02 15:04:05.999999-07"
+
 const restoreScript = `set -e
 mkdir -p "$PGDATA"
 chown postgres:postgres "$PGDATA"
@@ -641,7 +645,7 @@ func (r *Runner) walgRecover(ctx context.Context, inst, svc string, p *contract.
 	}
 	switch tgt.kind {
 	case "time":
-		args = append(args, "-e", "RESTORE_TARGET_TIME="+tgt.at.Format(time.RFC3339Nano))
+		args = append(args, "-e", "RESTORE_TARGET_TIME="+tgt.at.UTC().Format(recoveryTimeLayout))
 	case "name":
 		args = append(args, "-e", "RESTORE_TARGET_NAME="+tgt.name)
 	}
