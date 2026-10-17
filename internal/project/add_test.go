@@ -45,6 +45,7 @@ func (s *stubRepo) record(entry string) {
 }
 
 func (s *stubRepo) Clone(_ context.Context, _, _ string) error {
+	s.record("clone")
 	if s.cloneErr != nil {
 		return s.cloneErr
 	}

@@ -11,6 +11,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/codeavers/cvctl/internal/backup"
+	"github.com/codeavers/cvctl/internal/compose"
 	"github.com/codeavers/cvctl/internal/deploy"
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/output"
@@ -73,7 +75,18 @@ var newProjectEnv = func(o projectOpts) (*project.Env, error) {
 	}
 	deploy.Wire(deployer, run)
 
+	data := &backup.Runner{
+		Run:        run,
+		FS:         fsys,
+		Compose:    func(inst string) *compose.Project { return deployer.ComposeProject(run, inst) },
+		Load:       backup.LoadInstance("/srv/deploy", cat),
+		Catalog:    cat,
+		Host:       deploy.BackupTargetFrom(cfg, secrets),
+		DeployRoot: "/srv/deploy",
+	}
+
 	return &project.Env{
+		Data:        data,
 		Run:         run,
 		FS:          fsys,
 		Prompt:      prompter,
@@ -129,6 +142,7 @@ func newProjectCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newProjectAddCmd())
 	cmd.AddCommand(newProjectUpdateCmd())
+	cmd.AddCommand(newProjectRestoreCmd())
 	return cmd
 }
 
@@ -273,6 +287,74 @@ func newProjectUpdateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().Bool("non-interactive", false, "never prompt; use defaults")
+	return cmd
+}
+
+type projectRestoreReport struct {
+	projectReport
+	Volumes  []string `json:"volumes,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+func newProjectRestoreCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "restore <instance>",
+		Short: "Rebuild an instance on a new host from off-site backups",
+		Long: `Rebuild an instance on a host that lost its data. Run cvctl secrets import first
+so cvctl.env and the deploy key are back, and make sure the host uses S3 storage.
+
+The infra repository is cloned, every data service is restored from its latest
+backup into a new volume, the instance is deployed, and wal-g services start a
+new backup generation so the restored timeline never mixes with the old one.`,
+		Example: `  cvctl secrets import bundle.tar.gz
+  cvctl project restore myapp-prod
+  cvctl project restore myapp-prod --repo git@github.com:myorg/my-infra.git`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			repo, _ := cmd.Flags().GetString("repo")
+			asJSON, _ := cmd.Flags().GetBool("json")
+			e, err := newProjectEnv(projectOpts{
+				NonInteractive: true,
+				In:             cmd.InOrStdin(),
+				Out:            cmd.ErrOrStderr(),
+			})
+			if err != nil {
+				return err
+			}
+			res, err := project.Restore(cmd.Context(), e, args[0], project.RestoreOptions{Repo: repo})
+			if err != nil {
+				return err
+			}
+			rep := projectRestoreReport{
+				projectReport: projectReport{Instance: res.Instance, Status: res.Deploy.Status, Missing: res.Deploy.Missing},
+				Volumes:       res.Volumes,
+				Warnings:      res.Warnings,
+			}
+			if res.Deploy.Status == state.StatusFailed {
+				failedErr := &output.Error{
+					Code:    "E_DEPLOY_FAILED",
+					Message: fmt.Sprintf("deploy failed: %s", res.Deploy.Detail),
+					Hint:    "data is restored; fix the cause and run cvctl project update " + res.Instance,
+				}
+				if asJSON {
+					return &output.DataError{Err: failedErr, Data: rep}
+				}
+				writeProjectHuman(cmd.OutOrStdout(), rep.projectReport)
+				return failedErr
+			}
+			printerFrom(cmd).Result(rep, func(w io.Writer) {
+				writeProjectHuman(w, rep.projectReport)
+				for _, v := range rep.Volumes {
+					fmt.Fprintf(w, "restored volume: %s\n", v)
+				}
+				for _, warn := range rep.Warnings {
+					fmt.Fprintf(w, "warning: %s\n", warn)
+				}
+			})
+			return nil
+		},
+	}
+	cmd.Flags().String("repo", "", "infra repository URL (overrides CVCTL_INFRA_URL from cvctl.env)")
 	return cmd
 }
 

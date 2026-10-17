@@ -67,6 +67,7 @@ type Env struct {
 	Secrets      *hostcfg.Secrets
 	Catalog      kinds.Catalog
 	Deployer     *deploy.Deployer
+	Data         DataRestorer
 	DeployRoot   string
 	StateRoot    string
 	RepoFactory  func(dir, keyPath string) RepoLike
@@ -754,7 +755,9 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
 	appEnvPath := filepath.Join(instDir, "app.env")
 
-	if err := e.fs().WriteFile(cvctlEnvPath, instance.FormatEnv(d.Entries()), 0o640, deployOwner); err != nil {
+	addEntries := d.Entries()
+	addEntries[keyInfraURL] = repoURL
+	if err := e.fs().WriteFile(cvctlEnvPath, instance.FormatEnv(addEntries), 0o640, deployOwner); err != nil {
 		cleanupInst()
 		return nil, err
 	}
@@ -922,6 +925,11 @@ func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
 	}
 	for k, v := range d.Entries() {
 		merged[k] = v
+	}
+	if merged[keyInfraURL] == "" {
+		if url := recordedInfraURL(ctx, e, infraDir); url != "" {
+			merged[keyInfraURL] = url
+		}
 	}
 	if err := e.fs().WriteFile(cvctlEnvPath, instance.FormatEnv(merged), 0o640, deployOwner); err != nil {
 		return nil, err

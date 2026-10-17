@@ -411,3 +411,21 @@ func TestNotifierForFallsBackToNoop(t *testing.T) {
 		t.Fatal("configured notifier must not be Noop")
 	}
 }
+
+func TestProjectRestoreCLIRefusesLocalStorage(t *testing.T) {
+	tmp := t.TempDir()
+	oldEnv := newProjectEnv
+	t.Cleanup(func() { newProjectEnv = oldEnv })
+	newProjectEnv = func(projectOpts) (*project.Env, error) {
+		return &project.Env{
+			FS:         sys.NewOSFS(),
+			DeployRoot: tmp,
+			StateRoot:  filepath.Join(tmp, "state"),
+			Host:       &hostcfg.Config{Storage: "local"},
+		}, nil
+	}
+	code, out, _ := run(t, "project", "restore", "demo-dev", "--json")
+	if code != 1 || !strings.Contains(out, "E_RESTORE_LOCAL_STORAGE") {
+		t.Fatalf("code=%d out=%s", code, out)
+	}
+}
