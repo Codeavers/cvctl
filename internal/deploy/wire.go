@@ -15,6 +15,8 @@ import (
 
 // Wire sets up the production Compose, Health, and Repo factories on the Deployer.
 func Wire(d *Deployer, run sys.Runner) {
+	d.Allowed = AllowedRegistries(d.Host)
+
 	d.Repo = func(inst string) CheckoutAPI {
 		keyPath := filepath.Join(d.stateRoot(), inst, "deploy_key")
 		exists := false

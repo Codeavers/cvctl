@@ -154,3 +154,17 @@ func TestSourceDeps(t *testing.T) {
 		t.Fatalf("got Allowed %v, want %v", deps.Allowed, wantAllowed)
 	}
 }
+
+func TestWireSetsAllowedFromHost(t *testing.T) {
+	d := &deploy.Deployer{Host: &hostcfg.Config{Registries: "ghcr.io/a, docker.io/b"}}
+	deploy.Wire(d, &systest.Runner{})
+	if want := []string{"ghcr.io/a", "docker.io/b"}; !slices.Equal(d.Allowed, want) {
+		t.Fatalf("got %v, want %v", d.Allowed, want)
+	}
+
+	d2 := &deploy.Deployer{}
+	deploy.Wire(d2, &systest.Runner{})
+	if d2.Allowed == nil || len(d2.Allowed) != 0 {
+		t.Fatalf("no host registries must yield an empty non-nil list, got %#v", d2.Allowed)
+	}
+}

@@ -2286,3 +2286,51 @@ func TestDeployAppEnvMalformedHidesSecrets(t *testing.T) {
 		t.Errorf("expected message %q, got %q", expectedMsg, oe.Message)
 	}
 }
+
+func TestDeployRejectsDisallowedImageAfterCheckout(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	rig.deployer.Allowed = []string{"ghcr.io/other"}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusFailed {
+		t.Fatalf("expected FAILED, got %v", res.Status)
+	}
+	if !strings.Contains(res.Detail, "E_REGISTRY_NOT_ALLOWED") {
+		t.Fatalf("expected E_REGISTRY_NOT_ALLOWED in detail, got %q", res.Detail)
+	}
+	if len(rig.compose.calls) != 0 {
+		t.Fatalf("no compose call may run for a rejected image, got %v", rig.compose.calls)
+	}
+}
+
+func TestDeployAcceptsAllowedImage(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	rig.deployer.Allowed = []string{"ghcr.io/org"}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{})
+	if err != nil || res.Status != state.StatusOK {
+		t.Fatalf("expected OK, got %v err=%v", res.Status, err)
+	}
+}
+
+func TestDeployLockedAssumesCallerHoldsLock(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+
+	unlock, err := rig.store.Lock("demo-dev")
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+	defer unlock()
+
+	res, err := rig.deployer.DeployLocked(context.Background(), "demo-dev", defaultDesired(), Options{})
+	if err != nil || res.Status != state.StatusOK {
+		t.Fatalf("expected OK while caller holds lock, got %v err=%v", res.Status, err)
+	}
+
+	if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Force: true}); err == nil {
+		t.Fatal("Deploy must take the lock itself and fail while it is held")
+	}
+}

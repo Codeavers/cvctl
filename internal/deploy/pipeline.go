@@ -18,6 +18,7 @@ import (
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/output"
+	"github.com/codeavers/cvctl/internal/registry"
 	"github.com/codeavers/cvctl/internal/render"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
@@ -82,6 +83,9 @@ type Deployer struct {
 	Catalog        kinds.Catalog
 	Clock          func() time.Time
 	Health         func(ctx context.Context, inst, override string) error
+	// Allowed lists permitted image registries. Nil disables the post-checkout
+	// image check; Wire sets it (non-nil) from the host configuration.
+	Allowed []string
 	RenderOverride func(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o render.Options) ([]byte, error)
 	RenderTraefik  func(p *contract.Project, d *instance.Decisions, o render.Options) ([]byte, error)
 }
@@ -338,7 +342,29 @@ func (d *Deployer) handlePromoteFailure(ctx context.Context, inst string, st *st
 }
 
 // Deploy executes the deployment pipeline for an instance following the recreate strategy.
-func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, opts Options) (res Result, retErr error) {
+func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, opts Options) (Result, error) {
+	if d.Compose == nil || d.Health == nil {
+		return Result{}, misconfiguredErr()
+	}
+	unlock, err := d.Store.Lock(inst)
+	if err != nil {
+		return Result{}, err
+	}
+	defer unlock()
+	return d.DeployLocked(ctx, inst, want, opts)
+}
+
+func misconfiguredErr() error {
+	return &output.Error{
+		Code:    "E_DEPLOY_MISCONFIGURED",
+		Message: "deployer misconfigured: Compose and Health are required",
+		Hint:    "configure Compose and Health before running deploy",
+	}
+}
+
+// DeployLocked runs the pipeline assuming the caller already holds the
+// instance lock (Store.Lock).
+func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Desired, opts Options) (res Result, retErr error) {
 	actor := opts.Actor
 	if actor == "" {
 		actor = "agent"
@@ -347,20 +373,10 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 	deployID := fmt.Sprintf("deploy-%d", now.UnixNano())
 
 	if d.Compose == nil || d.Health == nil {
-		return Result{}, &output.Error{
-			Code:    "E_DEPLOY_MISCONFIGURED",
-			Message: "deployer misconfigured: Compose and Health are required",
-			Hint:    "configure Compose and Health before running deploy",
-		}
+		return Result{}, misconfiguredErr()
 	}
 
-	// Step 1: Lock instance and load state
-	unlock, err := d.Store.Lock(inst)
-	if err != nil {
-		return Result{}, err
-	}
-	defer unlock()
-
+	// Step 1: load state (the instance lock is held by the caller)
 	st, err := d.Store.Load(inst)
 	if err != nil {
 		return Result{}, err
@@ -467,6 +483,14 @@ func (d *Deployer) Deploy(ctx context.Context, inst string, want state.Desired, 
 	}
 	if dec.InfraPath == "" {
 		dec.InfraPath = "."
+	}
+
+	if d.Allowed != nil {
+		for _, a := range p.Apps {
+			if aErr := registry.Allowed(a.Image, d.Allowed); aErr != nil {
+				return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("E_REGISTRY_NOT_ALLOWED: %v", aErr), nil)
+			}
+		}
 	}
 
 	specPath := filepath.Join(infraDir, "env.spec.yml")

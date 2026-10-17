@@ -93,7 +93,17 @@ func SourceDepsWithRoots(inst string, run sys.Runner, host *hostcfg.Config, secr
 	}
 	resolver := registry.New(user, token, registry.InsecureHostsFromEnv())
 
-	var allowed []string
+	return Deps{
+		Repo:     repo,
+		Resolver: resolver,
+		Allowed:  AllowedRegistries(host),
+	}
+}
+
+// AllowedRegistries returns the registry prefixes permitted by the host
+// configuration. The result is never nil: an empty list rejects every image.
+func AllowedRegistries(host *hostcfg.Config) []string {
+	allowed := []string{}
 	if host != nil && host.Registries != "" {
 		for _, r := range strings.Split(host.Registries, ",") {
 			if s := strings.TrimSpace(r); s != "" {
@@ -101,12 +111,7 @@ func SourceDepsWithRoots(inst string, run sys.Runner, host *hostcfg.Config, secr
 			}
 		}
 	}
-
-	return Deps{
-		Repo:     repo,
-		Resolver: resolver,
-		Allowed:  allowed,
-	}
+	return allowed
 }
 
 // contractAt loads the compose contract as committed at commit, so desired
