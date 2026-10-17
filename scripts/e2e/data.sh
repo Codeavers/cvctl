@@ -9,6 +9,17 @@ exec > >(tee "$LOG") 2>&1
 
 INST=demo-dev
 HOST_NAME=e2e
+
+on_fail() {
+  echo "::group::failure diagnostics"
+  echo "last res: ${res:-}"
+  docker ps -a --format '{{.Names}} {{.Status}}' || true
+  for c in $(docker ps -a --filter "label=com.docker.compose.project=${INST}" --format '{{.Names}}'); do
+    echo "--- logs $c"; docker logs --tail 60 "$c" 2>&1 || true
+  done
+  echo "::endgroup::"
+}
+trap on_fail ERR
 SECRETS_DIR=/etc/cvctl/secrets
 
 # Secret values: masked before first use, never echoed.
@@ -83,7 +94,7 @@ sleep 70
 echo "Assert 2: rows A,B inserted; T recorded"
 
 echo "=== 6. db restore --to T -> only A ==="
-res=$(cvctl db restore "$INST" db --to "$T" --json)
+res=$(cvctl db restore "$INST" db --to "$T" --json) || { echo "$res"; false; }
 echo "$res"
 echo "$res" | jq -e '.ok == true'
 prev=$(echo "$res" | jq -r '.data.previous_volume')
