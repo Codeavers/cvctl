@@ -22,6 +22,11 @@ jobs:
       - name: Build cvctl
         run: CGO_ENABLED=0 go build -o cvctl ./cmd/cvctl
 
+      - name: Build cvctl-postgres
+        run: |
+          docker build -t cvctl-postgres:16 --build-arg PG_MAJOR=16 images/postgres
+          docker tag cvctl-postgres:16 ghcr.io/codeavers/cvctl-postgres:16
+
       - name: Configure /etc/cvctl
         run: |
           sudo install -d -m 0700 /etc/cvctl

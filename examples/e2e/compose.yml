@@ -16,6 +16,7 @@ services:
           memory: 128m
     environment:
       REDIS_URL: ${REDIS_URL}
+      DATABASE_URL: ${DATABASE_URL}
       APP_SECRET: ${APP_SECRET}
       GREETING: ${GREETING}
       PUBLIC_URL: ${PUBLIC_URL}
@@ -23,3 +24,11 @@ services:
     labels:
       cvctl.kind: redis
       cvctl.env: REDIS
+  db:
+    labels:
+      cvctl.kind: postgres
+      cvctl.env: DATABASE
+    deploy:
+      resources:
+        limits:
+          memory: 256m

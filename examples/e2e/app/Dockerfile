@@ -5,6 +5,7 @@ COPY main.go ./
 RUN CGO_ENABLED=0 go build -o /app .
 
 FROM alpine:3
+RUN apk add --no-cache postgresql-client
 ARG MIGRATE_FAIL=""
 ARG BUILD_ID=""
 ENV MIGRATE_FAIL=${MIGRATE_FAIL}

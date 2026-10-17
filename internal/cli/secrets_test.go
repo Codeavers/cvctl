@@ -93,6 +93,36 @@ func TestSecretsRootRequiresEnv(t *testing.T) {
 	}
 }
 
+func TestSecretsImportRoot(t *testing.T) {
+	src := seedSecrets(t)
+	secretsEnv(t, src, &systest.Runner{})
+	if code, _, errb := run(t, "secrets", "export", "-o", "/out/b.age"); code != 0 {
+		t.Fatalf("%d %s", code, errb)
+	}
+	bundle, _ := src.ReadFile("/out/b.age")
+	dst := systest.NewFS()
+	_ = dst.WriteFile("/in/b.age", bundle, 0o600, sys.Owner{})
+	secretsEnv(t, dst, &systest.Runner{})
+
+	code, out, _ := run(t, "secrets", "import", "--root", "/tmp/r", "--json", "/in/b.age")
+	if code != 2 || !strings.Contains(out, "E_USAGE_ROOT") {
+		t.Fatalf("without the env var: %d %s", code, out)
+	}
+	if len(dst.Files()) != 1 {
+		t.Fatalf("rejected import wrote files: %v", dst.Files())
+	}
+
+	t.Setenv("CVCTL_ALLOW_SECRETS_ROOT", "1")
+	code, out, errb := run(t, "secrets", "import", "--root", "/tmp/r", "/in/b.age")
+	if code != 0 || !strings.Contains(out, "/etc/cvctl/secrets/restic_password") {
+		t.Fatalf("with the env var: %d %s %s", code, out, errb)
+	}
+	got, err := dst.ReadFile("/tmp/r/etc/cvctl/secrets/restic_password")
+	if err != nil || string(got) != "pw-secret" {
+		t.Fatalf("%q %v", got, err)
+	}
+}
+
 func TestRemoteExport(t *testing.T) {
 	var armored bytes.Buffer
 	if err := secrets.Encrypt(&armored, []secrets.Entry{{Path: "/etc/cvctl/host.env", Mode: 0o600, Data: []byte("x")}}, "pass", true); err != nil {

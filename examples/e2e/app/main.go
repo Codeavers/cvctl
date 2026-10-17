@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 )
 
 func main() {
@@ -40,6 +41,13 @@ func runMigrate() {
 	if os.Getenv("MIGRATE_FAIL") == "1" {
 		fmt.Fprintln(os.Stderr, "migration failed")
 		os.Exit(1)
+	}
+	if url := os.Getenv("DATABASE_URL"); url != "" {
+		sql := "create table if not exists items (id serial primary key, name text not null)"
+		if out, err := exec.Command("psql", url, "-v", "ON_ERROR_STOP=1", "-c", sql).CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "migration failed: %v\n%s", err, out)
+			os.Exit(1)
+		}
 	}
 	fmt.Println("migrated")
 	os.Exit(0)
