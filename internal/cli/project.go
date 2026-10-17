@@ -34,6 +34,7 @@ type projectReport struct {
 	Status       state.Status `json:"status"`
 	DeployKeyPub string       `json:"deploy_key_pub,omitempty"`
 	Missing      []string     `json:"missing,omitempty"`
+	Warnings     []string     `json:"warnings,omitempty"`
 }
 
 // newProjectEnv builds the environment; tests replace it with fakes.
@@ -202,6 +203,7 @@ func newProjectAddCmd() *cobra.Command {
 				Status:       res.Deploy.Status,
 				DeployKeyPub: res.DeployKeyPub,
 				Missing:      res.Deploy.Missing,
+				Warnings:     res.Warnings,
 			}
 
 			if res.Deploy.Status == state.StatusFailed {
@@ -265,6 +267,7 @@ func newProjectUpdateCmd() *cobra.Command {
 				Status:       res.Deploy.Status,
 				DeployKeyPub: res.DeployKeyPub,
 				Missing:      res.Deploy.Missing,
+				Warnings:     res.Warnings,
 			}
 
 			if res.Deploy.Status == state.StatusFailed {
@@ -292,8 +295,7 @@ func newProjectUpdateCmd() *cobra.Command {
 
 type projectRestoreReport struct {
 	projectReport
-	Volumes  []string `json:"volumes,omitempty"`
-	Warnings []string `json:"warnings,omitempty"`
+	Volumes []string `json:"volumes,omitempty"`
 }
 
 func newProjectRestoreCmd() *cobra.Command {
@@ -323,32 +325,30 @@ new backup generation so the restored timeline never mixes with the old one.`,
 			}
 			res, err := project.Restore(cmd.Context(), e, args[0], project.RestoreOptions{Repo: repo})
 			if err != nil {
+				if res == nil {
+					return err
+				}
+				rep := projectRestoreReport{
+					projectReport: projectReport{Instance: res.Instance, Status: res.Deploy.Status, Missing: res.Deploy.Missing, Warnings: res.Warnings},
+					Volumes:       res.Volumes,
+				}
+				if asJSON {
+					return &output.DataError{Err: err, Data: rep}
+				}
+				writeProjectHuman(cmd.OutOrStdout(), rep.projectReport)
+				for _, v := range rep.Volumes {
+					fmt.Fprintf(cmd.OutOrStdout(), "restored volume: %s\n", v)
+				}
 				return err
 			}
 			rep := projectRestoreReport{
-				projectReport: projectReport{Instance: res.Instance, Status: res.Deploy.Status, Missing: res.Deploy.Missing},
+				projectReport: projectReport{Instance: res.Instance, Status: res.Deploy.Status, Missing: res.Deploy.Missing, Warnings: res.Warnings},
 				Volumes:       res.Volumes,
-				Warnings:      res.Warnings,
-			}
-			if res.Deploy.Status == state.StatusFailed {
-				failedErr := &output.Error{
-					Code:    "E_DEPLOY_FAILED",
-					Message: fmt.Sprintf("deploy failed: %s", res.Deploy.Detail),
-					Hint:    "data is restored; fix the cause and run cvctl project update " + res.Instance,
-				}
-				if asJSON {
-					return &output.DataError{Err: failedErr, Data: rep}
-				}
-				writeProjectHuman(cmd.OutOrStdout(), rep.projectReport)
-				return failedErr
 			}
 			printerFrom(cmd).Result(rep, func(w io.Writer) {
 				writeProjectHuman(w, rep.projectReport)
 				for _, v := range rep.Volumes {
 					fmt.Fprintf(w, "restored volume: %s\n", v)
-				}
-				for _, warn := range rep.Warnings {
-					fmt.Fprintf(w, "warning: %s\n", warn)
 				}
 			})
 			return nil
@@ -359,6 +359,11 @@ new backup generation so the restored timeline never mixes with the old one.`,
 }
 
 func writeProjectHuman(w io.Writer, rep projectReport) {
+	defer func() {
+		for _, warn := range rep.Warnings {
+			fmt.Fprintf(w, "warning: %s\n", warn)
+		}
+	}()
 	if len(rep.Missing) > 0 {
 		fmt.Fprintf(w, "%s: %s (missing: %s)\n", rep.Instance, rep.Status, strings.Join(rep.Missing, ", "))
 		return

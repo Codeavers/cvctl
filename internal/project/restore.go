@@ -3,9 +3,11 @@ package project
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/codeavers/cvctl/internal/backup"
@@ -24,6 +26,8 @@ const keyInfraURL = "CVCTL_INFRA_URL"
 type DataRestorer interface {
 	// RestoreFresh restores the latest backup of svc into a volume that must not exist yet.
 	RestoreFresh(ctx context.Context, inst, svc string, p *contract.Project, d *instance.Decisions, volume string) error
+	// RemoveVolume removes a volume created by RestoreFresh in this run.
+	RemoveVolume(ctx context.Context, volume string) error
 	// BaseBackup pushes a wal-g base backup of the running service.
 	BaseBackup(ctx context.Context, inst, svc string) error
 }
@@ -40,17 +44,36 @@ type RestoreResult struct {
 	Warnings []string      `json:"warnings,omitempty"`
 }
 
-func geni(s string) int {
-	n, err := strconv.Atoi(s)
-	if err != nil || n < 0 {
-		return 0
+// withCleanup tells the operator what a failed run undid, so a re-run starts
+// from a known state.
+func withCleanup(err error, cleaned []string) error {
+	var oe *output.Error
+	if len(cleaned) == 0 || !errors.As(err, &oe) {
+		return err
 	}
-	return n
+	c := *oe
+	c.Message += "; cleaned up: " + strings.Join(cleaned, ", ")
+	return &c
+}
+
+func deployFailedErr(err error, detail, inst string, vols []string) error {
+	hint := fmt.Sprintf("data restored into %s; fix the cause and run cvctl project update %s", strings.Join(vols, ", "), inst)
+	var oe *output.Error
+	if err != nil && errors.As(err, &oe) {
+		return &output.Error{Code: oe.Code, Message: oe.Message, Hint: hint}
+	}
+	msg := fmt.Sprintf("deploy failed: %s", detail)
+	if err != nil {
+		msg = fmt.Sprintf("deploy failed: %v", err)
+	}
+	return &output.Error{Code: "E_DEPLOY_FAILED", Message: msg, Hint: hint}
 }
 
 // Restore rebuilds an instance on a new host from its imported secrets and the
 // off-site backups. The instance lock is held throughout so the agent cannot
-// deploy a half-restored instance.
+// deploy a half-restored instance. A failure before the deploy removes what
+// this run created (clone, volumes, generation change) so a re-run starts
+// clean; after the deploy starts, data and generations stay in place.
 func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*RestoreResult, error) {
 	if err := ValidateInstanceName(e.deployRoot(), e.stateRoot(), inst); err != nil {
 		return nil, err
@@ -85,6 +108,10 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 	}
 	defer unlock()
 
+	origEnv, err := e.fs().ReadFile(cvctlEnvPath)
+	if err != nil {
+		return nil, err
+	}
 	rawEnv, err := readRawEnv(e.fs(), cvctlEnvPath)
 	if err != nil {
 		return nil, err
@@ -120,55 +147,63 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 		return nil, &output.Error{
 			Code:    "E_RESTORE_INFRA_EXISTS",
 			Message: fmt.Sprintf("%s already exists", infraDir),
-			Hint:    "restore runs on a host without the instance; use cvctl project update, or remove the directory if it is a leftover",
+			Hint:    fmt.Sprintf("if a previous project restore failed after deploy, use cvctl project update %s; otherwise remove %s and re-run", inst, infraDir),
 		}
-	}
-	repo := e.repo(infraDir, keyPath)
-	if err := repo.Clone(ctx, repoURL, branch); err != nil {
-		return nil, err
-	}
-
-	cat, err := e.catalog()
-	if err != nil {
-		return nil, err
-	}
-	p, _, err := loadContractAndSpec(e.fs(), infraDir, cat)
-	if err != nil {
-		return nil, err
-	}
-	d, err := instance.Read(cvctlEnvPath, p)
-	if err != nil {
-		return nil, err
 	}
 
 	res := &RestoreResult{Instance: inst}
+	var created []string
+	cloned, envWritten := false, false
+	fail := func(err error) (*RestoreResult, error) {
+		cctx := context.WithoutCancel(ctx)
+		var cleaned []string
+		if envWritten {
+			if werr := e.fs().WriteFile(cvctlEnvPath, origEnv, 0o640, deployOwner); werr == nil {
+				cleaned = append(cleaned, "backup generations in cvctl.env")
+			}
+		}
+		for _, v := range created {
+			if rerr := e.Data.RemoveVolume(cctx, v); rerr == nil {
+				cleaned = append(cleaned, "volume "+v)
+			}
+		}
+		if cloned && removeAll(e.fs(), infraDir) == nil {
+			cleaned = append(cleaned, infraDir)
+		}
+		return nil, withCleanup(err, cleaned)
+	}
+
+	repo := e.repo(infraDir, keyPath)
+	cloned = true
+	if err := repo.Clone(ctx, repoURL, branch); err != nil {
+		return fail(err)
+	}
+	cat, err := e.catalog()
+	if err != nil {
+		return fail(err)
+	}
+	p, _, err := loadContractAndSpec(e.fs(), infraDir, cat)
+	if err != nil {
+		return fail(err)
+	}
+	d, err := instance.Read(cvctlEnvPath, p)
+	if err != nil {
+		return fail(err)
+	}
+
 	targets := backup.Targets(p, d)
 	for _, t := range targets {
 		vol := render.VolumeName(d, t.Service)
 		if err := e.Data.RestoreFresh(ctx, inst, t.Service, p, d, vol); err != nil {
-			return nil, err
+			return fail(err)
 		}
-		res.Volumes = append(res.Volumes, vol)
+		created = append(created, vol)
 	}
+	res.Volumes = created
 
-	if err := e.Deployer.Store.Save(&state.State{
-		Instance:  inst,
-		Status:    state.StatusFailed,
-		Detail:    "restore pending",
-		UpdatedAt: time.Now(),
-	}); err != nil {
-		return nil, err
-	}
-	res.Deploy, err = runDeploy(ctx, e, repo, d, "cli:project-restore", true)
-	if err != nil {
-		return res, err
-	}
-	if res.Deploy.Status != state.StatusOK {
-		return res, nil
-	}
-
-	// The restored cluster starts a new timeline: it must archive into a new
-	// generation, never into the one it was restored from.
+	// The restored cluster starts a new timeline, so it must archive into a new
+	// generation from its first start; advancing before the deploy makes the
+	// rendered backup env point there, never at the generation restored from.
 	var walg []string
 	updates := map[string]string{}
 	for _, t := range targets {
@@ -184,32 +219,38 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 		updates[key+"_MAX"] = strconv.Itoa(next)
 		walg = append(walg, t.Service)
 	}
-	if len(walg) == 0 {
-		return res, nil
-	}
-	raw, err := readRawEnv(e.fs(), cvctlEnvPath)
-	if err != nil {
-		return res, err
-	}
-	for k, v := range updates {
-		raw[k] = v
-	}
-	if err := e.fs().WriteFile(cvctlEnvPath, instance.FormatEnv(raw), 0o640, deployOwner); err != nil {
-		return res, &output.Error{
-			Code:    "E_FILE_WRITE",
-			Message: fmt.Sprintf("cannot write %s: %v", cvctlEnvPath, err),
-			Hint:    "check permissions and free space of the instance directory",
+	if len(updates) > 0 {
+		merged := make(map[string]string, len(rawEnv)+len(updates))
+		for k, v := range rawEnv {
+			merged[k] = v
 		}
+		for k, v := range updates {
+			merged[k] = v
+		}
+		if err := e.fs().WriteFile(cvctlEnvPath, instance.FormatEnv(merged), 0o640, deployOwner); err != nil {
+			return fail(&output.Error{
+				Code:    "E_FILE_WRITE",
+				Message: fmt.Sprintf("cannot write %s: %v", cvctlEnvPath, err),
+				Hint:    "check permissions and free space of the instance directory",
+			})
+		}
+		envWritten = true
 	}
-	st, err := e.Deployer.Store.Load(inst)
+
+	if err := e.Deployer.Store.Save(&state.State{
+		Instance:  inst,
+		Status:    state.StatusFailed,
+		Detail:    "restore pending",
+		UpdatedAt: time.Now(),
+	}); err != nil {
+		return fail(err)
+	}
+	res.Deploy, err = runDeploy(ctx, e, repo, d, "cli:project-restore", true)
 	if err != nil {
-		return res, err
+		return res, deployFailedErr(err, "", inst, res.Volumes)
 	}
-	if st.Current == nil {
-		return res, nil
-	}
-	if err := e.Deployer.Reapply(ctx, inst, st.Current); err != nil {
-		return res, err
+	if res.Deploy.Status != state.StatusOK {
+		return res, deployFailedErr(nil, res.Deploy.Detail, inst, res.Volumes)
 	}
 	for _, svc := range walg {
 		if err := e.Data.BaseBackup(ctx, inst, svc); err != nil {
@@ -224,16 +265,37 @@ func fileExists(fsys sys.FS, p string) bool {
 	return err == nil
 }
 
+// storableInfraURL drops userinfo from http(s) URLs, which would otherwise put
+// a token into cvctl.env; ssh user names are not secrets and stay.
+func storableInfraURL(raw string) (string, bool) {
+	for _, pre := range []string{"https://", "http://"} {
+		rest, ok := strings.CutPrefix(raw, pre)
+		if !ok {
+			continue
+		}
+		authority := rest
+		if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+			authority = rest[:i]
+		}
+		if at := strings.LastIndex(authority, "@"); at >= 0 {
+			return pre + rest[at+1:], true
+		}
+	}
+	return raw, false
+}
+
+const strippedURLWarning = "credentials in the infra URL were not stored in cvctl.env; project restore on a new host needs a deploy key or --repo"
+
 // recordedInfraURL asks git for the origin of an existing checkout; empty when
-// unknown.
-func recordedInfraURL(ctx context.Context, e *Env, infraDir string) string {
+// unknown. The second result is true when credentials were stripped.
+func recordedInfraURL(ctx context.Context, e *Env, infraDir string) (string, bool) {
 	res, err := e.runner().Run(ctx, sys.Cmd{Name: "git", Args: []string{"-C", infraDir, "remote", "get-url", "origin"}})
 	if err != nil || res.ExitCode != 0 {
-		return ""
+		return "", false
 	}
 	url := string(bytes.TrimSpace(res.Stdout))
 	if validateRepoURL(url) != nil {
-		return ""
+		return "", false
 	}
-	return url
+	return storableInfraURL(url)
 }

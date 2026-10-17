@@ -136,6 +136,7 @@ type AddResult struct {
 	Deploy       deploy.Result
 	DeployKeyPub string
 	Decisions    *instance.Decisions
+	Warnings     []string
 }
 
 func sanitizeName(s string) string {
@@ -756,7 +757,12 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	appEnvPath := filepath.Join(instDir, "app.env")
 
 	addEntries := d.Entries()
-	addEntries[keyInfraURL] = repoURL
+	storedURL, stripped := storableInfraURL(repoURL)
+	addEntries[keyInfraURL] = storedURL
+	var warnings []string
+	if stripped {
+		warnings = append(warnings, strippedURLWarning)
+	}
 	if err := e.fs().WriteFile(cvctlEnvPath, instance.FormatEnv(addEntries), 0o640, deployOwner); err != nil {
 		cleanupInst()
 		return nil, err
@@ -790,6 +796,7 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		Deploy:       deployRes,
 		DeployKeyPub: pubKey,
 		Decisions:    d,
+		Warnings:     warnings,
 	}, nil
 }
 
@@ -926,9 +933,13 @@ func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
 	for k, v := range d.Entries() {
 		merged[k] = v
 	}
+	var warnings []string
 	if merged[keyInfraURL] == "" {
-		if url := recordedInfraURL(ctx, e, infraDir); url != "" {
+		if url, stripped := recordedInfraURL(ctx, e, infraDir); url != "" {
 			merged[keyInfraURL] = url
+			if stripped {
+				warnings = append(warnings, strippedURLWarning)
+			}
 		}
 	}
 	if err := e.fs().WriteFile(cvctlEnvPath, instance.FormatEnv(merged), 0o640, deployOwner); err != nil {
@@ -948,5 +959,6 @@ func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
 		Deploy:       deployRes,
 		DeployKeyPub: pubKey,
 		Decisions:    d,
+		Warnings:     warnings,
 	}, nil
 }

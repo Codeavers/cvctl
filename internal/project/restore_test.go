@@ -13,20 +13,35 @@ import (
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/output"
+	"github.com/codeavers/cvctl/internal/render"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/internal/sys/systest"
 )
 
 type fakeData struct {
-	log        *[]string
-	restoreErr error
-	pushErr    error
+	t            *testing.T
+	store        *state.Store
+	log          *[]string
+	restoreErr   error
+	pushErr      error
+	afterRestore func()
 }
 
 func (f *fakeData) RestoreFresh(_ context.Context, inst, svc string, _ *contract.Project, _ *instance.Decisions, volume string) error {
+	if _, err := f.store.Lock(inst); err == nil {
+		f.t.Error("instance lock must be held during RestoreFresh")
+	}
 	*f.log = append(*f.log, "restore "+svc+" "+volume)
+	if f.afterRestore != nil && f.restoreErr == nil {
+		f.afterRestore()
+	}
 	return f.restoreErr
+}
+
+func (f *fakeData) RemoveVolume(_ context.Context, volume string) error {
+	*f.log = append(*f.log, "rm "+volume)
+	return nil
 }
 
 func (f *fakeData) BaseBackup(_ context.Context, _, svc string) error {
@@ -87,6 +102,7 @@ func newRestoreRig(t *testing.T, envBody string) *restoreRig {
 	log := &[]string{}
 	cat := testCatalog(t)
 	deployer := &deploy.Deployer{
+		Backup:     &render.BackupTarget{Host: "h1", Endpoint: "http://s3", Bucket: "bk", Region: "r", AccessKey: "ak-ACCESS-0000", SecretKey: "sk-SECRET-0000", LibsodiumKey: "lib-KEY-00000"},
 		DeployRoot: tmp,
 		TraefikDir: filepath.Join(tmp, "traefik"),
 		StateRoot:  stateRoot,
@@ -100,7 +116,7 @@ func newRestoreRig(t *testing.T, envBody string) *restoreRig {
 		},
 	}
 	stub := &stubRepo{dir: filepath.Join(instDir, "infra"), infraSource: originDir, fetchCommit: "feedface00000000", log: log}
-	data := &fakeData{log: log}
+	data := &fakeData{t: t, store: store, log: log}
 	e := &Env{
 		FS:          osfs,
 		DeployRoot:  tmp,
@@ -137,7 +153,7 @@ func TestRestoreOrderOfOperations(t *testing.T) {
 		}
 		t.Fatal(err)
 	}
-	want := "clone,restore db demo-dev_db-data,fetch develop,checkout feedface00000000,health,checkout feedface00000000,health,push db"
+	want := "clone,restore db demo-dev_db-data,fetch develop,checkout feedface00000000,health,push db"
 	if got := strings.Join(*rig.log, ","); got != want {
 		t.Fatalf("order\n got %s\nwant %s", got, want)
 	}
@@ -269,5 +285,164 @@ func TestUpdateRecordsMissingInfraURL(t *testing.T) {
 	raw, _ := os.ReadFile(filepath.Join(rig.instDir, "cvctl.env"))
 	if !strings.Contains(string(raw), "CVCTL_INFRA_URL=git@github.com:org/demo-infra.git") {
 		t.Fatalf("cvctl.env:\n%s", raw)
+	}
+}
+
+func TestRestoreDeploysAtTheNewGeneration(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	var atDeploy string
+	rig.env.Deployer.Health = func(context.Context, string, string) error {
+		b, _ := os.ReadFile(filepath.Join(rig.instDir, "backup-db.env"))
+		atDeploy = string(b)
+		return nil
+	}
+	if _, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(atDeploy, "/demo-dev/db/g4") || strings.Contains(atDeploy, "/g2") {
+		t.Fatalf("deploy must render the new generation:\n%s", atDeploy)
+	}
+}
+
+func TestRestoreFailedDeployKeepsDataAndGenerations(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	rig.env.Deployer.Health = func(context.Context, string, string) error { return errors.New("unhealthy") }
+	res, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	var oe *output.Error
+	if !errors.As(err, &oe) || res == nil || len(res.Volumes) != 1 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	for _, w := range []string{"demo-dev_db-data", "cvctl project update demo-dev"} {
+		if !strings.Contains(oe.Hint, w) {
+			t.Fatalf("hint %q lacks %q", oe.Hint, w)
+		}
+	}
+	raw, _ := os.ReadFile(filepath.Join(rig.instDir, "cvctl.env"))
+	if !strings.Contains(string(raw), "CVCTL_SVC_DB_BACKUP_GEN=4") {
+		t.Fatalf("generation must stay advanced:\n%s", raw)
+	}
+	if _, err := os.Stat(filepath.Join(rig.instDir, "infra")); err != nil {
+		t.Fatalf("infra must be kept: %v", err)
+	}
+	for _, l := range *rig.log {
+		if strings.HasPrefix(l, "rm ") || l == "push db" {
+			t.Fatalf("nothing is cleaned or pushed after a failed deploy: %v", *rig.log)
+		}
+	}
+}
+
+func TestRestoreFailureBeforeDeployCleansWhatItCreated(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	envPath := filepath.Join(rig.instDir, "cvctl.env")
+	orig, _ := os.ReadFile(envPath)
+	rig.data.afterRestore = func() {
+		// a directory in place of the file makes the generation write fail
+		_ = os.Remove(envPath)
+		_ = os.Mkdir(envPath, 0o755)
+	}
+	_, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_FILE_WRITE" || !strings.Contains(oe.Message, "cleaned up") || !strings.Contains(oe.Message, "volume demo-dev_db-data") {
+		t.Fatalf("err=%v", err)
+	}
+	if got := strings.Join(*rig.log, ","); got != "clone,restore db demo-dev_db-data,rm demo-dev_db-data" {
+		t.Fatalf("log: %s", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(rig.instDir, "infra")); statErr == nil {
+		t.Fatal("the cloned infra must be removed")
+	}
+	_ = orig
+}
+
+func TestRestoreRestoreFreshFailureRemovesClone(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	rig.data.restoreErr = &output.Error{Code: "E_RESTORE_FAILED", Message: "boom", Hint: "h"}
+	_, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	var oe *output.Error
+	if !errors.As(err, &oe) || !strings.Contains(oe.Message, "cleaned up") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(rig.instDir, "infra")); statErr == nil {
+		t.Fatal("the cloned infra must be removed")
+	}
+	if got := strings.Join(*rig.log, ","); strings.Contains(got, "rm ") {
+		t.Fatalf("a volume that was never created must not be removed: %s", got)
+	}
+}
+
+func TestRestoreExistingInfraHint(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	if err := os.MkdirAll(filepath.Join(rig.instDir, "infra"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_RESTORE_INFRA_EXISTS" || !strings.Contains(oe.Hint, "cvctl project update demo-dev") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(rig.instDir, "infra")); statErr != nil {
+		t.Fatal("a pre-existing infra dir must never be removed")
+	}
+}
+
+func TestStorableInfraURL(t *testing.T) {
+	for _, tc := range []struct {
+		in, want string
+		stripped bool
+	}{
+		{"https://x-token:ghp_SECRET@github.com/org/repo.git", "https://github.com/org/repo.git", true},
+		{"https://ghp_SECRET@github.com/org/repo.git", "https://github.com/org/repo.git", true},
+		{"https://github.com/org/repo.git", "https://github.com/org/repo.git", false},
+		{"https://github.com/org/a@b.git", "https://github.com/org/a@b.git", false},
+		{"ssh://git@github.com/org/repo.git", "ssh://git@github.com/org/repo.git", false},
+		{"git@github.com:org/repo.git", "git@github.com:org/repo.git", false},
+	} {
+		got, stripped := storableInfraURL(tc.in)
+		if got != tc.want || stripped != tc.stripped {
+			t.Errorf("%s: got %q %v", tc.in, got, stripped)
+		}
+	}
+}
+
+func TestUpdateStripsCredentialsFromRecordedURL(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+	run := &systest.Runner{}
+	run.OnPrefix("git -C "+rig.infraDir+" remote get-url origin", sys.Result{Stdout: []byte("https://x:ghp_SECRET@github.com/org/demo-infra.git\n")})
+	rig.env.Run = run
+	res, err := Update(context.Background(), rig.env, "demo-dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(rig.instDir, "cvctl.env"))
+	if strings.Contains(string(raw), "ghp_SECRET") || !strings.Contains(string(raw), "CVCTL_INFRA_URL=https://github.com/org/demo-infra.git") {
+		t.Fatalf("cvctl.env:\n%s", raw)
+	}
+	if len(res.Warnings) != 1 || strings.Contains(res.Warnings[0], "ghp_SECRET") {
+		t.Fatalf("warnings: %v", res.Warnings)
+	}
+}
+
+func TestAddStripsCredentialsFromStoredURL(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra")
+	writeTestInfra(t, infraDir, validCompose, validSpec)
+	stub := &stubRepo{infraSource: infraDir}
+	e := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "state"),
+		Catalog:     testCatalog(t),
+		RepoFactory: func(dir, _ string) RepoLike { r := *stub; r.dir = dir; return &r },
+	}
+	res, err := Add(context.Background(), e, "https://x:ghp_SECRET@github.com/org/repo-infra.git", AddOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(tmp, "repo-dev", "cvctl.env"))
+	if strings.Contains(string(raw), "ghp_SECRET") || !strings.Contains(string(raw), "CVCTL_INFRA_URL=https://github.com/org/repo-infra.git") {
+		t.Fatalf("cvctl.env:\n%s", raw)
+	}
+	if len(res.Warnings) != 1 || strings.Contains(res.Warnings[0], "ghp_SECRET") {
+		t.Fatalf("warnings: %v", res.Warnings)
 	}
 }

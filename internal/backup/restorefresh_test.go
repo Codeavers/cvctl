@@ -60,3 +60,72 @@ func TestRestoreFreshRefusesExistingVolume(t *testing.T) {
 		t.Fatalf("nothing may run: %v", g.calls())
 	}
 }
+
+func TestRestoreFreshResticOnly(t *testing.T) {
+	g := newRestoreRig(t)
+	p, d, _ := g.r.Load("app-prod")
+	vol := "app-prod_files-data"
+	g.run.On("docker volume inspect "+vol, sys.Result{ExitCode: 1})
+	if err := g.r.RestoreFresh(context.Background(), "app-prod", "files", p, d, vol); err != nil {
+		t.Fatal(err)
+	}
+	calls := g.calls()
+	want := "docker run --rm --network cvctl-backup -v " + vol + ":/restore --env-file /srv/deploy/app-prod/restic-files.env restic/restic:0.19.1 restore latest:/data --target /restore"
+	if g.index(want) < 0 || g.index("docker volume create "+vol) > g.index(want) {
+		t.Fatalf("calls: %v", calls)
+	}
+	if g.index("docker run -d") >= 0 {
+		t.Fatalf("restic must not start a postgres container: %v", calls)
+	}
+	for _, c := range calls {
+		if strings.Contains(c, resticPass) || strings.Contains(c, secretKey) {
+			t.Fatalf("secret in argv: %s", c)
+		}
+	}
+}
+
+func TestRestoreFreshRemovesOnlyItsOwnVolumeOnFailure(t *testing.T) {
+	g := newRestoreRig(t)
+	p, d, _ := g.r.Load("app-prod")
+	g.run.On("docker volume inspect "+freshVol, sys.Result{ExitCode: 1})
+	g.run.On("docker inspect -f {{.State.Running}} "+recName, sys.Result{Stdout: []byte("false\n")})
+	g.run.OnPrefix("docker logs", sys.Result{Stderr: []byte("wal-g: no such backup")})
+	if err := g.r.RestoreFresh(context.Background(), "app-prod", "db", p, d, freshVol); err == nil {
+		t.Fatal("expected failure")
+	}
+	if g.index("docker volume rm -f "+freshVol) < 0 || g.index("docker rm -f "+recName) > g.index("docker volume rm -f "+freshVol) {
+		t.Fatalf("the created volume is removed after its container: %v", g.calls())
+	}
+
+	g = newRestoreRig(t)
+	p, d, _ = g.r.Load("app-prod")
+	vol := "app-prod_files-data"
+	g.run.On("docker volume inspect "+vol, sys.Result{ExitCode: 1})
+	g.run.OnErrorPrefix("docker run --rm --network cvctl-backup -v "+vol, errors.New("restic failed"))
+	if err := g.r.RestoreFresh(context.Background(), "app-prod", "files", p, d, vol); err == nil {
+		t.Fatal("expected failure")
+	}
+	if g.index("docker volume rm -f "+vol) < 0 {
+		t.Fatalf("restic volume must be removed: %v", g.calls())
+	}
+}
+
+func TestRestoreFreshExistingVolumeIsNeverRemoved(t *testing.T) {
+	g := newRestoreRig(t)
+	p, d, _ := g.r.Load("app-prod")
+	g.run.On("docker volume inspect "+freshVol, sys.Result{ExitCode: 0})
+	_ = g.r.RestoreFresh(context.Background(), "app-prod", "db", p, d, freshVol)
+	if g.has("docker volume rm") != 0 {
+		t.Fatalf("calls: %v", g.calls())
+	}
+}
+
+func TestRemoveVolume(t *testing.T) {
+	g := newRestoreRig(t)
+	if err := g.r.RemoveVolume(context.Background(), freshVol); err != nil {
+		t.Fatal(err)
+	}
+	if g.index("docker volume rm "+freshVol) != 0 {
+		t.Fatalf("calls: %v", g.calls())
+	}
+}

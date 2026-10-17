@@ -15,7 +15,7 @@ import (
 // for rebuilding a lost host: no container of the instance runs yet, so
 // nothing is stopped, switched or rolled back. The caller holds the instance
 // lock.
-func (r *Runner) RestoreFresh(ctx context.Context, inst, svc string, p *contract.Project, d *instance.Decisions, volume string) error {
+func (r *Runner) RestoreFresh(ctx context.Context, inst, svc string, p *contract.Project, d *instance.Decisions, volume string) (retErr error) {
 	if r.Host == nil {
 		return notConfigured()
 	}
@@ -41,12 +41,22 @@ func (r *Runner) RestoreFresh(ctx context.Context, inst, svc string, p *contract
 		return &output.Error{
 			Code:    "E_RESTORE_VOLUME_EXISTS",
 			Message: fmt.Sprintf("volume %s already exists", volume),
-			Hint:    "restore only runs on a host without the data; remove the volume by hand if it is a leftover",
+			Hint:    fmt.Sprintf("if a previous project restore failed after deploy, use cvctl project update %s; otherwise remove volume %s and re-run", inst, volume),
 		}
 	}
 	if _, err := r.exec(ctx, r.docker("volume", "create", volume)); err != nil {
 		return err
 	}
+	// Only a volume created by this call is removed: the existence check above
+	// guarantees nothing else can be hit. The recovery container defers its own
+	// removal, so it is gone by the time this runs.
+	defer func() {
+		if retErr != nil {
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+			defer cancel()
+			_, _ = r.Run.Run(cctx, r.docker("volume", "rm", "-f", volume))
+		}
+	}()
 	tgt := restoreTarget{raw: "latest", kind: "latest"}
 	if target.Strategy == StrategyWalG {
 		// backup-<svc>.env is only written by a deploy, which has not run yet
@@ -67,5 +77,12 @@ func (r *Runner) RestoreFresh(ctx context.Context, inst, svc string, p *contract
 // into is restorable on its own.
 func (r *Runner) BaseBackup(ctx context.Context, inst, svc string) error {
 	_, err := r.exec(ctx, r.Compose(inst).Cmd("exec", "-T", "-u", "postgres", svc, "wal-g", "backup-push", pgData))
+	return err
+}
+
+// RemoveVolume removes a volume that a RestoreFresh of this run created, when
+// a later step makes the whole restore start over.
+func (r *Runner) RemoveVolume(ctx context.Context, volume string) error {
+	_, err := r.exec(ctx, r.docker("volume", "rm", volume))
 	return err
 }
