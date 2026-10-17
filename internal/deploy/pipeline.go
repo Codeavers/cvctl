@@ -444,7 +444,9 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			Detail: "desired state previously failed",
 		}, nil
 	}
-	if st.Current != nil && want.Hash() == st.Current.Hash() && !opts.Force {
+	// A pending rollback failure means files, checkout and containers may not match
+	// Current, so equality of hashes proves nothing: run the full pipeline.
+	if st.Current != nil && want.Hash() == st.Current.Hash() && !opts.Force && !st.RollbackFailed {
 		if st.Status == state.StatusBlocked || st.Status == state.StatusFailed {
 			// The running state already matches; a stale BLOCKED/FAILED status
 			// (e.g. after the cause was fixed by hand) must not stick forever.

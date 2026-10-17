@@ -2539,3 +2539,142 @@ func TestMalformedCvctlEnvHidesSecrets(t *testing.T) {
 		t.Fatalf("detail: %q", res.Detail)
 	}
 }
+
+func saveCurrentState(t *testing.T, rig *testRig, status state.Status, rollbackFailed bool) state.Desired {
+	t.Helper()
+	want := defaultDesired()
+	cur := want
+	st := &state.State{
+		Instance:       "demo-dev",
+		Status:         status,
+		Current:        &cur,
+		FailedHash:     "deadbeef",
+		RollbackFailed: rollbackFailed,
+	}
+	if err := rig.store.Save(st); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+	return want
+}
+
+func TestRollbackFailedAutoRollbackRunsFullPipeline(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	want := saveCurrentState(t, rig, state.StatusFailed, true)
+	healthCalls := 0
+	rig.deployer.Health = func(context.Context, string, string) error {
+		healthCalls++
+		return nil
+	}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusOK {
+		t.Fatalf("expected OK, got %v", res.Status)
+	}
+	if rig.compose.upCount == 0 || healthCalls == 0 {
+		t.Fatalf("expected Up and Health to run, up=%d health=%d", rig.compose.upCount, healthCalls)
+	}
+	after, err := rig.store.Load("demo-dev")
+	if err != nil {
+		t.Fatalf("store.Load: %v", err)
+	}
+	if after.Status != state.StatusOK || after.RollbackFailed {
+		t.Fatalf("expected OK and RollbackFailed cleared, got %v / %v", after.Status, after.RollbackFailed)
+	}
+}
+
+func TestFailedManualRollbackNextCycleRunsFullPipeline(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	want := saveCurrentState(t, rig, state.StatusOK, false)
+	target := state.Desired{
+		InfraCommit: "0000000000000000000000000000000000000000",
+		Digests:     map[string]string{"api": "sha256:0000000000000000000000000000000000000000000000000000000000000000"},
+	}
+	rig.deployer.Health = func(context.Context, string, string) error {
+		return fmt.Errorf("rollback health failure")
+	}
+	if _, err := rig.deployer.Rollback(context.Background(), "demo-dev", &target, "human"); err != nil {
+		t.Logf("Rollback returned: %v", err)
+	}
+	mid, err := rig.store.Load("demo-dev")
+	if err != nil {
+		t.Fatalf("store.Load: %v", err)
+	}
+	if !mid.RollbackFailed {
+		t.Fatalf("precondition: expected RollbackFailed after failing manual rollback")
+	}
+	if mid.Current == nil || mid.Current.Hash() != want.Hash() {
+		t.Fatalf("precondition: Current should be unchanged")
+	}
+
+	rig.deployer.Health = func(context.Context, string, string) error { return nil }
+	upBefore := rig.compose.upCount
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusOK {
+		t.Fatalf("expected OK, got %v", res.Status)
+	}
+	if rig.compose.upCount == upBefore {
+		t.Fatalf("expected full pipeline (Up) on next cycle")
+	}
+	after, _ := rig.store.Load("demo-dev")
+	if after.RollbackFailed {
+		t.Fatalf("expected RollbackFailed cleared")
+	}
+}
+
+func TestPlainRecoveryWithoutRollbackFailedStaysCheap(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	want := saveCurrentState(t, rig, state.StatusFailed, false)
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusOK {
+		t.Fatalf("expected OK, got %v", res.Status)
+	}
+	if rig.compose.upCount != 0 {
+		t.Fatalf("expected no Up call, got %d", rig.compose.upCount)
+	}
+	events, err := rig.store.History("demo-dev", 50)
+	if err != nil {
+		t.Fatalf("store events: %v", err)
+	}
+	found := false
+	for _, e := range events {
+		if e.Kind == "recovered" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected recovered event")
+	}
+}
+
+func TestRollbackFailedHealthFailsAgainStaysFailed(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	want := saveCurrentState(t, rig, state.StatusFailed, true)
+	rig.deployer.Health = func(context.Context, string, string) error {
+		return fmt.Errorf("still unhealthy")
+	}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+	if res.Status != state.StatusFailed {
+		t.Fatalf("expected FAILED, got %v", res.Status)
+	}
+	after, _ := rig.store.Load("demo-dev")
+	if after.Status != state.StatusFailed {
+		t.Fatalf("expected persisted FAILED, got %v", after.Status)
+	}
+	if len(rig.notifier.messages) == 0 {
+		t.Fatalf("expected a notification")
+	}
+}
