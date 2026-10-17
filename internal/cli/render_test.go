@@ -26,6 +26,8 @@ CVCTL_SVC_MEDIA_MODE=local
 CVCTL_SVC_MEDIA_USER=media
 CVCTL_SVC_MEDIA_PASSWORD=mediapass
 CVCTL_SVC_MEDIA_DB=uploads
+CVCTL_SVC_MEDIA_APP_USER=media-app
+CVCTL_SVC_MEDIA_APP_PASSWORD=mediaapppass
 `
 
 func copyDemo(t *testing.T, decisions string) string {

@@ -374,3 +374,292 @@ func TestBackupGenerationKeysRoundTrip(t *testing.T) {
 		t.Fatalf("zero generation must stay absent: %v", m)
 	}
 }
+
+func loadWithBuckets(t *testing.T) (*contract.Project, kinds.Catalog) {
+	t.Helper()
+	p, cat := load(t)
+	p.X.S3 = map[string][]contract.Bucket{
+		"media": {
+			{Name: "photos-raw", Public: true},
+			{Name: "cache", Public: false},
+		},
+	}
+	for i := range p.Data {
+		if p.Data[i].Name == "media" {
+			p.Data[i].ExposePort = 9000
+		}
+	}
+	return p, cat
+}
+
+func TestAppCredentialsAndBucketExternalRoundTrip(t *testing.T) {
+	p, _ := loadWithBuckets(t)
+	path := filepath.Join(t.TempDir(), "cvctl.env")
+	d := full()
+	d.Services["media"] = ServiceDecision{
+		Mode: "external",
+		Creds: kinds.Credentials{
+			User: "root-u", Password: "root-p", DB: "root-db",
+			AppUser: "media-app", AppPassword: "app-secret-pw",
+		},
+		External: map[string]string{
+			"endpoint":              "https://s3.example.com",
+			"access_key":            "ak-val",
+			"secret_key":            "sk-val",
+			"region":                "us-east-1",
+			"bucket_photos-raw":     "my-bucket-raw",
+			"public_url_photos-raw": "https://cdn.example.com/raw",
+			"bucket_cache":          "my-bucket-cache",
+		},
+	}
+	d.Domains["media"] = "s3.example.com"
+	if err := Write(path, d); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(raw)
+	for _, want := range []string{
+		"CVCTL_SVC_MEDIA_APP_USER=media-app",
+		"CVCTL_SVC_MEDIA_APP_PASSWORD=app-secret-pw",
+		"CVCTL_SVC_MEDIA_EXT_BUCKET_PHOTOS_RAW=my-bucket-raw",
+		"CVCTL_SVC_MEDIA_EXT_PUBLIC_URL_PHOTOS_RAW=https://cdn.example.com/raw",
+		"CVCTL_SVC_MEDIA_EXT_BUCKET_CACHE=my-bucket-cache",
+		"CVCTL_DOMAIN_MEDIA=s3.example.com",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("file missing %q:\n%s", want, content)
+		}
+	}
+
+	got, err := Read(path, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, d) {
+		t.Fatalf("mismatch\n got %#v\nwant %#v", got, d)
+	}
+}
+
+func TestCheckLocalAppCredentials(t *testing.T) {
+	p, cat := load(t)
+	d := full()
+	d.Services["media"] = ServiceDecision{
+		Mode: "local",
+		Creds: kinds.Credentials{
+			User: "media_root", Password: "root-password", DB: "media_db",
+		},
+	}
+	// Missing app creds
+	is := Check(d, p, cat)
+	missing := issueMsgs(is, "E_DECISION_MISSING")
+	var mediaMissing []output.Issue
+	for _, i := range missing {
+		if i.Service == "media" {
+			mediaMissing = append(mediaMissing, i)
+		}
+	}
+	if len(mediaMissing) != 1 || !strings.Contains(mediaMissing[0].Hint, "cvctl project update") {
+		t.Fatalf("expected 1 missing app creds issue with hint, got: %v", mediaMissing)
+	}
+
+	// Invalid AppUser
+	s := d.Services["media"]
+	s.Creds.AppUser = "media.app"
+	s.Creds.AppPassword = "pw"
+	d.Services["media"] = s
+	invalid := issueMsgs(Check(d, p, cat), "E_DECISION_INVALID")
+	var mediaInvalid []output.Issue
+	for _, i := range invalid {
+		if i.Service == "media" {
+			mediaInvalid = append(mediaInvalid, i)
+		}
+	}
+	if len(mediaInvalid) != 1 || !strings.Contains(mediaInvalid[0].Message, "app_user") {
+		t.Fatalf("expected invalid app_user issue, got: %v", mediaInvalid)
+	}
+
+	// Valid AppUser with hyphen
+	s.Creds.AppUser = "media-app"
+	d.Services["media"] = s
+	if is := Check(d, p, cat); len(is) != 0 {
+		t.Fatalf("unexpected issues: %v", is)
+	}
+}
+
+func TestCheckExposedBucketServiceDomain(t *testing.T) {
+	p, cat := loadWithBuckets(t)
+	d := full()
+	d.Services["media"] = ServiceDecision{
+		Mode: "local",
+		Creds: kinds.Credentials{
+			User: "media_root", Password: "root-password", DB: "media_db",
+			AppUser: "media-app", AppPassword: "app-password",
+		},
+	}
+	// Missing domain
+	delete(d.Domains, "media")
+	is := Check(d, p, cat)
+	missing := issueMsgs(is, "E_DECISION_MISSING")
+	var mediaDomain []output.Issue
+	for _, i := range missing {
+		if i.Service == "media" {
+			mediaDomain = append(mediaDomain, i)
+		}
+	}
+	if len(mediaDomain) != 1 || !strings.Contains(mediaDomain[0].Hint, "CVCTL_DOMAIN_MEDIA") {
+		t.Fatalf("expected missing domain issue, got: %v", mediaDomain)
+	}
+
+	// Invalid hostname
+	d.Domains["media"] = "media..example.com"
+	is = Check(d, p, cat)
+	inv := issueMsgs(is, "E_DECISION_INVALID")
+	var mediaInv []output.Issue
+	for _, i := range inv {
+		if i.Service == "media" {
+			mediaInv = append(mediaInv, i)
+		}
+	}
+	if len(mediaInv) != 1 || !strings.Contains(mediaInv[0].Message, "domain") {
+		t.Fatalf("expected invalid domain issue, got: %v", mediaInv)
+	}
+
+	// Valid domain
+	d.Domains["media"] = "s3.example.com"
+	if is := Check(d, p, cat); len(is) != 0 {
+		t.Fatalf("unexpected issues: %v", is)
+	}
+
+	// External mode does not require domain for media
+	d.Services["media"] = ServiceDecision{
+		Mode: "external",
+		External: map[string]string{
+			"endpoint":              "https://s3.example.com",
+			"access_key":            "ak",
+			"secret_key":            "sk",
+			"region":                "us-east-1",
+			"bucket_photos-raw":     "b1",
+			"public_url_photos-raw": "https://cdn.example.com",
+			"bucket_cache":          "b2",
+		},
+	}
+	delete(d.Domains, "media")
+	if is := Check(d, p, cat); len(is) != 0 {
+		t.Fatalf("unexpected issues in external mode without domain: %v", is)
+	}
+}
+
+func TestCheckExternalDeclaredBuckets(t *testing.T) {
+	p, cat := loadWithBuckets(t)
+	d := full()
+	d.Services["media"] = ServiceDecision{
+		Mode:     "external",
+		External: map[string]string{},
+	}
+	is := Check(d, p, cat)
+	missing := issueMsgs(is, "E_DECISION_MISSING")
+	var mediaMissing []string
+	for _, i := range missing {
+		if i.Service == "media" {
+			mediaMissing = append(mediaMissing, i.Hint)
+		}
+	}
+	joined := strings.Join(mediaMissing, " ")
+	for _, want := range []string{
+		"EXT_ENDPOINT", "EXT_ACCESS_KEY", "EXT_SECRET_KEY", "EXT_REGION",
+		"EXT_BUCKET_PHOTOS_RAW", "EXT_PUBLIC_URL_PHOTOS_RAW", "EXT_BUCKET_CACHE",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing required field %s in hints: %v", want, mediaMissing)
+		}
+	}
+	if strings.Contains(joined, "EXT_BUCKET ") || strings.HasSuffix(joined, "EXT_BUCKET") {
+		t.Errorf("plain bucket should not be required when buckets are declared: %v", mediaMissing)
+	}
+	if strings.Contains(joined, "EXT_PUBLIC_URL_CACHE") {
+		t.Errorf("private bucket should not require public_url: %v", mediaMissing)
+	}
+
+	// URL validation on public_url_*
+	d.Services["media"] = ServiceDecision{
+		Mode: "external",
+		External: map[string]string{
+			"endpoint":              "https://s3.example.com",
+			"access_key":            "ak",
+			"secret_key":            "sk",
+			"region":                "us-east-1",
+			"bucket_photos-raw":     "b1",
+			"public_url_photos-raw": "https://cdn.example.com",
+			"bucket_cache":          "b2",
+		},
+	}
+	if is := Check(d, p, cat); len(is) != 0 {
+		t.Fatalf("valid external buckets failed check: %v", is)
+	}
+
+	for _, badURL := range []string{
+		"https://cdn.example.com/",
+		"cdn.example.com",
+		"ftp://cdn.example.com",
+		"https:///",
+		"/relative/path",
+		"http://",
+	} {
+		d.Services["media"].External["public_url_photos-raw"] = badURL
+		is := Check(d, p, cat)
+		inv := issueMsgs(is, "E_DECISION_INVALID")
+		var urlInv []output.Issue
+		for _, i := range inv {
+			if i.Service == "media" && strings.Contains(i.Message, "public_url_photos-raw") {
+				urlInv = append(urlInv, i)
+			}
+		}
+		if len(urlInv) != 1 {
+			t.Errorf("bad url %q: expected 1 invalid issue, got %v", badURL, is)
+		}
+	}
+}
+
+func TestCheckProdPublicLocalRule(t *testing.T) {
+	p, cat := loadWithBuckets(t)
+	d := full()
+	d.Env = "prod"
+	d.Instance = "proj-prod"
+	d.Domains["media"] = "s3.example.com"
+	d.Services["media"] = ServiceDecision{
+		Mode: "local",
+		Creds: kinds.Credentials{
+			User: "media_root", Password: "root-password", DB: "media_db",
+			AppUser: "media-app", AppPassword: "app-password",
+		},
+	}
+
+	// Prod with public bucket in local mode: fails with E_S3_PUBLIC_LOCAL_PROD
+	is := Check(d, p, cat)
+	prodIssues := issueMsgs(is, "E_S3_PUBLIC_LOCAL_PROD")
+	if len(prodIssues) != 1 || prodIssues[0].Service != "media" {
+		t.Fatalf("expected 1 E_S3_PUBLIC_LOCAL_PROD issue, got: %v", is)
+	}
+	if !strings.Contains(prodIssues[0].Hint, "switch media to external: cvctl project update proj-prod") {
+		t.Errorf("unexpected hint: %q", prodIssues[0].Hint)
+	}
+
+	// Dev with public bucket in local mode: clean
+	d.Env = "dev"
+	d.Instance = "proj-dev"
+	if is := Check(d, p, cat); len(is) != 0 {
+		t.Fatalf("dev with public bucket in local mode should pass: %v", is)
+	}
+
+	// Prod with only private buckets in local mode: clean
+	d.Env = "prod"
+	d.Instance = "proj-prod"
+	p.X.S3["media"] = []contract.Bucket{{Name: "cache", Public: false}}
+	if is := Check(d, p, cat); len(is) != 0 {
+		t.Fatalf("prod with only private buckets should pass: %v", is)
+	}
+}
