@@ -308,7 +308,7 @@ so cvctl.env and the deploy key are back, and make sure the host uses S3 storage
 The infra repository is cloned, every data service is restored from its latest
 backup into a new volume, the instance is deployed, and wal-g services start a
 new backup generation so the restored timeline never mixes with the old one.`,
-		Example: `  cvctl secrets import bundle.tar.gz
+		Example: `  cvctl secrets import bundle.age
   cvctl project restore myapp-prod
   cvctl project restore myapp-prod --repo git@github.com:myorg/my-infra.git`,
 		Args: cobra.ExactArgs(1),

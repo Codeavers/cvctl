@@ -24,7 +24,7 @@ const probe = "docker ps -a --filter label=com.docker.compose.project=app-prod -
 
 const (
 	newVol  = "app-prod_db-data-r1767323045"
-	recName = "cvctl-restore-app-prod-db-1767323045"
+	recName = "cvctl-restore-app-prod-db-1767323045-0a0b0c0d"
 	envPath = "/srv/deploy/app-prod/cvctl.env"
 )
 

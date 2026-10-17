@@ -74,5 +74,7 @@ generation: the restored cluster is on a new timeline, so it archives under
 
 A restore target (timestamp or `deploy-<id>`) older than the current generation's first base
 backup fails with `E_RESTORE_NO_BACKUP`. Older generations stay in storage under `g<k>`, `k < N`;
-restore them manually with `wal-g` using that prefix. `cvctl project restore` on a new host does
-the same: it reads the latest backup of the current generation, then advances to a new one.
+restore them manually with `wal-g` using that prefix; they are never pruned. The bucket is the
+source of truth: every new generation is numbered above the highest one in the bucket, and
+`cvctl project restore` on a new host restores the newest generation holding a base backup even
+when the secrets bundle names an older one (it warns). Re-run `cvctl secrets export` after a restore.

@@ -32,8 +32,8 @@ func verifyRig(t *testing.T, verifySQL string) *rig {
 	g.r.Sleep = func(_ time.Duration) {}
 	g.okAll()
 	g.run.OnPrefix("docker inspect", sys.Result{Stdout: []byte("true\n")})
-	g.run.OnPrefix("docker exec cvctl-verify-app-prod-db-1767323045 psql -U app -d appdb -tA -c select pg_is_in_recovery()", sys.Result{Stdout: []byte("f\n")})
-	g.run.OnPrefix("docker exec cvctl-verify-app-prod-db-1767323045 psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select count", sys.Result{Stdout: []byte("3\n")})
+	g.run.OnPrefix("docker exec cvctl-verify-app-prod-db-1767323045-0a0b0c0d psql -U app -d appdb -tA -c select pg_is_in_recovery()", sys.Result{Stdout: []byte("f\n")})
+	g.run.OnPrefix("docker exec cvctl-verify-app-prod-db-1767323045-0a0b0c0d psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select count", sys.Result{Stdout: []byte("3\n")})
 	return g
 }
 
@@ -53,7 +53,7 @@ func TestVerifyWalgSequenceAndCleanup(t *testing.T) {
 	if err != nil || len(res) != 1 || !res[0].OK {
 		t.Fatalf("res=%+v err=%v", res, err)
 	}
-	name := "cvctl-verify-app-prod-db-1767323045"
+	name := "cvctl-verify-app-prod-db-1767323045-0a0b0c0d"
 	calls := g.calls()
 	if calls[0] != "docker volume create "+name {
 		t.Fatalf("calls: %v", calls)
@@ -85,7 +85,7 @@ func TestVerifyWalgSequenceAndCleanup(t *testing.T) {
 
 func TestVerifyZeroTablesFailsEmptyAndCleans(t *testing.T) {
 	g := verifyRig(t, "")
-	g.run.OnPrefix("docker exec cvctl-verify-app-prod-db-1767323045 psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select count", sys.Result{Stdout: []byte("0\n")})
+	g.run.OnPrefix("docker exec cvctl-verify-app-prod-db-1767323045-0a0b0c0d psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select count", sys.Result{Stdout: []byte("0\n")})
 	res, err := g.r.Verify(context.Background(), "app-prod", "db")
 	if err == nil || res[0].OK || !strings.Contains(res[0].Error, "no tables") {
 		t.Fatalf("res=%+v err=%v", res, err)
@@ -108,10 +108,11 @@ func TestVerifyZeroTablesFailsEmptyAndCleans(t *testing.T) {
 
 func TestVerifyRunsContractSQL(t *testing.T) {
 	g := verifyRig(t, "select 1 from users")
+	g.run.On(verifyExec+"select 1 from users", sys.Result{Stdout: []byte("1\n")})
 	if _, err := g.r.Verify(context.Background(), "app-prod", "db"); err != nil {
 		t.Fatal(err)
 	}
-	if g.has("docker exec cvctl-verify-app-prod-db-1767323045 psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select 1 from users") != 1 {
+	if g.has("docker exec cvctl-verify-app-prod-db-1767323045-0a0b0c0d psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select 1 from users") != 1 {
 		t.Fatalf("verify sql missing: %v", g.calls())
 	}
 }

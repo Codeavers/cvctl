@@ -4,6 +4,8 @@ package backup
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -113,14 +115,17 @@ type Snapshot struct {
 }
 
 type Runner struct {
-	Run        sys.Runner
-	FS         sys.FS
-	Compose    func(inst string) *compose.Project
-	Load       Loader
-	Host       *render.BackupTarget
-	Store      *state.Store
-	Notify     notify.Notifier
-	Clock      func() time.Time
+	Run     sys.Runner
+	FS      sys.FS
+	Compose func(inst string) *compose.Project
+	Load    Loader
+	Host    *render.BackupTarget
+	Store   *state.Store
+	Notify  notify.Notifier
+	Clock   func() time.Time
+	// Suffix makes temp container and volume names unique within a second;
+	// nil means 4 random bytes in hex.
+	Suffix     func() string
 	DeployRoot string
 	HostName   string
 	Catalog    kinds.Catalog
@@ -192,6 +197,21 @@ func (r *Runner) lock(inst string) (func(), error) {
 		sleep(interval)
 		waited += interval
 	}
+}
+
+func (r *Runner) suffix() string {
+	if r.Suffix != nil {
+		return r.Suffix()
+	}
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+// tempName names a throwaway container or volume; the suffix keeps two runs in
+// the same second from cleaning up each other's objects.
+func (r *Runner) tempName(kind, inst, svc string) string {
+	return fmt.Sprintf("cvctl-%s-%s-%s-%d-%s", kind, inst, svc, r.now().Unix(), r.suffix())
 }
 
 func (r *Runner) now() time.Time {

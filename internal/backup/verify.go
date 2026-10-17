@@ -19,7 +19,8 @@ import (
 
 const (
 	verifyPollInterval = 5 * time.Second
-	verifyReadyTimeout = 300 * time.Second
+	// a large cluster replays WAL as slowly in a verify as in a restore
+	verifyReadyTimeout = restoreReadyTimeout
 	cleanupTimeout     = time.Minute
 )
 
@@ -159,7 +160,7 @@ func (r *Runner) walgVerify(ctx context.Context, inst string, p *contract.Projec
 	if err != nil {
 		return err
 	}
-	name := fmt.Sprintf("cvctl-verify-%s-%s-%d", inst, t.Service, r.now().Unix())
+	name := r.tempName("verify", inst, t.Service)
 	if _, err := r.exec(ctx, r.docker("volume", "create", name)); err != nil {
 		return err
 	}
@@ -198,11 +199,49 @@ func (r *Runner) walgVerify(ctx context.Context, inst string, p *contract.Projec
 		return verifyEmpty(fmt.Sprintf("restored %s database has no tables", t.Service))
 	}
 	if p.X.Verify != nil && p.X.Verify.Service == t.Service && p.X.Verify.SQL != "" {
-		if _, err := r.psql(ctx, name, sd.Creds, p.X.Verify.SQL); err != nil {
+		out, err := r.psql(ctx, name, sd.Creds, p.X.Verify.SQL)
+		if err != nil {
 			return verifyFailed("x-cvctl.verify.sql failed on the restored database: "+err.Error(), "fix the verify query or investigate the backup")
+		}
+		if first, ok := firstValue(out); !ok || falsy(first) {
+			return verifyFailed(fmt.Sprintf("x-cvctl.verify.sql returned %s on the restored database; it must return a row whose first column is not empty, 0, false or null", describe(out)),
+				"the restored data is missing what the verify query checks; investigate the backup or fix the query")
 		}
 	}
 	return nil
+}
+
+// firstValue is the first column of the first row of psql -tA output.
+func firstValue(out string) (string, bool) {
+	if strings.TrimSpace(out) == "" {
+		return "", false
+	}
+	row, _, _ := strings.Cut(strings.TrimLeft(out, "\n"), "\n")
+	col, _, _ := strings.Cut(row, "|")
+	return strings.TrimSpace(col), true
+}
+
+func falsy(v string) bool {
+	switch strings.ToLower(v) {
+	case "", "0", "f", "false", "null":
+		return true
+	}
+	return false
+}
+
+// describe reports only the (truncated) first value, not the whole result.
+func describe(out string) string {
+	if v, ok := firstValue(out); ok {
+		return fmt.Sprintf("a first value of %q", truncate(v, 32))
+	}
+	return "no rows"
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
 }
 
 func (r *Runner) psql(ctx context.Context, name string, c kinds.Credentials, sql string) (string, error) {
@@ -248,7 +287,7 @@ func (r *Runner) resticVerify(ctx context.Context, inst string, t Target) error 
 	if err != nil {
 		return err
 	}
-	name := fmt.Sprintf("cvctl-verify-%s-%s-%d", inst, t.Service, r.now().Unix())
+	name := r.tempName("verify", inst, t.Service)
 	defer r.cleanup(ctx, name, "")
 	cmd := r.docker("run", "--name", name, "--network", backupNetwork, "--env-file", envFile,
 		"--entrypoint", "sh", resticImage, "-c", resticVerifyScript)

@@ -523,6 +523,7 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 		}
 		run.switched = true
 		if err := r.Apply(ctx, inst, st.Current); err != nil {
+			run.applyFailed = true
 			return err
 		}
 		return r.verifyServing(ctx, inst, svc, target.Strategy, sd.Creds)
@@ -567,7 +568,7 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 
 type restoreRun struct {
 	inst, svc, envPath, volKey, genKey, prevVol, prevGen string
-	hadVol, hadGen, switched, created                    bool
+	hadVol, hadGen, switched, created, applyFailed       bool
 	res                                                  *RestoreResult
 	st                                                   *state.State
 	tgt                                                  restoreTarget
@@ -607,6 +608,10 @@ func (r *Runner) rollbackRestore(ctx context.Context, run restoreRun, cause erro
 	}
 	msg := r.redact(fmt.Sprintf("restore of %s in %s failed: %s; %s.%s", run.svc, run.inst, cause.Error(), stateMsg, kept))
 	hint := "inspect the kept volume, fix the cause and retry; cvctl db cleanup removes unused volumes"
+	if run.applyFailed {
+		// the app's schema may be newer than the restored data
+		hint += "; if the restore target predates a migration, roll the app back first (cvctl rollback)"
+	}
 	if code == codeRestoreTarget {
 		hint = "the WAL archive ends before the target; pick an earlier target or --to latest"
 		if _, bounded := run.tgt.boundTime(); run.tgt.kind == "name" && !bounded {
@@ -618,9 +623,14 @@ func (r *Runner) rollbackRestore(ctx context.Context, run restoreRun, cause erro
 		_ = r.Notify.Send(rctx, notify.Message{Host: r.HostName, Level: "error", Title: fmt.Sprintf("%s restore of %s FAILED", run.inst, run.svc), Text: msg})
 	}
 	e := &output.Error{Code: code, Message: msg, Hint: hint}
+	result := "restore_failed"
+	if len(back) > 0 {
+		// db cleanup reads this: the volume cvctl.env no longer names may be the live one
+		result = "rollback_failed"
+	}
 	if err := r.Store.Append(run.inst, state.Event{
 		At: now, ID: fmt.Sprintf("restore-%d", now.Unix()), Kind: "restore", From: run.st.Current, To: run.st.Current,
-		Result: "restore_failed", Detail: msg, Actor: "cli",
+		Result: result, Detail: msg, Actor: "cli",
 	}); err != nil {
 		return errors.Join(e, err)
 	}
@@ -646,7 +656,7 @@ func (r *Runner) walgRecover(ctx context.Context, inst, svc string, p *contract.
 	if err != nil {
 		return err
 	}
-	name := fmt.Sprintf("cvctl-restore-%s-%s-%d", inst, svc, r.now().Unix())
+	name := r.tempName("restore", inst, svc)
 	defer r.cleanup(ctx, name, "")
 
 	args := []string{
@@ -746,6 +756,25 @@ func (r *Runner) Cleanup(ctx context.Context, inst string, yes bool) ([]CleanupV
 			return nil, err
 		}
 		defer unlock()
+	}
+	if r.Store != nil {
+		hist, err := r.Store.History(inst, 0)
+		if err != nil {
+			return nil, err
+		}
+		for _, ev := range hist {
+			if ev.Kind != "restore" {
+				continue
+			}
+			if ev.Result == "rollback_failed" {
+				return nil, &output.Error{
+					Code:    "E_CLEANUP_UNSAFE",
+					Message: fmt.Sprintf("the last db restore of %s failed to roll back; an unreferenced volume may still hold the live data", inst),
+					Hint:    "check cvctl.env and the volumes by hand (docker volume ls) and remove unused ones with docker volume rm; a successful cvctl db restore clears this",
+				}
+			}
+			break
+		}
 	}
 	p, d, err := r.Load(inst)
 	if err != nil {

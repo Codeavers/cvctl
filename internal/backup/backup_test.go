@@ -78,6 +78,7 @@ func newRig(t *testing.T) *rig {
 			AccessKey: "s3-access-ACCESS-000", SecretKey: secretKey, LibsodiumKey: libsodium, ResticPassword: resticPass,
 		},
 		Clock:      func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+		Suffix:     func() string { return "0a0b0c0d" },
 		DeployRoot: "/srv/deploy",
 	}
 	return &rig{run: run, fs: fsys, store: store, note: note, r: r}
