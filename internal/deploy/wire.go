@@ -7,10 +7,12 @@ import (
 
 	"github.com/joho/godotenv"
 
+	"github.com/codeavers/cvctl/internal/backup"
 	"github.com/codeavers/cvctl/internal/compose"
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/gitrepo"
 	"github.com/codeavers/cvctl/internal/hostcfg"
+	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/render"
 	"github.com/codeavers/cvctl/internal/sys"
 )
@@ -54,6 +56,17 @@ func Wire(d *Deployer, run sys.Runner) {
 			InfraPath: infraPath,
 			Override:  override,
 			EnvFile:   envFile,
+		}
+	}
+
+	if d.Restore == nil {
+		d.Restore = &backup.RestorePoint{
+			Compose: func(inst string) *compose.Project {
+				return d.ComposeProject(run, inst)
+			},
+			Load: func(inst string) (*contract.Project, *instance.Decisions, error) {
+				return backup.LoadInstance(d.deployRoot(), d.Catalog)(inst)
+			},
 		}
 	}
 

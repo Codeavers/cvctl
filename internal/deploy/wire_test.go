@@ -2,6 +2,7 @@ package deploy_test
 
 import (
 	"context"
+	"github.com/codeavers/cvctl/internal/backup"
 	"os"
 	"path/filepath"
 	"slices"
@@ -201,5 +202,13 @@ func TestBackupTargetFrom(t *testing.T) {
 	_ = cfg.Set("S3_BUCKET", "")
 	if deploy.BackupTargetFrom(cfg, sec) != nil {
 		t.Fatal("missing bucket must give nil")
+	}
+}
+
+func TestWireSetsRestorePointer(t *testing.T) {
+	d := &deploy.Deployer{}
+	deploy.Wire(d, &systest.Runner{})
+	if _, ok := d.Restore.(*backup.RestorePoint); !ok {
+		t.Fatalf("Restore = %T, want *backup.RestorePoint", d.Restore)
 	}
 }
