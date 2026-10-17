@@ -148,6 +148,17 @@ cp "$LOG" /tmp/leak-script.txt
 for f in /tmp/leak-status.json /tmp/leak-history.json /tmp/leak-journal.txt /tmp/leak-script.txt; do
   if grep -aqF -e "$WALG_KEY" -e "$RESTIC_PW" -e "$PASSPHRASE" "$f"; then
     echo "secret value found in $f" >&2
+    # Show where, with the values replaced, so the leak can be traced.
+    WALG_KEY="$WALG_KEY" RESTIC_PW="$RESTIC_PW" PASSPHRASE="$PASSPHRASE" python3 - "$f" >&2 <<'PY'
+import os, sys
+secrets = {k: os.environ[k] for k in ("WALG_KEY", "RESTIC_PW", "PASSPHRASE")}
+for n, line in enumerate(open(sys.argv[1], errors="replace"), 1):
+    hits = [k for k, v in secrets.items() if v and v in line]
+    if hits:
+        for k in hits:
+            line = line.replace(secrets[k], "<" + k + ">")
+        print(f"{n}: {','.join(hits)}: {line.rstrip()[:400]}")
+PY
     exit 1
   fi
 done
