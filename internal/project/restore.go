@@ -271,6 +271,18 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 		}
 		usedGen[t.Service] = used
 		sd := d.Services[t.Service]
+		if withBase >= 0 && used > withBase {
+			// A generation with WAL but no base backup is the timeline a db restore
+			// switched to before its first backup-push failed; restoring withBase
+			// may bring back data the operator had restored away from.
+			w := fmt.Sprintf("%s: generation %d has WAL but no base backup; restoring generation %d, which may predate the last db restore; newer data in generation %d needs a manual WAL-G restore", t.Service, used, withBase, used)
+			res.Warnings = append(res.Warnings, w)
+			if e.Deployer.Notify != nil {
+				_ = e.Deployer.Notify.Send(ctx, notify.Message{
+					Host: e.Host.HostName, Level: "warn", Title: fmt.Sprintf("%s restore of %s: newest generation has no base backup", inst, t.Service), Text: w,
+				})
+			}
+		}
 		if withBase >= 0 && withBase != sd.BackupGen {
 			var w string
 			if withBase > sd.BackupGen {

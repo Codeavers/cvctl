@@ -685,3 +685,26 @@ func TestRestoreHoldsDataLockThroughout(t *testing.T) {
 	}
 	unlock()
 }
+
+func TestRestoreWarnsWhenNewestGenerationHasNoBaseBackup(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	rig.data.used, rig.data.withBase = intp(3), intp(2)
+	note := &recNotify{}
+	rig.env.Deployer.Notify = note
+	res, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "generation 3 has WAL but no base backup"
+	found := false
+	for _, w := range res.Warnings {
+		found = found || strings.Contains(w, want)
+	}
+	notified := false
+	for _, m := range note.msgs {
+		notified = notified || (m.Level == "warn" && strings.Contains(m.Text, want))
+	}
+	if !found || !notified {
+		t.Fatalf("warnings=%v notes=%+v", res.Warnings, note.msgs)
+	}
+}
