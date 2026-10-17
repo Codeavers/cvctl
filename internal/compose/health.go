@@ -125,28 +125,62 @@ func Health(ctx context.Context, run sys.Runner, p Project, h contract.HealthSpe
 	}
 	healthURL := fmt.Sprintf("http://%s:%d%s", ip, port, path)
 
-	inspectRestartCmd := sys.Cmd{
-		Name: "docker",
-		Args: []string{"inspect", "-f", "{{.RestartCount}}", target.Name},
-		Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
-	}
-
-	type restartInfo struct {
-		count int
-		known bool
-	}
-
-	getRestarts := func() (restartInfo, error) {
-		res, err := run.Run(ctx, inspectRestartCmd)
+	// Baseline restart counts are recorded once, right after Up, so containers
+	// that restarted before this deploy do not count as failures.
+	baseline := map[string]int{}
+	restartCount := func(name string) (int, bool, error) {
+		cmd := sys.Cmd{
+			Name: "docker",
+			Args: []string{"inspect", "-f", "{{.RestartCount}}", name},
+			Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
+		}
+		res, err := run.Run(ctx, cmd)
 		if err != nil || res.ExitCode != 0 {
-			return restartInfo{}, sys.CmdErr("E_HEALTH_FAILED", inspectRestartCmd, res, err, "check container status")
+			return 0, false, sys.CmdErr("E_HEALTH_FAILED", cmd, res, err, "check container status")
 		}
-		raw := strings.TrimSpace(string(res.Stdout))
-		count, err := strconv.Atoi(raw)
-		if err != nil {
-			return restartInfo{known: false}, nil
+		count, convErr := strconv.Atoi(strings.TrimSpace(string(res.Stdout)))
+		if convErr != nil {
+			return 0, false, nil
 		}
-		return restartInfo{count: count, known: true}, nil
+		return count, true, nil
+	}
+	healthFail := func(msg string) error {
+		return &output.Error{
+			Code:    "E_HEALTH_FAILED",
+			Message: msg,
+			Hint:    fmt.Sprintf("check logs with `cvctl logs %s %s`", p.Instance, h.Service),
+		}
+	}
+	// checkContainers fails when any container is not running or restarted
+	// beyond its baseline. It returns a non-empty note when a count is unreadable.
+	checkContainers := func(list []Container) (string, error) {
+		note := ""
+		for _, c := range list {
+			if !strings.EqualFold(c.State, "running") {
+				return "", healthFail(fmt.Sprintf("container %s is not running (state %q)", c.Name, c.State))
+			}
+			count, ok, err := restartCount(c.Name)
+			if err != nil {
+				return "", err
+			}
+			if !ok {
+				note = fmt.Sprintf("container %s restart count is unknown", c.Name)
+				continue
+			}
+			base, seen := baseline[c.Name]
+			if !seen {
+				baseline[c.Name] = count
+				continue
+			}
+			if count > base {
+				return "", healthFail(fmt.Sprintf("container %s restarted", c.Name))
+			}
+		}
+		return note, nil
+	}
+
+	if _, err := checkContainers(containers); err != nil {
+		return err
 	}
 
 	ctxTimeout, cancel := context.WithTimeout(ctx, timeout)
@@ -154,19 +188,16 @@ func Health(ctx context.Context, run sys.Runner, p Project, h contract.HealthSpe
 
 	var lastErr string
 	for {
-		restarts, err := getRestarts()
+		current, err := p.PS(ctx)
 		if err != nil {
 			return err
 		}
-		if restarts.known && restarts.count > 0 {
-			return &output.Error{
-				Code:    "E_HEALTH_FAILED",
-				Message: fmt.Sprintf("container %s restarted", target.Name),
-				Hint:    fmt.Sprintf("check logs with `cvctl logs %s %s`", p.Instance, h.Service),
-			}
+		note, err := checkContainers(current)
+		if err != nil {
+			return err
 		}
-		if !restarts.known {
-			lastErr = fmt.Sprintf("container %s restart count is unknown", target.Name)
+		if note != "" {
+			lastErr = note
 		}
 
 		req, err := http.NewRequestWithContext(ctxTimeout, http.MethodGet, healthURL, nil)
@@ -183,22 +214,18 @@ func Health(ctx context.Context, run sys.Runner, p Project, h contract.HealthSpe
 			status := resp.StatusCode
 			_ = resp.Body.Close()
 			if status >= 200 && status < 300 {
-				afterRestarts, err := getRestarts()
+				after, err := p.PS(ctx)
 				if err != nil {
 					return err
 				}
-				if afterRestarts.known && afterRestarts.count > 0 {
-					return &output.Error{
-						Code:    "E_HEALTH_FAILED",
-						Message: fmt.Sprintf("container %s restarted", target.Name),
-						Hint:    fmt.Sprintf("check logs with `cvctl logs %s %s`", p.Instance, h.Service),
-					}
+				note, err := checkContainers(after)
+				if err != nil {
+					return err
 				}
-				if !afterRestarts.known {
-					lastErr = fmt.Sprintf("container %s restart count is unknown", target.Name)
-				} else {
+				if note == "" {
 					return nil
 				}
+				lastErr = note
 			} else {
 				lastErr = fmt.Sprintf("HTTP status %d", status)
 			}

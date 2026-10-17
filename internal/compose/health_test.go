@@ -130,54 +130,6 @@ func TestHealthTimeout(t *testing.T) {
 	}
 }
 
-func TestHealthRestartCount(t *testing.T) {
-	runner := &systest.Runner{}
-	p := Project{
-		Run:      runner,
-		Instance: "demo-dev",
-		Dir:      "/srv/deploy/demo-dev",
-	}
-
-	psCmd := p.Cmd("ps", "--format", "json")
-	runner.On(psCmd.String(), sys.Result{
-		Stdout:   []byte(`[{"Service":"api","Name":"demo-dev-api-1","State":"running"}]`),
-		ExitCode: 0,
-	})
-
-	runner.On("docker inspect -f {{json .NetworkSettings.Networks}} demo-dev-api-1", sys.Result{
-		Stdout:   []byte(`{"demo-dev_app": {"IPAddress": "127.0.0.1"}}`),
-		ExitCode: 0,
-	})
-
-	runner.On("docker inspect -f {{.RestartCount}} demo-dev-api-1", sys.Result{
-		Stdout:   []byte("2\n"),
-		ExitCode: 0,
-	})
-
-	ctx := WithHealthInterval(context.Background(), 5*time.Millisecond)
-	h := contract.HealthSpec{
-		Service: "api",
-		HTTP:    "/health",
-		Timeout: 500 * time.Millisecond,
-	}
-
-	err := Health(ctx, runner, p, h, 3000, nil)
-	if err == nil {
-		t.Fatal("expected error for restarted container, got nil")
-	}
-	outErr, ok := err.(*output.Error)
-	if !ok {
-		t.Fatalf("expected *output.Error, got %T: %v", err, err)
-	}
-	if outErr.Code != "E_HEALTH_FAILED" {
-		t.Fatalf("expected code E_HEALTH_FAILED, got %q", outErr.Code)
-	}
-	wantSubstr := "container demo-dev-api-1 restarted"
-	if !strings.Contains(outErr.Message, wantSubstr) {
-		t.Fatalf("expected message to contain %q, got %q", wantSubstr, outErr.Message)
-	}
-}
-
 func TestHealthRedirectNotFollowed(t *testing.T) {
 	tsTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -422,5 +374,88 @@ func TestHealthRestartCountUnknown(t *testing.T) {
 	}
 	if outErr.Code != "E_HEALTH_FAILED" {
 		t.Fatalf("expected code E_HEALTH_FAILED, got %q", outErr.Code)
+	}
+}
+
+type fnRunner func(c sys.Cmd) sys.Result
+
+func (f fnRunner) Run(_ context.Context, c sys.Cmd) (sys.Result, error) { return f(c), nil }
+
+func healthServer(t *testing.T) (int, func()) {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	u, _ := url.Parse(ts.URL)
+	port, _ := strconv.Atoi(u.Port())
+	return port, ts.Close
+}
+
+func multiRunner(counts map[string]*atomic.Int32, states map[string]string) fnRunner {
+	return func(c sys.Cmd) sys.Result {
+		s := c.String()
+		switch {
+		case strings.Contains(s, " ps "):
+			return sys.Result{Stdout: []byte(`[{"Service":"api","Name":"demo-api-1","State":"` + states["demo-api-1"] + `"},{"Service":"worker","Name":"demo-worker-1","State":"` + states["demo-worker-1"] + `"}]`)}
+		case strings.Contains(s, "NetworkSettings"):
+			return sys.Result{Stdout: []byte(`{"demo_app": {"IPAddress": "127.0.0.1"}}`)}
+		case strings.Contains(s, "RestartCount"):
+			name := c.Args[len(c.Args)-1]
+			return sys.Result{Stdout: []byte(strconv.Itoa(int(counts[name].Load())) + "\n")}
+		}
+		return sys.Result{ExitCode: 127}
+	}
+}
+
+func TestHealthOldRestartCountNotIncreasingIsHealthy(t *testing.T) {
+	port, closeFn := healthServer(t)
+	defer closeFn()
+	api, worker := &atomic.Int32{}, &atomic.Int32{}
+	worker.Store(3)
+	run := multiRunner(map[string]*atomic.Int32{"demo-api-1": api, "demo-worker-1": worker},
+		map[string]string{"demo-api-1": "running", "demo-worker-1": "running"})
+	p := Project{Run: run, Instance: "demo", Dir: "/srv/deploy/demo"}
+	h := contract.HealthSpec{Service: "api", HTTP: "/", Timeout: 500 * time.Millisecond}
+	ctx := WithHealthInterval(context.Background(), 5*time.Millisecond)
+	if err := Health(ctx, run, p, h, port, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHealthWorkerRestartDuringWindowFails(t *testing.T) {
+	port, closeFn := healthServer(t)
+	defer closeFn()
+	api, worker := &atomic.Int32{}, &atomic.Int32{}
+	// every inspect of the worker bumps the count, simulating a crash loop
+	counts := map[string]*atomic.Int32{"demo-api-1": api, "demo-worker-1": worker}
+	base := multiRunner(counts, map[string]string{"demo-api-1": "running", "demo-worker-1": "running"})
+	run := fnRunner(func(c sys.Cmd) sys.Result {
+		if strings.Contains(c.String(), "RestartCount") && c.Args[len(c.Args)-1] == "demo-worker-1" {
+			worker.Add(1)
+		}
+		return base(c)
+	})
+	p := Project{Run: run, Instance: "demo", Dir: "/srv/deploy/demo"}
+	h := contract.HealthSpec{Service: "api", HTTP: "/", Timeout: 500 * time.Millisecond}
+	ctx := WithHealthInterval(context.Background(), 5*time.Millisecond)
+	err := Health(ctx, run, p, h, port, nil)
+	oe, ok := err.(*output.Error)
+	if !ok || oe.Code != "E_HEALTH_FAILED" || !strings.Contains(oe.Message, "demo-worker-1 restarted") {
+		t.Fatalf("expected worker restart failure, got %v", err)
+	}
+}
+
+func TestHealthNonRunningContainerFails(t *testing.T) {
+	port, closeFn := healthServer(t)
+	defer closeFn()
+	run := multiRunner(map[string]*atomic.Int32{"demo-api-1": {}, "demo-worker-1": {}},
+		map[string]string{"demo-api-1": "running", "demo-worker-1": "exited"})
+	p := Project{Run: run, Instance: "demo", Dir: "/srv/deploy/demo"}
+	h := contract.HealthSpec{Service: "api", HTTP: "/", Timeout: 500 * time.Millisecond}
+	ctx := WithHealthInterval(context.Background(), 5*time.Millisecond)
+	err := Health(ctx, run, p, h, port, nil)
+	oe, ok := err.(*output.Error)
+	if !ok || oe.Code != "E_HEALTH_FAILED" || !strings.Contains(oe.Message, "demo-worker-1") {
+		t.Fatalf("expected non-running failure, got %v", err)
 	}
 }
