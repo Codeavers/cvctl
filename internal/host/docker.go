@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
+	"strconv"
 	"strings"
 
 	"github.com/codeavers/cvctl/internal/hostcfg"
@@ -36,7 +38,39 @@ func isDaemonConfigDesired(m map[string]any) bool {
 	return true
 }
 
+// minDockerMajor is the oldest Docker Engine cvctl supports: Traefik relies
+// on endpoint gw_priority (Engine 28) to publish its ports through the proxy
+// network gateway that trustedIPs names.
+const minDockerMajor = 28
+
+// checkDockerVersion fails on an engine older than minDockerMajor. An engine
+// that cannot be queried (not installed yet, daemon down) is left to the
+// steps that need it.
+func checkDockerVersion(ctx context.Context, e *Env) error {
+	res, err := e.Run.Run(ctx, sys.Cmd{
+		Name: "docker",
+		Args: []string{"version", "--format", "{{.Server.Version}}"},
+		Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
+	})
+	if err != nil || res.ExitCode != 0 {
+		return nil
+	}
+	v := strings.TrimSpace(string(res.Stdout))
+	major, err := strconv.Atoi(strings.SplitN(v, ".", 2)[0])
+	if err != nil || major >= minDockerMajor {
+		return nil
+	}
+	return &output.Error{
+		Code:    "E_DOCKER_TOO_OLD",
+		Message: fmt.Sprintf("Docker Engine %s is older than %d", v, minDockerMajor),
+		Hint:    fmt.Sprintf("upgrade Docker Engine to %d+", minDockerMajor),
+	}
+}
+
 func (DockerDaemonStep) Check(ctx context.Context, e *Env) (Plan, error) {
+	if err := checkDockerVersion(ctx, e); err != nil {
+		return Plan{}, err
+	}
 	data, err := e.FS.ReadFile(dockerDaemonConfigPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
