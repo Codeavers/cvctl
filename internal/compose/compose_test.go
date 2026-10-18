@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/sys"
@@ -87,7 +88,14 @@ func TestCmdShape(t *testing.T) {
 	}
 }
 
+func pinHookSuffix(t *testing.T) {
+	old := hookSuffix
+	hookSuffix = func() string { return "abcd1234" }
+	t.Cleanup(func() { hookSuffix = old })
+}
+
 func TestRunHookArgs(t *testing.T) {
+	pinHookSuffix(t)
 	runner := &systest.Runner{}
 	p := Project{
 		Run:      runner,
@@ -95,7 +103,7 @@ func TestRunHookArgs(t *testing.T) {
 		Dir:      "/srv/deploy/demo-dev",
 	}
 
-	expectedCmd := p.Cmd("run", "--rm", "--no-deps", "-T", "--entrypoint", "sh", "api", "-c", "npm run migrate")
+	expectedCmd := p.Cmd("run", "--rm", "--no-deps", "-T", "--name", "demo-dev-hook-abcd1234", "--entrypoint", "sh", "api", "-c", "npm run migrate")
 	if n := strings.Count(strings.Join(expectedCmd.Args, " "), " -f "); n != 1 || strings.Contains(strings.Join(expectedCmd.Args, " "), "/infra") {
 		t.Fatalf("hooks must use only the generated file, got %v", expectedCmd.Args)
 	}
@@ -147,6 +155,7 @@ func TestExecScriptFailure(t *testing.T) {
 }
 
 func TestRunHookFailure(t *testing.T) {
+	pinHookSuffix(t)
 	runner := &systest.Runner{}
 	p := Project{
 		Run:      runner,
@@ -154,7 +163,7 @@ func TestRunHookFailure(t *testing.T) {
 		Dir:      "/srv/deploy/demo-dev",
 	}
 
-	expectedCmd := p.Cmd("run", "--rm", "--no-deps", "-T", "--entrypoint", "sh", "api", "-c", "false")
+	expectedCmd := p.Cmd("run", "--rm", "--no-deps", "-T", "--name", "demo-dev-hook-abcd1234", "--entrypoint", "sh", "api", "-c", "false")
 	runner.On(expectedCmd.String(), sys.Result{Stderr: []byte("migration syntax error\n"), ExitCode: 1})
 
 	res, err := p.RunHook(context.Background(), "api", "false")
@@ -303,5 +312,40 @@ func TestComposeFailureErrors(t *testing.T) {
 	wantHint := "see the command output; check the compose files in " + filepath.Clean(p.Dir)
 	if outErr.Hint != wantHint {
 		t.Fatalf("hint = %q, want %q", outErr.Hint, wantHint)
+	}
+}
+
+// ctxRunner blocks docker compose until the context ends and records every call.
+type ctxRunner struct {
+	calls []sys.Cmd
+}
+
+func (r *ctxRunner) Run(ctx context.Context, c sys.Cmd) (sys.Result, error) {
+	r.calls = append(r.calls, c)
+	if len(c.Args) > 0 && c.Args[0] == "compose" {
+		<-ctx.Done()
+		return sys.Result{}, ctx.Err()
+	}
+	return sys.Result{}, nil
+}
+
+func TestRunHookTimeoutRemovesContainer(t *testing.T) {
+	pinHookSuffix(t)
+	r := &ctxRunner{}
+	p := Project{Run: r, Instance: "demo-dev", Dir: "/srv/deploy/demo-dev"}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := p.RunHook(ctx, "api", "sleep 99"); err == nil {
+		t.Fatal("expected an error on timeout")
+	}
+	if len(r.calls) != 2 {
+		t.Fatalf("expected the hook and one docker rm, got %d calls", len(r.calls))
+	}
+	rm := r.calls[1]
+	if rm.Name != "docker" || strings.Join(rm.Args, " ") != "rm -f demo-dev-hook-abcd1234" {
+		t.Fatalf("unexpected cleanup command: %s", rm.String())
+	}
+	if len(rm.Env) == 0 || rm.Env[0] != "DOCKER_CONFIG=/var/lib/cvctl/docker" {
+		t.Fatalf("cleanup must carry DOCKER_CONFIG, got %v", rm.Env)
 	}
 }

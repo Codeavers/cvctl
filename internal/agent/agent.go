@@ -123,13 +123,16 @@ func Run(ctx context.Context, cfg Config) error {
 			}
 			p, err := contract.Load(infraDir, cat)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, instance.WrapLoadErr(err)
 			}
 			dec, err := instance.Read(cvctlEnvPath, p)
 			if err != nil {
 				return nil, nil, err
 			}
 			if err := instance.CheckDir(dec, cvctlEnvPath); err != nil {
+				return nil, nil, err
+			}
+			if err := instance.Verify(infraDir, p, dec, cat, false); err != nil {
 				return nil, nil, err
 			}
 			return dec, p, nil
@@ -169,6 +172,22 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	// A deploy cut short by a crash or kill leaves DEPLOYING behind.
+	if rec, ok := cfg.Store.(interface {
+		RecoverInterrupted(inst string, now time.Time) (bool, error)
+	}); ok {
+		if instances, err := cfg.Store.Instances(); err == nil {
+			for _, inst := range instances {
+				switch recovered, err := rec.RecoverInterrupted(inst, time.Now().UTC()); {
+				case err != nil:
+					logDecision(inst, "error", fmt.Sprintf("cannot recover interrupted deploy: %v", err))
+				case recovered:
+					logDecision(inst, "recover", "interrupted deploy: returned to last stable state")
+				}
+			}
+		}
+	}
+
 	runTick := func() {
 		instances, err := cfg.Store.Instances()
 		if err != nil {
@@ -195,11 +214,17 @@ func Run(ctx context.Context, cfg Config) error {
 				}
 
 				src := sourcesFn(dec)
-				want, err := src.Desired(ctx, dec)
+				fetchCtx, fetchCancel := deploy.WithStepTimeout(ctx, cfg.Host.TimeoutFetch(), "fetch")
+				want, err := src.Desired(fetchCtx, dec)
 				if err != nil {
+					if te := deploy.TimeoutError(fetchCtx); te != nil {
+						err = te
+					}
+					fetchCancel()
 					recordError(inst, err.Error())
 					return
 				}
+				fetchCancel()
 
 				st, err := cfg.Store.Load(inst)
 				if err != nil {
@@ -234,12 +259,21 @@ func Run(ctx context.Context, cfg Config) error {
 					return
 				}
 
-				deployCtx := context.WithoutCancel(ctx)
+				// ctx is cancelled by the shutdown signal; the pipeline stops at its
+				// next step boundary and records "interrupted".
+				deployCtx, deployCancel := deploy.WithStepTimeout(ctx, cfg.Host.TimeoutDeploy(), "deploy")
 				res, err := cfg.Deployer.Deploy(deployCtx, inst, want, deploy.Options{Actor: "agent"})
 				if err != nil {
-					recordError(inst, err.Error())
+					if te := deploy.TimeoutError(deployCtx); te != nil {
+						err = te
+					}
+					deployCancel()
+					if ctx.Err() == nil {
+						recordError(inst, err.Error())
+					}
 					return
 				}
+				deployCancel()
 
 				delete(lastErrors, inst)
 				status := string(res.Status)

@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 
@@ -98,6 +99,53 @@ var validators = map[string]func(string) error{
 	"STORAGE":         oneOf("local", "s3"),
 	"NOTIFY":          oneOf("telegram", "none"),
 	"EDGE_SUBNET":     validEdgeSubnet,
+
+	"TIMEOUT_FETCH":  validTimeout,
+	"TIMEOUT_PULL":   validTimeout,
+	"TIMEOUT_HOOK":   validTimeout,
+	"TIMEOUT_DEPLOY": validTimeout,
+}
+
+// Default step timeouts, used when the CVCTL_TIMEOUT_* key is unset.
+const (
+	DefaultTimeoutFetch  = 2 * time.Minute
+	DefaultTimeoutPull   = 10 * time.Minute
+	DefaultTimeoutHook   = 15 * time.Minute
+	DefaultTimeoutDeploy = 45 * time.Minute
+)
+
+func validTimeout(v string) error {
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return errors.New("must be a positive Go duration such as 10m")
+	}
+	return nil
+}
+
+func (c *Config) timeout(key string, def time.Duration) time.Duration {
+	if c == nil {
+		return def
+	}
+	if d, err := time.ParseDuration(c.Get(key)); err == nil && d > 0 {
+		return d
+	}
+	return def
+}
+
+// TimeoutFetch bounds resolving digests and downloading the contract per instance.
+func (c *Config) TimeoutFetch() time.Duration {
+	return c.timeout("TIMEOUT_FETCH", DefaultTimeoutFetch)
+}
+
+// TimeoutPull bounds docker compose pull.
+func (c *Config) TimeoutPull() time.Duration { return c.timeout("TIMEOUT_PULL", DefaultTimeoutPull) }
+
+// TimeoutHook bounds each hook unless the contract sets its own.
+func (c *Config) TimeoutHook() time.Duration { return c.timeout("TIMEOUT_HOOK", DefaultTimeoutHook) }
+
+// TimeoutDeploy bounds one full instance deploy.
+func (c *Config) TimeoutDeploy() time.Duration {
+	return c.timeout("TIMEOUT_DEPLOY", DefaultTimeoutDeploy)
 }
 
 // DefaultEdgeSubnet is the proxy network subnet when CVCTL_EDGE_SUBNET is unset.
@@ -138,7 +186,7 @@ var knownKeys = []string{
 	"HOST_NAME", "EDGE_MODE", "PROXY_PORT", "ADMIN_USER", "SSH_MANAGE", "FIREWALL_MANAGE",
 	"ACME_EMAIL", "ACME_CHALLENGE", "STORAGE", "S3_ENDPOINT", "S3_BUCKET", "S3_REGION", "S3_ENDPOINT_INTERNAL",
 	"NOTIFY", "TELEGRAM_CHAT_ID", "TELEGRAM_THREAD_ID", "REGISTRIES", "REGISTRY_USER",
-	"EDGE_SUBNET",
+	"EDGE_SUBNET", "TIMEOUT_FETCH", "TIMEOUT_PULL", "TIMEOUT_HOOK", "TIMEOUT_DEPLOY",
 }
 
 func invalid(key string, err error) error {

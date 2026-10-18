@@ -318,3 +318,26 @@ func TestS3SpecValidation(t *testing.T) {
 		t.Fatalf("expected E_CONTRACT_SPEC_SERVICE_VAR for S3_PUBLIC_URL_PRESCRIPTIONS, got %+v", issues)
 	}
 }
+
+func TestHookTimeoutValidation(t *testing.T) {
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load("testdata/valid", cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for timeout, bad := range map[string]bool{"": false, "20m": false, "2h": false, "2h1m": true, "0s": true, "-5m": true, "soon": true} {
+		p.X.Hooks.PreDeploy[0].Timeout = timeout
+		found := false
+		for _, iss := range Validate(p, cat, nil) {
+			if iss.Code == "E_CONTRACT_HOOK_TIMEOUT" {
+				found = true
+			}
+		}
+		if found != bad {
+			t.Errorf("timeout %q: E_CONTRACT_HOOK_TIMEOUT = %v, want %v", timeout, found, bad)
+		}
+	}
+}

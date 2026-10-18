@@ -87,15 +87,19 @@ func LoadInstance(deployRoot string, cat kinds.Catalog) Loader {
 				return nil, nil, err
 			}
 		}
-		p, err := contract.Load(filepath.Join(deployRoot, inst, "infra", infra), c)
+		infraDir := filepath.Join(deployRoot, inst, "infra", infra)
+		p, err := contract.Load(infraDir, c)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, instance.WrapLoadErr(err)
 		}
 		d, err := instance.Read(envPath, p)
 		if err != nil {
 			return nil, nil, err
 		}
 		if err := instance.CheckDir(d, envPath); err != nil {
+			return nil, nil, err
+		}
+		if err := instance.Verify(infraDir, p, d, c, false); err != nil {
 			return nil, nil, err
 		}
 		return p, d, nil

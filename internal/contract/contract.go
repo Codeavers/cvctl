@@ -51,6 +51,8 @@ type VerifySpec struct {
 type Hook struct {
 	Service string
 	Run     string
+	// Timeout is a Go duration; empty means the host default. Validate checks it.
+	Timeout string
 }
 
 type Hooks struct {
@@ -150,6 +152,7 @@ type rawExt struct {
 type rawHook struct {
 	Service string `yaml:"service"`
 	Run     string `yaml:"run"`
+	Timeout string `yaml:"timeout"`
 }
 
 func composeErr(msg, hint string) error {

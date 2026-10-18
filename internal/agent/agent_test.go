@@ -13,9 +13,11 @@ import (
 	"github.com/codeavers/cvctl/internal/agent"
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/deploy"
+	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/state"
+	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/internal/sys/systest"
 )
 
@@ -462,7 +464,7 @@ func TestAgentDeployErrorHandledAndDeduped(t *testing.T) {
 	}
 }
 
-func TestAgentDeployWithoutCancelOnContextDone(t *testing.T) {
+func TestAgentDeployCancelledOnContextDone(t *testing.T) {
 	fsys := systest.NewFS()
 	store := state.NewStore(fsys, "/var/lib/cvctl")
 	notif := &fakeNotifier{}
@@ -520,8 +522,8 @@ func TestAgentDeployWithoutCancelOnContextDone(t *testing.T) {
 		t.Fatalf("agent.Run failed: %v", err)
 	}
 
-	if deployCtxErr != nil {
-		t.Fatalf("expected deploy context to survive parent cancellation, got: %v", deployCtxErr)
+	if !errors.Is(deployCtxErr, context.Canceled) {
+		t.Fatalf("expected the deploy context to be cancelled with the parent, got: %v", deployCtxErr)
 	}
 
 	dep.mu.Lock()
@@ -600,5 +602,131 @@ func TestAgentStateLoadErrorDeduped(t *testing.T) {
 
 	if count != 1 {
 		t.Fatalf("expected state load error to be notified exactly once across ticks, got %d", count)
+	}
+}
+
+func agentHost(t *testing.T, kv ...string) *hostcfg.Config {
+	t.Helper()
+	h := hostcfg.NewConfig()
+	for i := 0; i < len(kv); i += 2 {
+		if err := h.Set(kv[i], kv[i+1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return h
+}
+
+func seedOK(t *testing.T, store *state.Store, insts ...string) {
+	t.Helper()
+	for _, inst := range insts {
+		if err := store.Save(&state.State{Instance: inst, Status: state.StatusOK, Current: &state.Desired{InfraCommit: "commit-1"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestAgentDeployTimeoutDoesNotStopNextInstance(t *testing.T) {
+	store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
+	seedOK(t, store, "app-a", "app-b")
+	var out bytes.Buffer
+	notif := &fakeNotifier{}
+	dep := &fakeDeployer{
+		onDeploy: func(ctx context.Context, inst string, want state.Desired) (deploy.Result, error) {
+			if inst == "app-a" {
+				<-ctx.Done()
+				return deploy.Result{}, errors.New("killed")
+			}
+			return deploy.Result{Status: state.StatusOK}, nil
+		},
+	}
+	cfg := agent.Config{
+		Store: store, Deployer: dep, Notify: notif, Out: &out, Once: true,
+		Host: agentHost(t, "TIMEOUT_DEPLOY", "50ms"),
+		Load: func(inst string) (*instance.Decisions, *contract.Project, error) {
+			return &instance.Decisions{Instance: inst, Env: "dev"}, &contract.Project{}, nil
+		},
+		Sources: func(d *instance.Decisions) deploy.Source {
+			return &fakeSource{desired: state.Desired{InfraCommit: "commit-2"}}
+		},
+	}
+	if err := agent.Run(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(dep.calls) != 2 || dep.calls[1] != "app-b:commit-2" {
+		t.Fatalf("app-b must deploy after app-a timed out, got %v", dep.calls)
+	}
+	if !strings.Contains(out.String(), "E_TIMEOUT: deploy timed out after 50ms") {
+		t.Fatalf("expected E_TIMEOUT naming the deploy step, got:\n%s", out.String())
+	}
+	if len(notif.messages) != 1 || !strings.Contains(notif.messages[0].Text, "E_TIMEOUT") {
+		t.Fatalf("expected one E_TIMEOUT notification, got %+v", notif.messages)
+	}
+}
+
+type blockingSource struct{}
+
+func (blockingSource) Desired(ctx context.Context, d *instance.Decisions) (state.Desired, error) {
+	<-ctx.Done()
+	return state.Desired{}, errors.New("killed")
+}
+
+func TestAgentFetchTimeout(t *testing.T) {
+	store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
+	seedOK(t, store, "app-a")
+	var out bytes.Buffer
+	dep := &fakeDeployer{}
+	cfg := agent.Config{
+		Store: store, Deployer: dep, Out: &out, Once: true,
+		Host: agentHost(t, "TIMEOUT_FETCH", "50ms"),
+		Load: func(inst string) (*instance.Decisions, *contract.Project, error) {
+			return &instance.Decisions{Instance: inst, Env: "dev"}, &contract.Project{}, nil
+		},
+		Sources: func(d *instance.Decisions) deploy.Source { return blockingSource{} },
+	}
+	if err := agent.Run(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(dep.calls) != 0 {
+		t.Fatalf("no deploy expected, got %v", dep.calls)
+	}
+	if !strings.Contains(out.String(), "E_TIMEOUT: fetch timed out after 50ms") {
+		t.Fatalf("expected E_TIMEOUT naming the fetch step, got:\n%s", out.String())
+	}
+}
+
+func TestAgentRecoversDeployingOnStartup(t *testing.T) {
+	oldLock := sys.LockFile
+	t.Cleanup(func() { sys.LockFile = oldLock })
+	sys.LockFile = systest.NewFakeLocker().LockFile
+	store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
+	cur := state.Desired{InfraCommit: "commit-1"}
+	if err := store.Save(&state.State{Instance: "with-current", Status: state.StatusDeploying, Current: &cur}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(&state.State{Instance: "fresh", Status: state.StatusDeploying, PriorStatus: state.StatusBlocked}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	cfg := agent.Config{
+		Store: store, Deployer: &fakeDeployer{}, Out: &out, Once: true,
+		Load: func(inst string) (*instance.Decisions, *contract.Project, error) {
+			return nil, nil, errors.New("skip")
+		},
+	}
+	if err := agent.Run(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	for inst, want := range map[string]state.Status{"with-current": state.StatusOK, "fresh": state.StatusBlocked} {
+		st, err := store.Load(inst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Status != want {
+			t.Fatalf("%s: status %s, want %s", inst, st.Status, want)
+		}
+		hist, err := store.History(inst, 5)
+		if err != nil || len(hist) != 1 || hist[0].Kind != "interrupted" {
+			t.Fatalf("%s: expected one interrupted history entry, got %v (%v)", inst, hist, err)
+		}
 	}
 }

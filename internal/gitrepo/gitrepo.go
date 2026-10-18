@@ -85,13 +85,16 @@ func validateRef(s string) error {
 	return nil
 }
 
+const sshBatchOpts = "-o BatchMode=yes -o ConnectTimeout=20"
+
 func (r *Repo) env() ([]string, error) {
-	envs := []string{"LC_ALL=C"}
+	// Never block on a credentials prompt or an unreachable host: there is no tty.
+	envs := []string{"LC_ALL=C", "GIT_TERMINAL_PROMPT=0"}
 	if EUID() == 0 {
 		envs = append(envs, "HOME=/srv/deploy")
 	}
 	if r.KeyPath == "" {
-		return envs, nil
+		return append(envs, "GIT_SSH_COMMAND=ssh "+sshBatchOpts), nil
 	}
 	if strings.ContainsFunc(r.KeyPath, unicode.IsSpace) || strings.ContainsAny(r.KeyPath, forbiddenKeyPathChars) {
 		return nil, &output.Error{
@@ -101,7 +104,7 @@ func (r *Repo) env() ([]string, error) {
 		}
 	}
 	knownHosts := filepath.Join(filepath.Dir(r.KeyPath), "known_hosts")
-	sshCmd := fmt.Sprintf("GIT_SSH_COMMAND=ssh -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=%s", r.KeyPath, knownHosts)
+	sshCmd := fmt.Sprintf("GIT_SSH_COMMAND=ssh -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=%s %s", r.KeyPath, knownHosts, sshBatchOpts)
 	envs = append(envs, sshCmd)
 	return envs, nil
 }

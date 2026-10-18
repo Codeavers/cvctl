@@ -367,7 +367,18 @@ func lastLines(text string, n int) string {
 	return strings.Join(lines[len(lines)-n:], "\n")
 }
 
+// interrupted returns an instance whose deploy was cancelled (shutdown) to its
+// last stable status and records "interrupted". It is not a failure: nothing is
+// notified and the same desired state is retried.
+func (d *Deployer) interrupted(inst string, st *state.State, want state.Desired, deployID, actor string, now time.Time) (Result, error) {
+	err := d.Store.Interrupt(st, &want, deployID, actor, "deploy interrupted by shutdown; will retry", now)
+	return Result{Status: st.Status, ID: deployID, Detail: "deploy interrupted"}, err
+}
+
 func (d *Deployer) failPermanent(ctx context.Context, inst string, st *state.State, want state.Desired, deployID, actor string, now time.Time, errText string, envVals map[string]string) (Result, error) {
+	if cancelled(ctx) && st.Status == state.StatusDeploying {
+		return d.interrupted(inst, st, want, deployID, actor, now)
+	}
 	redacted := redact(errText, envVals)
 	st.Status = state.StatusFailed
 	st.FailedHash = want.Hash()
@@ -403,6 +414,9 @@ func (d *Deployer) failPermanent(ctx context.Context, inst string, st *state.Sta
 }
 
 func (d *Deployer) failTransient(ctx context.Context, inst string, st *state.State, want state.Desired, deployID, actor string, now time.Time, errText string, envVals map[string]string) (Result, error) {
+	if cancelled(ctx) && st.Status == state.StatusDeploying {
+		return d.interrupted(inst, st, want, deployID, actor, now)
+	}
 	redacted := redact(errText, envVals)
 	detail := strings.TrimRight(redacted, ".")
 	if !strings.HasSuffix(detail, "will retry next cycle") {
@@ -493,6 +507,8 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	if d.Compose == nil || d.Health == nil {
 		return Result{}, misconfiguredErr()
 	}
+	ctx, cancelDeploy := withStepTimeout(ctx, d.Host.TimeoutDeploy(), "deploy")
+	defer cancelDeploy()
 
 	// Step 1: load state (the instance lock is held by the caller)
 	st, err := d.Store.Load(inst)
@@ -582,7 +598,10 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	defer func() {
 		if !promoted && st.Current != nil && st.Current.InfraCommit != "" {
 			if r := d.repo(inst); r != nil {
-				if rErr := r.Checkout(ctx, st.Current.InfraCommit); rErr != nil {
+				// The restore must also run after a cancel or timeout of ctx.
+				rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+				defer rcancel()
+				if rErr := r.Checkout(rctx, st.Current.InfraCommit); rErr != nil {
 					errMsg := fmt.Sprintf("restore checkout failed: %v", rErr)
 					if res.Detail != "" {
 						res.Detail += "; " + errMsg
@@ -624,7 +643,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 
 	p, err := contract.Load(infraDir, cat)
 	if err != nil {
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), cvSecrets)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, instance.WrapLoadErr(err).Error(), cvSecrets)
 	}
 
 	dec, err := instance.Read(cvctlEnvPath, p)
@@ -737,6 +756,9 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 
 	st.Blocked = nil
+	if st.Status != state.StatusDeploying {
+		st.PriorStatus = st.Status
+	}
 	st.Status = state.StatusDeploying
 	st.UpdatedAt = now
 	if err := d.Store.Save(st); err != nil {
@@ -849,9 +871,20 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		}
 	}
 
-	if err := stagingCompose.Pull(ctx, appServices...); err != nil {
+	if cancelled(ctx) {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
+		return d.interrupted(inst, st, want, deployID, actor, now)
+	}
+	pullCtx, pullCancel := withStepTimeout(ctx, d.Host.TimeoutPull(), "pull")
+	pullErr := stagingCompose.Pull(pullCtx, appServices...)
+	pullText := ""
+	if pullErr != nil {
+		pullText = stepErrText(pullCtx, pullErr)
+	}
+	pullCancel()
+	if pullErr != nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, pullText, secrets)
 	}
 	if err := d.ensureNetworks(ctx, inst, p, dec); err != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
@@ -899,8 +932,19 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	// Step 7: Pre-deploy hooks
 	preHooksRan := false
 	for _, hook := range p.X.Hooks.PreDeploy {
+		if cancelled(ctx) {
+			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+			return d.interrupted(inst, st, want, deployID, actor, now)
+		}
 		preHooksRan = true
-		resHook, err := stagingCompose.RunHook(ctx, hook.Service, hook.Run)
+		hookCtx, hookCancel := withStepTimeout(ctx, d.hookTimeout(hook), "pre-deploy hook "+hook.Service)
+		resHook, err := stagingCompose.RunHook(hookCtx, hook.Service, hook.Run)
+		timeoutErr := TimeoutError(hookCtx)
+		hookCancel()
+		if timeoutErr != nil {
+			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+			return d.failTransient(ctx, inst, st, want, deployID, actor, now, timeoutErr.Error(), secrets)
+		}
 		if err != nil || resHook.ExitCode != 0 {
 			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 
@@ -914,6 +958,11 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			redactedOut := lastLines(redact(rawOutput, secrets), 20)
 			return d.failPermanent(ctx, inst, st, want, deployID, actor, now, redactedOut, secrets)
 		}
+	}
+
+	if cancelled(ctx) {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.interrupted(inst, st, want, deployID, actor, now)
 	}
 
 	// Step 8: Promote staging -> final (order: app.env -> backup envs -> route -> override)
@@ -960,7 +1009,12 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	if upErr == nil && healthErr == nil {
 		// Post-deploy hooks
 		for _, hook := range p.X.Hooks.PostDeploy {
-			hRes, hErr := finalCompose.RunHook(ctx, hook.Service, hook.Run)
+			hookCtx, hookCancel := withStepTimeout(ctx, d.hookTimeout(hook), "post-deploy hook "+hook.Service)
+			hRes, hErr := finalCompose.RunHook(hookCtx, hook.Service, hook.Run)
+			if te := TimeoutError(hookCtx); te != nil {
+				hErr = te
+			}
+			hookCancel()
 			if hErr != nil || hRes.ExitCode != 0 {
 				rawHook := string(hRes.Stderr)
 				if strings.TrimSpace(rawHook) == "" {
@@ -1021,9 +1075,21 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 
 	// Step 10: Rollback to st.Current
+	if cancelled(ctx) {
+		return d.interrupted(inst, st, want, deployID, actor, now)
+	}
+	// After a deploy timeout ctx is dead, but the rollback still has to run.
+	rbCtx := ctx
+	timeoutPrefix := ""
+	if te := TimeoutError(ctx); te != nil {
+		timeoutPrefix = te.Error() + "\n"
+		var rbCancel context.CancelFunc
+		rbCtx, rbCancel = withStepTimeout(context.WithoutCancel(ctx), d.Host.TimeoutDeploy(), "rollback")
+		defer rbCancel()
+	}
 	var logs string
 	if finalCompose != nil {
-		logs, _ = finalCompose.Logs(ctx, "", 20)
+		logs, _ = finalCompose.Logs(rbCtx, "", 20)
 	}
 	if strings.TrimSpace(logs) == "" {
 		if upErr != nil {
@@ -1032,11 +1098,15 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			logs = healthErr.Error()
 		}
 	}
-	redactedLogs := lastLines(redact(logs, secrets), 20)
+	redactedLogs := lastLines(redact(timeoutPrefix+logs, secrets), 20)
 
 	if st.Current == nil || st.Current.InfraCommit == "" {
 		st.Status = state.StatusFailed
 		st.FailedHash = want.Hash()
+		if timeoutPrefix != "" {
+			// A timeout is transient: retry instead of waiting for a new desired state.
+			st.FailedHash = ""
+		}
 		st.RollbackFailed = false
 		st.UpdatedAt = now
 		if err := d.Store.Save(st); err != nil {
@@ -1070,10 +1140,13 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 
 	rollbackTarget := *st.Current
-	rollbackErr := d.executeSwap(ctx, inst, &rollbackTarget, rollbackEnv, false)
+	rollbackErr := d.executeSwap(rbCtx, inst, &rollbackTarget, rollbackEnv, false)
 
 	st.Status = state.StatusFailed
 	st.FailedHash = want.Hash()
+	if timeoutPrefix != "" {
+		st.FailedHash = ""
+	}
 	st.UpdatedAt = now
 
 	if rollbackErr != nil {
@@ -1316,4 +1389,13 @@ func (d *Deployer) probeExternalBuckets(ctx context.Context, inst string, p *con
 		}
 	}
 	return nil
+}
+
+func (d *Deployer) hookTimeout(h contract.Hook) time.Duration {
+	if h.Timeout != "" {
+		if t, err := time.ParseDuration(h.Timeout); err == nil && t > 0 {
+			return t
+		}
+	}
+	return d.Host.TimeoutHook()
 }

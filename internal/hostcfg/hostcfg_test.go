@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/hostcfg/hostcfgtest"
@@ -329,5 +330,24 @@ func TestEdgeSubnetValidationAndGateway(t *testing.T) {
 	}
 	if c.EdgeGateway() != "172.30.4.1" {
 		t.Fatalf("gateway = %s", c.EdgeGateway())
+	}
+}
+
+func TestTimeouts(t *testing.T) {
+	c := hostcfg.NewConfig()
+	if c.TimeoutFetch() != 2*time.Minute || c.TimeoutPull() != 10*time.Minute || c.TimeoutHook() != 15*time.Minute || c.TimeoutDeploy() != 45*time.Minute {
+		t.Fatal("defaults must be fetch 2m, pull 10m, hook 15m, deploy 45m")
+	}
+	var nilCfg *hostcfg.Config
+	if nilCfg.TimeoutDeploy() != 45*time.Minute {
+		t.Fatal("a nil config must give the defaults")
+	}
+	if err := c.Set("TIMEOUT_PULL", "90s"); err != nil || c.TimeoutPull() != 90*time.Second {
+		t.Fatalf("TIMEOUT_PULL not applied: %v", err)
+	}
+	for _, bad := range []string{"10", "abc", "0s", "-1m"} {
+		if err := c.Set("TIMEOUT_HOOK", bad); err == nil {
+			t.Errorf("TIMEOUT_HOOK=%q must be rejected", bad)
+		}
 	}
 }

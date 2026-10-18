@@ -17,10 +17,10 @@ import (
 const (
 	testDir     = "/srv/deploy/myproject"
 	testKeyPath = "/etc/cvctl/keys/deploy.key"
-	testSSHCmd  = "GIT_SSH_COMMAND=ssh -i /etc/cvctl/keys/deploy.key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/etc/cvctl/keys/known_hosts"
+	testSSHCmd  = "GIT_SSH_COMMAND=ssh -i /etc/cvctl/keys/deploy.key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/etc/cvctl/keys/known_hosts -o BatchMode=yes -o ConnectTimeout=20"
 )
 
-var defaultExpectedEnv = []string{"LC_ALL=C", testSSHCmd}
+var defaultExpectedEnv = []string{"LC_ALL=C", "GIT_TERMINAL_PROMPT=0", testSSHCmd}
 
 func assertEnv(t *testing.T, got, want []string) {
 	t.Helper()
@@ -81,7 +81,7 @@ func TestCloneNoKeyPath(t *testing.T) {
 		t.Fatalf("expected 1 call, got %d", len(run.Calls))
 	}
 	call := run.Calls[0]
-	assertEnv(t, call.Env, []string{"LC_ALL=C"})
+	assertEnv(t, call.Env, []string{"LC_ALL=C", "GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=20"})
 }
 
 func TestFetchReturnsCommit(t *testing.T) {
@@ -541,7 +541,7 @@ func TestRejectBadKeyPath(t *testing.T) {
 func TestSSHCommandEnvExact(t *testing.T) {
 	keyPath := "/var/lib/cvctl/instances/proj-dev/deploy.key"
 	expectedKnownHosts := filepath.Join("/var/lib/cvctl/instances/proj-dev", "known_hosts")
-	expectedSSHCmd := "GIT_SSH_COMMAND=ssh -i " + keyPath + " -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=" + expectedKnownHosts
+	expectedSSHCmd := "GIT_SSH_COMMAND=ssh -i " + keyPath + " -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=" + expectedKnownHosts + " -o BatchMode=yes -o ConnectTimeout=20"
 
 	run := &systest.Runner{}
 	repo := &gitrepo.Repo{
@@ -561,7 +561,7 @@ func TestSSHCommandEnvExact(t *testing.T) {
 	if len(run.Calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(run.Calls))
 	}
-	assertEnv(t, run.Calls[0].Env, []string{"LC_ALL=C", expectedSSHCmd})
+	assertEnv(t, run.Calls[0].Env, []string{"LC_ALL=C", "GIT_TERMINAL_PROMPT=0", expectedSSHCmd})
 }
 
 func TestCloneDirNotEmpty(t *testing.T) {

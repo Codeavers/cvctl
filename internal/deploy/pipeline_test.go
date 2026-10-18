@@ -1100,8 +1100,8 @@ func TestManualRollbackSetsPausedWantHash(t *testing.T) {
 	rig := setupTestRig(t, "dev", "demo-dev")
 	currCommit := "1111111111111111111111111111111111111111"
 	oldCommit := "0000000000000000000000000000000000000000"
-	currDesired := state.Desired{InfraCommit: currCommit, Digests: map[string]string{"api": "sha256:111"}}
-	oldDesired := state.Desired{InfraCommit: oldCommit, Digests: map[string]string{"api": "sha256:000"}}
+	currDesired := state.Desired{InfraCommit: currCommit, Digests: map[string]string{"api": "sha256:" + strings.Repeat("1", 64)}}
+	oldDesired := state.Desired{InfraCommit: oldCommit, Digests: map[string]string{"api": "sha256:" + strings.Repeat("0", 64)}}
 
 	st := &state.State{
 		Instance: "demo-dev",
@@ -2776,8 +2776,8 @@ func testBackupTarget() *render.BackupTarget {
 func TestRollbackRewritesBackupEnv(t *testing.T) {
 	rig := setupTestRig(t, "dev", "demo-dev")
 	rig.deployer.Backup = testBackupTarget()
-	curr := state.Desired{InfraCommit: "1111111111111111111111111111111111111111", Digests: map[string]string{"api": "sha256:111"}}
-	prev := state.Desired{InfraCommit: "0000000000000000000000000000000000000000", Digests: map[string]string{"api": "sha256:000"}}
+	curr := state.Desired{InfraCommit: "1111111111111111111111111111111111111111", Digests: map[string]string{"api": "sha256:" + strings.Repeat("1", 64)}}
+	prev := state.Desired{InfraCommit: "0000000000000000000000000000000000000000", Digests: map[string]string{"api": "sha256:" + strings.Repeat("0", 64)}}
 	if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusOK, Current: &curr, Previous: &prev}); err != nil {
 		t.Fatal(err)
 	}

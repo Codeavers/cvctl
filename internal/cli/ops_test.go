@@ -1017,10 +1017,11 @@ services:
   media:
     labels:
       cvctl.kind: s3
-      cvctl.version: "2024"
+      cvctl.version: "RELEASE.2026-09-16T00-00-00Z"
       cvctl.env: S3
       cvctl.expose: "9000"
       cvctl.backup: none
+      cvctl.external: allowed
 x-cvctl:
   health:
     service: web
@@ -1061,7 +1062,7 @@ func writeStatusInstance(t *testing.T, tmp, inst, envName, mode string) {
 		Services: map[string]instance.ServiceDecision{
 			"media": {
 				Mode:    mode,
-				Version: "2024",
+				Version: "RELEASE.2026-09-16T00-00-00Z",
 				Creds: kinds.Credentials{
 					User:        "media",
 					Password:    "mediapassword1234567890123456",
@@ -1075,6 +1076,9 @@ func writeStatusInstance(t *testing.T, tmp, inst, envName, mode string) {
 					"access_key": "extkey",
 					"secret_key": "extsecret",
 					"bucket":     "extbucket",
+
+					"bucket_assets": "ext-assets", "bucket_products": "ext-products", "bucket_private": "ext-private",
+					"public_url_assets": "https://assets.example.com", "public_url_products": "https://products.example.com",
 				},
 			},
 		},

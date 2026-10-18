@@ -45,7 +45,7 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 
 	p, err := contract.Load(infraDir, cat)
 	if err != nil {
-		return err
+		return instance.WrapLoadErr(err)
 	}
 
 	dec, err := instance.Read(cvctlEnvPath, p)
@@ -63,6 +63,9 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 	}
 	for k, v := range target.Digests {
 		dec.Digests[k] = v
+	}
+	if err := instance.Verify(infraDir, p, dec, cat, true); err != nil {
+		return err
 	}
 
 	finalOverridePath := filepath.Join(instDir, "compose.cvctl.yml")

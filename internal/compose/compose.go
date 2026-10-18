@@ -2,12 +2,15 @@ package compose
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/sys"
@@ -44,6 +47,13 @@ func (p Project) Cmd(args ...string) sys.Cmd {
 		Args: append(baseArgs, args...),
 		Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
 	}
+}
+
+// hookSuffix is a variable so tests can pin the container name.
+var hookSuffix = func() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func (p Project) composeErr(cmd sys.Cmd, res sys.Result, runErr error) *output.Error {
@@ -83,8 +93,17 @@ func (p Project) UpData(ctx context.Context, services []string) error {
 }
 
 func (p Project) RunHook(ctx context.Context, service, script string) (sys.Result, error) {
-	cmd := p.Cmd("run", "--rm", "--no-deps", "-T", "--entrypoint", "sh", service, "-c", script)
+	// The name lets us remove the container: killing the docker CLI on timeout
+	// or cancel leaves the run container alive.
+	name := p.Instance + "-hook-" + hookSuffix()
+	cmd := p.Cmd("run", "--rm", "--no-deps", "-T", "--name", name, "--entrypoint", "sh", service, "-c", script)
 	res, err := p.Run.Run(ctx, cmd)
+	if ctx.Err() != nil {
+		rmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		rm := sys.Cmd{Name: "docker", Args: []string{"rm", "-f", name}, Env: cmd.Env}
+		_, _ = p.Run.Run(rmCtx, rm)
+	}
 	if err != nil || res.ExitCode != 0 {
 		return res, sys.CmdErr("E_HOOK_FAILED", cmd, res, err, fmt.Sprintf("see the command output; check the hook script for %s", service))
 	}

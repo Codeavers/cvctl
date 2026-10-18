@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/codeavers/cvctl/internal/envspec"
 	"github.com/codeavers/cvctl/internal/output"
@@ -23,6 +24,9 @@ func exposedApp(p *Project, name string) bool {
 	}
 	return false
 }
+
+// MaxHookTimeout caps x-cvctl.hooks[].timeout.
+const MaxHookTimeout = 2 * time.Hour
 
 // Validate checks the contract rules. A nil spec skips the env checks (the
 // caller reports the missing or invalid spec itself). The result is sorted by
@@ -209,6 +213,12 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 			if !isApp[h.Service] {
 				add("E_CONTRACT_HOOK_SERVICE", h.Service, fmt.Sprintf("hook service %q is not an app service", h.Service),
 					"point the hook at a service labelled cvctl.role")
+			}
+			if h.Timeout != "" {
+				if d, err := time.ParseDuration(h.Timeout); err != nil || d <= 0 || d > MaxHookTimeout {
+					add("E_CONTRACT_HOOK_TIMEOUT", h.Service, fmt.Sprintf("hook timeout %q must be a Go duration above 0 and at most %s", h.Timeout, MaxHookTimeout),
+						"use a duration such as 10m")
+				}
 			}
 		}
 	}
