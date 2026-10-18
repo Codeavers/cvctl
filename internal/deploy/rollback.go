@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/instance"
@@ -13,6 +14,22 @@ import (
 	"github.com/codeavers/cvctl/internal/render"
 	"github.com/codeavers/cvctl/internal/state"
 )
+
+// swapOrRestore runs executeSwap and, when it fails, checks out current again
+// so infra/ never stays at a revision that was not installed, as DeployLocked
+// does before promotion.
+func (d *Deployer) swapOrRestore(ctx context.Context, inst string, target, current *state.Desired, appEnv map[string]string, appEnvAbsent bool) error {
+	err := d.executeSwap(ctx, inst, target, appEnv, appEnvAbsent)
+	if err == nil || !hasInfra(current) {
+		return err
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	defer cancel()
+	if rErr := d.checkout(rctx, inst, *current); rErr != nil {
+		return fmt.Errorf("%w; restore checkout failed: %v", err, rErr)
+	}
+	return err
+}
 
 // executeSwap performs checkout, render, promotion, Up, and health check for target state.
 func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.Desired, appEnv map[string]string, appEnvAbsent bool) error {
@@ -190,7 +207,7 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 		return Result{}, err
 	}
 
-	swapErr := d.executeSwap(ctx, inst, target, existingEnv, false)
+	swapErr := d.swapOrRestore(ctx, inst, target, st.Current, existingEnv, false)
 	if swapErr != nil {
 		st.Status = state.StatusFailed
 		st.RollbackFailed = true

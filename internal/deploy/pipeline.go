@@ -412,7 +412,7 @@ func (d *Deployer) interrupted(ctx context.Context, inst string, st *state.State
 		rbCtx, cancel := withStepTimeout(context.WithoutCancel(ctx), rb.cap, "rollback")
 		defer cancel()
 		target := *st.Current
-		if err := d.executeSwap(rbCtx, inst, &target, rb.env, rb.absent); err != nil {
+		if err := d.swapOrRestore(rbCtx, inst, &target, st.Current, rb.env, rb.absent); err != nil {
 			detail := stepErrText(rbCtx, err)
 			st.Status = state.StatusFailed
 			st.Promoted = false
@@ -526,7 +526,7 @@ func (d *Deployer) handlePromoteFailure(ctx context.Context, inst string, st *st
 	d.cleanupStaging(stagingDir, stagingOverride, stagingAppEnv, stagingRoute)
 	restoreMsg := ""
 	if st.Current != nil {
-		if rErr := d.executeSwap(ctx, inst, st.Current, existingEnv, appEnvAbsent); rErr != nil {
+		if rErr := d.swapOrRestore(ctx, inst, st.Current, st.Current, existingEnv, appEnvAbsent); rErr != nil {
 			restoreMsg = fmt.Sprintf("; restore to %s failed: %v", RevShort(*st.Current), rErr)
 		} else {
 			restoreMsg = fmt.Sprintf("; restored to %s", RevShort(*st.Current))
@@ -675,14 +675,17 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		}
 	}()
 
-	if err := d.checkout(ctx, inst, want); err != nil {
-		return Result{}, err
-	}
-
 	instDir := filepath.Join(d.deployRoot(), inst)
 	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
 
 	cvSecrets := d.cvctlSecrets(cvctlEnvPath)
+	if err := d.checkout(ctx, inst, want); err != nil {
+		var ice *invalidContractError
+		if errors.As(err, &ice) {
+			return d.failPermanent(ctx, inst, st, want, deployID, actor, now, ice.Error(), cvSecrets)
+		}
+		return Result{}, err
+	}
 	d0, err := instance.Read(cvctlEnvPath, &contract.Project{})
 	if err != nil {
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("cannot read %s: %v", cvctlEnvPath, err), cvSecrets)
@@ -1212,7 +1215,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 
 	rollbackTarget := *st.Current
-	rollbackErr := d.executeSwap(rbCtx, inst, &rollbackTarget, rollbackEnv, false)
+	rollbackErr := d.swapOrRestore(rbCtx, inst, &rollbackTarget, st.Current, rollbackEnv, false)
 
 	st.Status = state.StatusFailed
 	st.FailedHash = want.Hash()

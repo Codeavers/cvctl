@@ -441,3 +441,56 @@ func TestOCIDevSourceSkipsFetchWhenCached(t *testing.T) {
 		t.Fatalf("Desired fetched instead of using the cache: %v", res.calls)
 	}
 }
+
+func TestInstallContractInvalidLeavesInfraUnchanged(t *testing.T) {
+	rig, fc, dgA, _ := ociRig(t)
+	if res, err := rig.deployer.Deploy(context.Background(), "demo-dev", ociDesired(dgA), Options{Actor: "agent"}); err != nil || res.Status != state.StatusOK {
+		t.Fatalf("deploy A: %+v %v", res, err)
+	}
+	dgBad := "sha256:" + strings.Repeat("e", 64)
+	fc.by[dgBad] = map[string][]byte{"compose.yml": []byte(sampleComposeYAML + "    privileged: true\n"), "env.spec.yml": []byte(sampleEnvSpecYAML)}
+	err := rig.deployer.installContract(context.Background(), "demo-dev", "ghcr.io/org/demo-infra", dgBad)
+	if err == nil || !strings.Contains(err.Error(), "E_CONTRACT_FIELD_FORBIDDEN") {
+		t.Fatalf("installContract err = %v", err)
+	}
+	if got := string(mustRead(t, filepath.Join(rig.infraDir, "compose.yml"))); got != sampleComposeYAML {
+		t.Fatalf("infra/ changed: %q", got)
+	}
+	want := ociDesired(dgBad)
+	res, _ := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	st, lerr := rig.store.Load("demo-dev")
+	if res.Status != state.StatusFailed || lerr != nil || st.FailedHash != want.Hash() || st.Current.InfraDigest != dgA {
+		t.Fatalf("res %+v state %+v %v", res, st, lerr)
+	}
+}
+
+// A rollback whose target fails validation after checkout leaves infra/ at
+// Current, not at the rejected revision.
+func TestRollbackToForbiddenTargetRestoresCurrent(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	cur := defaultDesired()
+	bad := defaultDesired()
+	bad.InfraCommit = strings.Repeat("9", 40)
+	rig.repo.onCheckout = func(commit string) {
+		c := sampleComposeYAML
+		if commit == bad.InfraCommit {
+			c += "    privileged: true\n"
+		}
+		if err := os.WriteFile(filepath.Join(rig.infraDir, "compose.yml"), []byte(c), 0o644); err != nil {
+			t.Error(err)
+		}
+	}
+	if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusOK, Current: &cur, Previous: &bad}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := rig.deployer.Rollback(context.Background(), "demo-dev", nil, "cli")
+	if err != nil || res.Status != state.StatusFailed || !strings.Contains(res.Detail, "E_CONTRACT_FIELD_FORBIDDEN") {
+		t.Fatalf("rollback: %+v %v", res, err)
+	}
+	if got := string(mustRead(t, filepath.Join(rig.infraDir, "compose.yml"))); got != sampleComposeYAML {
+		t.Fatalf("infra/ left at the rejected target: %q", got)
+	}
+	if n := len(rig.repo.checkouts); n < 2 || rig.repo.checkouts[n-1] != cur.InfraCommit {
+		t.Fatalf("checkouts = %v", rig.repo.checkouts)
+	}
+}

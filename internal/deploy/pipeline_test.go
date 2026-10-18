@@ -181,9 +181,10 @@ type testRig struct {
 }
 
 type fakeDeployRepo struct {
-	mu        sync.Mutex
-	checkouts []string
-	failAt    map[string]error
+	mu         sync.Mutex
+	checkouts  []string
+	failAt     map[string]error
+	onCheckout func(commit string)
 }
 
 func (r *fakeDeployRepo) Checkout(_ context.Context, commit string) error {
@@ -192,6 +193,9 @@ func (r *fakeDeployRepo) Checkout(_ context.Context, commit string) error {
 	r.checkouts = append(r.checkouts, commit)
 	if err, ok := r.failAt[commit]; ok {
 		return err
+	}
+	if r.onCheckout != nil {
+		r.onCheckout(commit)
 	}
 	return nil
 }

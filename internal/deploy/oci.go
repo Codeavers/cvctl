@@ -170,13 +170,21 @@ func (d *Deployer) installContract(ctx context.Context, inst, ref, digest string
 		}
 		return RegistryHint(d.tokenHost(), ref, err)
 	}
-	// An invalid contract is still extracted so the pipeline reports it; only
-	// validated contracts are cached.
-	if _, verr := ValidateContract(c, cat); verr == nil {
-		_ = cache.Put(c)
+	// An invalid contract never reaches infra/: the restore paths rely on
+	// infra/ still holding the last installed revision.
+	if _, verr := ValidateContract(c, cat); verr != nil {
+		return &invalidContractError{err: verr}
 	}
+	_ = cache.Put(c)
 	return infraoci.Extract(d.fs(), instDir, c)
 }
+
+// invalidContractError marks a fetched contract that failed validation, a
+// permanent failure for that desired state.
+type invalidContractError struct{ err error }
+
+func (e *invalidContractError) Error() string { return e.err.Error() }
+func (e *invalidContractError) Unwrap() error { return e.err }
 
 func (d *Deployer) instanceEnv(instDir string) map[string]string {
 	raw, err := d.fs().ReadFile(filepath.Join(instDir, "cvctl.env"))
