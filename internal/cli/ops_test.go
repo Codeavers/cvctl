@@ -65,6 +65,10 @@ type opsStubCompose struct {
 func (c *opsStubCompose) Config(_ context.Context) error             { return nil }
 func (c *opsStubCompose) Pull(_ context.Context, _ ...string) error  { return nil }
 func (c *opsStubCompose) UpData(_ context.Context, _ []string) error { return nil }
+func (c *opsStubCompose) ExecScript(_ context.Context, _, _ string) (sys.Result, error) {
+	return sys.Result{}, nil
+}
+
 func (c *opsStubCompose) RunHook(_ context.Context, _, _ string) (sys.Result, error) {
 	return sys.Result{ExitCode: 0}, nil
 }

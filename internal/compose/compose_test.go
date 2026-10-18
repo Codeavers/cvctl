@@ -2,8 +2,10 @@ package compose
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/codeavers/cvctl/internal/output"
@@ -110,6 +112,39 @@ func TestRunHookArgs(t *testing.T) {
 	}
 	if len(runner.Calls) != 1 || runner.Calls[0].String() != expectedCmd.String() {
 		t.Fatalf("expected call %q, got: %+v", expectedCmd.String(), runner.Calls)
+	}
+}
+
+func TestExecScriptSendsScriptOnStdin(t *testing.T) {
+	runner := &systest.Runner{}
+	p := Project{Run: runner, Instance: "demo-dev", Dir: "/srv/deploy/demo-dev"}
+	expected := p.Cmd("exec", "-T", "media", "sh", "-s")
+	runner.On(expected.String(), sys.Result{Stdout: []byte("ok\n")})
+
+	res, err := p.ExecScript(context.Background(), "media", "echo s3cr3t-value\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(res.Stdout) != "ok\n" {
+		t.Fatalf("stdout = %q", res.Stdout)
+	}
+	if len(runner.Calls) != 1 || string(runner.Calls[0].Stdin) != "echo s3cr3t-value\n" {
+		t.Fatalf("script not on stdin: %+v", runner.Calls)
+	}
+	if strings.Contains(runner.Calls[0].String(), "s3cr3t-value") {
+		t.Fatal("script content leaked into argv")
+	}
+}
+
+func TestExecScriptFailure(t *testing.T) {
+	runner := &systest.Runner{}
+	p := Project{Run: runner, Instance: "demo-dev", Dir: "/srv/deploy/demo-dev"}
+	runner.On(p.Cmd("exec", "-T", "media", "sh", "-s").String(), sys.Result{Stderr: []byte("mc: bad\n"), ExitCode: 1})
+
+	_, err := p.ExecScript(context.Background(), "media", "false\n")
+	var outErr *output.Error
+	if !errors.As(err, &outErr) || outErr.Code != "E_COMPOSE_FAILED" || !strings.Contains(outErr.Message, "mc: bad") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
