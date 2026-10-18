@@ -117,6 +117,9 @@ type Snapshot struct {
 	Strategy string `json:"strategy"`
 	ID       string `json:"id"`
 	Time     string `json:"time"`
+	// Repo names an older restic repository (r<index>) the snapshot lives in;
+	// empty is the current one.
+	Repo string `json:"repo,omitempty"`
 }
 
 type Runner struct {
@@ -295,11 +298,13 @@ func (r *Runner) forInstance(ctx context.Context, inst string, p *contract.Proje
 	if _, err := rr.backupNet(ctx, inst); err != nil {
 		return nil, err
 	}
-	if err := ProvisionUser(ctx, rr.Run, rr.Host, inst); err != nil {
+	if userStep, err := provisionUser(ctx, rr.Run, rr.Host, inst); err != nil {
 		var oe *output.Error
 		if errors.As(err, &oe) {
 			oe.Message = rr.redact(oe.Message)
-			oe.Hint = "deploy the instance first: cvctl deploy " + inst
+			if userStep {
+				oe.Hint = "deploy the instance first: cvctl deploy " + inst
+			}
 		}
 		return nil, err
 	}
@@ -384,6 +389,26 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 		}
 	}
 	return results, nil
+}
+
+// BackupService backs up one target of inst without recording the outcome:
+// the caller holds the instance lock (project update right after moving the
+// instance to its own keys, so the new generation or repository is
+// restorable on its own).
+func (r *Runner) BackupService(ctx context.Context, inst, svc string) error {
+	if r.Host == nil {
+		return notConfigured()
+	}
+	r, ts, err := r.targets(ctx, inst, svc)
+	if err != nil {
+		return err
+	}
+	tctx, cancel := context.WithTimeout(ctx, backupTimeout)
+	defer cancel()
+	if ts[0].Strategy == StrategyWalG {
+		return r.walgBackup(tctx, inst, ts[0])
+	}
+	return r.resticBackup(tctx, inst, ts[0])
 }
 
 // List returns the backups of one service, or of every target when svc is empty.

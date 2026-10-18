@@ -26,6 +26,7 @@ type fakeData struct {
 	store        *state.Store
 	log          *[]string
 	restoreErr   error
+	backupErr    error
 	pushErr      error
 	afterRestore func()
 	removeErr    error
@@ -67,6 +68,11 @@ func (f *fakeData) RemoveVolume(_ context.Context, volume string) error {
 func (f *fakeData) BaseBackup(_ context.Context, _, svc string) error {
 	*f.log = append(*f.log, "push "+svc)
 	return f.pushErr
+}
+
+func (f *fakeData) BackupService(_ context.Context, _, svc string) error {
+	*f.log = append(*f.log, "backup "+svc)
+	return f.backupErr
 }
 
 const restoreEnvBase = `CVCTL_INSTANCE=demo-dev
@@ -446,7 +452,7 @@ func TestUpdateStripsCredentialsFromRecordedURL(t *testing.T) {
 	if strings.Contains(string(raw), "ghp_SECRET") || !strings.Contains(string(raw), "CVCTL_INFRA_URL=https://github.com/org/demo-infra.git") {
 		t.Fatalf("cvctl.env:\n%s", raw)
 	}
-	if len(res.Warnings) != 1 || strings.Contains(res.Warnings[0], "ghp_SECRET") {
+	if len(res.Warnings) == 0 || res.Warnings[0] != strippedURLWarning || strings.Contains(strings.Join(res.Warnings, " "), "ghp_SECRET") {
 		t.Fatalf("warnings: %v", res.Warnings)
 	}
 }
@@ -471,7 +477,7 @@ func TestAddStripsCredentialsFromStoredURL(t *testing.T) {
 	if strings.Contains(string(raw), "ghp_SECRET") || !strings.Contains(string(raw), "CVCTL_INFRA_URL=https://github.com/org/repo-infra.git") {
 		t.Fatalf("cvctl.env:\n%s", raw)
 	}
-	if len(res.Warnings) != 1 || strings.Contains(res.Warnings[0], "ghp_SECRET") {
+	if len(res.Warnings) == 0 || res.Warnings[0] != strippedURLWarning || strings.Contains(strings.Join(res.Warnings, " "), "ghp_SECRET") {
 		t.Fatalf("warnings: %v", res.Warnings)
 	}
 }

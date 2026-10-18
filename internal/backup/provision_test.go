@@ -85,8 +85,14 @@ func TestBackupNowProvisionsInstanceUserOnSilo(t *testing.T) {
 	g.run.On(siloPS, sys.Result{})
 	_, err := g.r.BackupNow(context.Background(), "app-prod", "db")
 	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_BACKUP_PROVISION" || !strings.Contains(oe.Hint, "cvctl init") {
+		t.Fatalf("no silo keeps the silo hint: %v", err)
+	}
+	g.run.On(siloPS, sys.Result{Stdout: []byte("silo1\n")})
+	g.run.On("docker exec -i silo1 sh -s", sys.Result{ExitCode: 1, Stderr: []byte("denied")})
+	_, err = g.r.BackupNow(context.Background(), "app-prod", "db")
 	if !errors.As(err, &oe) || oe.Code != "E_BACKUP_PROVISION" || oe.Hint != "deploy the instance first: cvctl deploy app-prod" {
-		t.Fatalf("got %v", err)
+		t.Fatalf("user step failed: %v", err)
 	}
 }
 
@@ -119,5 +125,80 @@ func TestRestoreFreshOfOldGenerationUsesHostKey(t *testing.T) {
 		if !strings.Contains(env, "WALG_LIBSODIUM_KEY="+tc.want+"\n") || !strings.Contains(env, "AWS_ACCESS_KEY_ID=bk-app-prod\n") {
 			t.Fatalf("gen %d env:\n%s", tc.gen, env)
 		}
+	}
+}
+
+const resticSnaps = "docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-files.env restic/restic:0.19.1 snapshots --json"
+
+func movedRestic(t *testing.T, g *restoreRig) {
+	t.Helper()
+	_, d, _ := g.r.Load("app-prod")
+	instanceKeys(d)
+	sd := d.Services["files"]
+	sd.BackupKeyGen = 1
+	d.Services["files"] = sd
+}
+
+func TestResticRestoreFallsBackToHostRepository(t *testing.T) {
+	g := newRestoreRig(t)
+	movedRestic(t, g)
+	p, d, _ := g.r.Load("app-prod")
+	vol := "app-prod_files-data"
+	g.run.On("docker volume inspect "+vol, sys.Result{ExitCode: 1})
+	g.run.On(resticSnaps, sys.Result{Stdout: []byte("[]")})
+	if err := g.r.RestoreFresh(context.Background(), "app-prod", "files", p, d, vol); err != nil {
+		t.Fatal(err)
+	}
+	if g.index(resticSnaps) < 0 || g.index(resticSnaps) > g.index("docker run --rm --network app-prod_backup -v "+vol+":/restore") {
+		t.Fatalf("r1 must be checked before restoring: %v", g.calls())
+	}
+	body, _ := g.fs.ReadFile("/srv/deploy/app-prod/restic-files.env")
+	env := string(body)
+	if !strings.Contains(env, "/app-prod/files\n") || strings.Contains(env, "/r1") || !strings.Contains(env, "RESTIC_PASSWORD="+resticPass+"\n") {
+		t.Fatalf("restore must read r0 with the host password:\n%s", env)
+	}
+}
+
+func TestResticRestoreUsesNewRepositoryWhenItHasSnapshots(t *testing.T) {
+	g := newRestoreRig(t)
+	movedRestic(t, g)
+	p, d, _ := g.r.Load("app-prod")
+	vol := "app-prod_files-data"
+	g.run.On("docker volume inspect "+vol, sys.Result{ExitCode: 1})
+	g.run.On(resticSnaps, sys.Result{Stdout: []byte(`[{"short_id":"abcd1234","time":"2026-01-01T00:00:00Z"}]`)})
+	if err := g.r.RestoreFresh(context.Background(), "app-prod", "files", p, d, vol); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := g.fs.ReadFile("/srv/deploy/app-prod/restic-files.env")
+	if !strings.Contains(string(body), "/app-prod/files/r1\n") || !strings.Contains(string(body), "RESTIC_PASSWORD=INST-RESTIC-1\n") {
+		t.Fatalf("restore must read r1 with the instance password:\n%s", body)
+	}
+}
+
+func TestResticListTagsOlderRepository(t *testing.T) {
+	g := newRestoreRig(t)
+	movedRestic(t, g)
+	g.run.On(resticSnaps, sys.Result{Stdout: []byte(`[{"short_id":"abcd1234","time":"2026-01-01T00:00:00Z"}]`)})
+	snaps, err := g.r.List(context.Background(), "app-prod", "files")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps) != 2 || snaps[0].Repo != "" || snaps[1].Repo != "r0" {
+		t.Fatalf("snaps: %+v", snaps)
+	}
+}
+
+func TestRestoreHintNamesHostKeyBelowKeyGen(t *testing.T) {
+	g := newRestoreRig(t)
+	_, d, _ := g.r.Load("app-prod")
+	instanceKeys(d)
+	sd := d.Services["db"]
+	sd.BackupGen, sd.BackupGenMax, sd.BackupKeyGen = 3, 3, 3
+	d.Services["db"] = sd
+	g.run.OnPrefix("docker compose -p app-prod", sys.Result{Stdout: []byte(`[{"backup_name":"base_0000000100000000000000C3","time":"2026-01-02T01:00:00Z"}]`)})
+	_, err := g.r.Restore(context.Background(), "app-prod", "db", "2026-01-01T12:00:00Z")
+	var oe *output.Error
+	if !errors.As(err, &oe) || !strings.Contains(oe.Hint, "generations below 3 are encrypted with the host key (/etc/cvctl/secrets/walg_libsodium_key)") {
+		t.Fatalf("err=%v", err)
 	}
 }

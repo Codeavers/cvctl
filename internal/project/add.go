@@ -15,6 +15,7 @@ import (
 
 	"github.com/joho/godotenv"
 
+	"github.com/codeavers/cvctl/internal/backup"
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/deploy"
 	"github.com/codeavers/cvctl/internal/envspec"
@@ -89,6 +90,13 @@ func (e *Env) stateRoot() string {
 		return e.StateRoot
 	}
 	return "/var/lib/cvctl"
+}
+
+func (e *Env) storage() string {
+	if e.Host == nil {
+		return ""
+	}
+	return e.Host.Storage
 }
 
 func (e *Env) fs() sys.FS {
@@ -1014,7 +1022,7 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	for k, v := range opts.Domains {
 		d.Domains[k] = v
 	}
-	ext, err := takeBackupExt(d, p, opts.Ext)
+	ext, err := takeBackupExt(d, opts.Ext, e.storage(), true)
 	if err != nil {
 		cleanupInst()
 		return nil, err
@@ -1193,7 +1201,7 @@ func Update(ctx context.Context, e *Env, inst string, opts UpdateOptions) (*AddR
 		return nil, err
 	}
 
-	ext, err := takeBackupExt(d, p, opts.Ext)
+	ext, err := takeBackupExt(d, opts.Ext, e.storage(), len(backup.Targets(p, d)) == 0)
 	if err != nil {
 		return nil, err
 	}
@@ -1275,6 +1283,9 @@ func Update(ctx context.Context, e *Env, inst string, opts UpdateOptions) (*AddR
 	deployRes, err := runDeploy(ctx, e, repo, d, "cli:project-update", locked)
 	if err != nil {
 		return nil, err
+	}
+	if newKeys {
+		warnings = append(warnings, afterKeyMigration(ctx, e, d, p, deployRes)...)
 	}
 
 	return &AddResult{

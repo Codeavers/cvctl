@@ -216,7 +216,11 @@ func newBackupListCmd() *cobra.Command {
 				tw := tabwriter.NewWriter(w, 0, 8, 2, ' ', 0)
 				fmt.Fprintln(tw, "SERVICE\tSTRATEGY\tID\tTIME")
 				for _, s := range snaps {
-					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", s.Service, s.Strategy, s.ID, s.Time)
+					id := s.ID
+					if s.Repo != "" {
+						id += " (repo " + s.Repo + ")"
+					}
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", s.Service, s.Strategy, id, s.Time)
 				}
 				tw.Flush()
 			})

@@ -32,6 +32,9 @@ type DataRestorer interface {
 	RemoveVolume(ctx context.Context, volume string) error
 	// BaseBackup pushes a wal-g base backup of the running service.
 	BaseBackup(ctx context.Context, inst, svc string) error
+	// BackupService backs up one service now (wal-g base backup or restic
+	// snapshot) without recording it; the caller holds the instance lock.
+	BackupService(ctx context.Context, inst, svc string) error
 	// BucketGenerations returns the highest wal-g generation of svc holding
 	// any data and the highest holding a base backup (-1: none).
 	BucketGenerations(ctx context.Context, inst, svc string) (highestUsed, highestWithBase int, err error)

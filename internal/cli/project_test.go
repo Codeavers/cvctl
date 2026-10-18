@@ -549,6 +549,7 @@ func (cliFakeData) BucketGenerations(context.Context, string, string) (int, int,
 func (cliFakeData) BaseBackup(context.Context, string, string) error {
 	return nil
 }
+func (cliFakeData) BackupService(context.Context, string, string) error { return nil }
 
 type cliNoopCompose struct{}
 

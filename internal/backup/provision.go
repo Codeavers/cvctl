@@ -26,11 +26,18 @@ func BackupPolicy(inst string) string { return "cvctl-bk-" + inst }
 // unless t is a per-instance target on the local silo. The backup network must
 // exist already.
 func ProvisionUser(ctx context.Context, run sys.Runner, t *render.BackupTarget, inst string) error {
+	_, err := provisionUser(ctx, run, t, inst)
+	return err
+}
+
+// provisionUser also reports whether the silo was found and only the user
+// step failed.
+func provisionUser(ctx context.Context, run sys.Runner, t *render.BackupTarget, inst string) (bool, error) {
 	if t == nil || !t.Local || t.Instance == "" {
-		return nil
+		return false, nil
 	}
 	if run == nil {
-		return provisionErr(inst, "no command runner")
+		return false, provisionErr(inst, "no command runner")
 	}
 	ps := sys.Cmd{Name: "docker", Args: []string{
 		"ps",
@@ -40,11 +47,11 @@ func ProvisionUser(ctx context.Context, run sys.Runner, t *render.BackupTarget, 
 	}, Env: []string{dockerConfig}}
 	res, err := run.Run(ctx, ps)
 	if err != nil || res.ExitCode != 0 {
-		return provisionErr(inst, "cannot list the storage container: "+cmdDetail(res, err))
+		return false, provisionErr(inst, "cannot list the storage container: "+cmdDetail(res, err))
 	}
 	ids := strings.Fields(string(res.Stdout))
 	if len(ids) == 0 {
-		return provisionErr(inst, "the storage container is not running")
+		return false, provisionErr(inst, "the storage container is not running")
 	}
 	id := ids[0]
 	script := s3prov.BackupUserScript(t.AccessKey, t.SecretKey, t.Bucket, t.UserPrefix(inst), BackupPolicy(inst))
@@ -56,12 +63,12 @@ func ProvisionUser(ctx context.Context, run sys.Runner, t *render.BackupTarget, 
 				detail = strings.ReplaceAll(detail, s, "[REDACTED]")
 			}
 		}
-		return provisionErr(inst, "creating the backup user failed: "+detail)
+		return true, provisionErr(inst, "creating the backup user failed: "+detail)
 	}
 	if err := sys.ConnectNetwork(ctx, run, render.NetworkBackup(inst), id, siloAlias); err != nil {
-		return provisionErr(inst, err.Error())
+		return false, provisionErr(inst, err.Error())
 	}
-	return nil
+	return false, nil
 }
 
 func cmdDetail(res sys.Result, err error) string {

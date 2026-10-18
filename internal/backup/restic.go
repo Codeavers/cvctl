@@ -29,10 +29,8 @@ func (r *Runner) resticEnvPath(inst, svc string) string {
 }
 
 // writeResticEnv keeps the secrets out of argv: docker reads them from the file.
-func (r *Runner) writeResticEnv(inst, svc string) (string, error) {
-	b := r.Host
-	idx := b.ResticRepoIndex(svc)
-	env := b.ResticEnv(inst, svc, idx)
+func (r *Runner) writeResticEnv(inst, svc string, idx int) (string, error) {
+	env := r.Host.ResticEnv(inst, svc, idx)
 	if env["RESTIC_PASSWORD"] == "" {
 		return "", &output.Error{
 			Code:    "E_BACKUP_NOT_CONFIGURED",
@@ -62,7 +60,7 @@ func (r *Runner) resticCmd(inst, envFile, volume string, args ...string) sys.Cmd
 }
 
 func (r *Runner) resticBackup(ctx context.Context, inst string, t Target) error {
-	envFile, err := r.writeResticEnv(inst, t.Service)
+	envFile, err := r.writeResticEnv(inst, t.Service, r.Host.ResticRepoIndex(t.Service))
 	if err != nil {
 		return err
 	}
@@ -92,17 +90,46 @@ func (r *Runner) resticInit(ctx context.Context, inst, envFile string) error {
 	return err
 }
 
+// resticList lists the snapshots of the current repository and, after a move
+// to per-instance keys, of the older ones, tagged with their repository.
 func (r *Runner) resticList(ctx context.Context, inst string, t Target) ([]Snapshot, error) {
-	envFile, err := r.writeResticEnv(inst, t.Service)
+	cur := r.Host.ResticRepoIndex(t.Service)
+	var out []Snapshot
+	for i := cur; i >= 0; i-- {
+		snaps, err := r.resticRepoList(ctx, inst, t, i, cur > 0)
+		if err != nil {
+			return nil, err
+		}
+		if i < cur {
+			for k := range snaps {
+				snaps[k].Repo = fmt.Sprintf("r%d", i)
+			}
+		}
+		out = append(out, snaps...)
+	}
+	if out == nil {
+		out = []Snapshot{}
+	}
+	return out, nil
+}
+
+// resticRepoList lists repository idx; a missing repository is empty when
+// missingOK (a moved service's new repository before its first backup).
+func (r *Runner) resticRepoList(ctx context.Context, inst string, t Target, idx int, missingOK bool) ([]Snapshot, error) {
+	envFile, err := r.writeResticEnv(inst, t.Service, idx)
 	if err != nil {
 		return nil, err
 	}
 	if _, err := r.backupNet(ctx, inst); err != nil {
 		return nil, err
 	}
-	res, err := r.exec(ctx, r.resticCmd(inst, envFile, "", "snapshots", "--json"))
-	if err != nil {
-		return nil, err
+	cmd := r.resticCmd(inst, envFile, "", "snapshots", "--json")
+	res, err := r.Run.Run(ctx, cmd)
+	if err == nil && res.ExitCode == resticExitNoRepo && missingOK {
+		return nil, nil
+	}
+	if err != nil || res.ExitCode != 0 {
+		return nil, r.cmdFailed(cmd, res, err)
 	}
 	var raw []struct {
 		ShortID string `json:"short_id"`

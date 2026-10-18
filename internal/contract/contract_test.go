@@ -28,6 +28,7 @@ func TestValidateFixtures(t *testing.T) {
 		"unknown-kind":           "E_CONTRACT_UNKNOWN_KIND",
 		"bad-version":            "E_CONTRACT_KIND_VERSION",
 		"collision":              "E_CONTRACT_NAME_COLLISION",
+		"reserved-backup":        "E_CONTRACT_NAME_RESERVED",
 		"empty-http":             "E_CONTRACT_NO_HEALTH",
 		"bad-expose":             "E_CONTRACT_EXPOSE_INVALID",
 		"depends-data":           "E_CONTRACT_DEPENDS_ON_DATA",

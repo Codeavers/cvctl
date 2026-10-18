@@ -1325,7 +1325,32 @@ func TestStatusWarnsHostS3CredentialsForBackups(t *testing.T) {
 	if err := os.WriteFile(envPath, raw, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if code, out, _ := run(t, "status"); code != 0 || strings.Contains(out, want) {
+	const keysWarn = "demo-dev: backups use the host keys; run cvctl project update demo-dev"
+	if code, out, _ := run(t, "status"); code != 0 || strings.Contains(out, want) || !strings.Contains(out, "warning: "+keysWarn) {
 		t.Fatalf("per-instance credentials must silence the warning: code=%d out=%s", code, out)
+	}
+	raw = append(raw, []byte("CVCTL_BACKUP_LIBSODIUM_KEY=abcd\nCVCTL_BACKUP_RESTIC_PASSWORD=pw\n")...)
+	if err := os.WriteFile(envPath, raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, _ := run(t, "status"); code != 0 || strings.Contains(out, keysWarn) {
+		t.Fatalf("instance keys must silence the keys warning: code=%d out=%s", code, out)
+	}
+}
+
+func TestStatusWarnsHostKeysOnLocalStorage(t *testing.T) {
+	tmp, env := setupOpsFixture(t, "demo-dev")
+	writeStatusInstance(t, tmp, "demo-dev", "dev", "local")
+	compose := strings.Replace(statusS3Compose, "cvctl.backup: none", "cvctl.backup: volume", 1)
+	if err := os.WriteFile(filepath.Join(tmp, "demo-dev", "infra", "compose.yml"), []byte(compose), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env.Host = &hostcfg.Config{Storage: "local"}
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+	code, out, _ := run(t, "status")
+	if code != 0 || !strings.Contains(out, "warning: demo-dev: backups use the host keys; run cvctl project update demo-dev") || strings.Contains(out, "host S3 credentials") {
+		t.Fatalf("code=%d out=%s", code, out)
 	}
 }

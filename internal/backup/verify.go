@@ -310,7 +310,7 @@ func (r *Runner) waitRecovered(ctx context.Context, name, user, db string) error
 }
 
 func (r *Runner) resticVerify(ctx context.Context, inst string, t Target) error {
-	envFile, err := r.writeResticEnv(inst, t.Service)
+	envFile, err := r.writeResticEnv(inst, t.Service, r.Host.ResticRepoIndex(t.Service))
 	if err != nil {
 		return err
 	}
