@@ -59,7 +59,7 @@ chmod -R a+rX /tmp/infra.git
 (cd /tmp && sudo -u deployer env HOME=/srv/deploy git config --global --add safe.directory /tmp/infra.git)
 
 echo "=== 3. project add with a postgres service ==="
-add_res=$(cvctl project add file:///tmp/infra.git --name demo --env dev --non-interactive --set GREETING=hello --domain api=api.e2e.local --json)
+add_res=$(cvctl project add file:///tmp/infra.git --name demo --env dev --non-interactive --set GREETING=hello --domain api=api.e2e.local --domain media=media.e2e.local --json)
 echo "$add_res"
 test "$(echo "$add_res" | jq -r '.ok')" = "true"
 test "$(echo "$add_res" | jq -r '.data.status')" = "OK"

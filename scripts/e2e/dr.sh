@@ -80,10 +80,18 @@ chmod -R a+rX /tmp/infra.git
 (cd /tmp && sudo -u deployer env HOME=/srv/deploy git config --global --add safe.directory /tmp/infra.git)
 
 echo "=== 2. project add, rows A and B, backup now, row C ==="
-add_res=$(cvctl project add file:///tmp/infra.git --name demo --env dev --non-interactive --set GREETING=hello --domain api=api.e2e.local --json)
+# media runs external against ext-s3: pub is public (anonymous download), priv is private, and
+# pub2 is public by name only (no anonymous policy) to make the public-URL probe fail later.
+mcx mb --ignore-existing ext/cvctl-e2e-pub ext/cvctl-e2e-priv ext/cvctl-e2e-pub2 >/dev/null
+mcx anonymous set download ext/cvctl-e2e-pub >/dev/null
+add_res=$(cvctl project add file:///tmp/infra.git --name demo --env dev --non-interactive --set GREETING=hello --domain api=api.e2e.local \
+  --ext "media.endpoint=http://${S3_IP}:9000" --ext "media.access_key=${S3_ACCESS}" --ext "media.secret_key=${S3_SECRET}" \
+  --ext media.region=us-east-1 --ext media.bucket_pub=cvctl-e2e-pub --ext media.bucket_priv=cvctl-e2e-priv \
+  --ext "media.public_url_pub=http://${S3_IP}:9000/cvctl-e2e-pub" --json)
 echo "$add_res"
 test "$(echo "$add_res" | jq -r '.ok')" = "true"
 test "$(echo "$add_res" | jq -r '.data.status')" = "OK"
+grep -q '^CVCTL_SVC_MEDIA_MODE=external$' "/srv/deploy/${INST}/cvctl.env"
 test -n "$(dbc)"
 psql_db "insert into items (name) values ('A')" >/dev/null
 psql_db "insert into items (name) values ('B')" >/dev/null
@@ -176,7 +184,20 @@ echo "Health response: $greeting"
 test "$greeting" = "ok hello"
 echo "Assert 8: app healthy after restore"
 
-echo "=== 9. No secret value in journal, status, history or this script's output ==="
+echo "=== 9. External buckets: probe passed, status warns, a broken public URL fails the deploy ==="
+cvctl status --json | jq -e '[.data.warnings[]? | select(contains("media is external"))] | length == 1'
+echo "Assert 9: status warns that media is external (deploys above passed the bucket probe)"
+res=$(cvctl project update "$INST" --ext "media.public_url_pub=http://${S3_IP}:9000/cvctl-e2e-pub2" --json) || true
+echo "$res"
+cvctl history "$INST" --json | jq -e '[.data.history[] | (.detail // "") | select(contains("E_S3_PROBE") and contains("public-get"))] | length >= 1'
+test "$(cvctl status --json | jq -r --arg i "$INST" '.data.instances[] | select(.instance==$i) | .status')" = "FAILED"
+echo "Assert 10: a public URL that is not anonymously readable fails the probe"
+res=$(cvctl project update "$INST" --ext "media.public_url_pub=http://${S3_IP}:9000/cvctl-e2e-pub" --json) || { echo "$res"; false; }
+echo "$res" | jq -e '.ok == true'
+test "$(cvctl status --json | jq -r --arg i "$INST" '.data.instances[] | select(.instance==$i) | .status')" = "OK"
+echo "Assert 11: fixing the public URL deploys again"
+
+echo "=== 12. No secret value in journal, status, history or this script's output ==="
 cvctl status --json > /tmp/leak-status.json
 cvctl history "$INST" --json > /tmp/leak-history.json
 journalctl --no-pager > /tmp/leak-journal.txt 2>&1 || true
@@ -200,6 +221,6 @@ PY
     exit 1
   fi
 done
-echo "Assert 9: no secret in journal, status, history or script output"
+echo "Assert 12: no secret in journal, status, history or script output"
 
-echo "ALL 9 DR ASSERTS PASSED"
+echo "ALL 12 DR ASSERTS PASSED"
