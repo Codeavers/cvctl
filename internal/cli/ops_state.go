@@ -350,6 +350,7 @@ func (e *OpsEnv) s3Warnings(instances []string) []string {
 	for _, inst := range instances {
 		p, d, err := loader(inst)
 		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: %v", inst, err))
 			continue
 		}
 		if len(backup.Targets(p, d)) > 0 {

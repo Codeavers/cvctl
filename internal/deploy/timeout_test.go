@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
 )
@@ -151,7 +152,7 @@ func TestExecuteSwapRejectsForbiddenContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Status != state.StatusFailed || !strings.Contains(res.Detail, "E_CONTRACT_FIELD_FORBIDDEN") {
+	if res.Status != state.StatusFailed || !strings.HasPrefix(res.Detail, "E_DEPLOY_INVALID: E_CONTRACT_FIELD_FORBIDDEN: ") {
 		t.Fatalf("expected a failed rollback naming the forbidden field, got %+v", res)
 	}
 	if rig.compose.upCount != 0 {
@@ -173,5 +174,93 @@ func TestWithStepTimeoutNamesStep(t *testing.T) {
 	}
 	if TimeoutError(context.Background()) != nil {
 		t.Fatal("no error expected without a deadline")
+	}
+}
+
+func TestCancelDuringHealthRollsBack(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	seedCurrent(t, rig)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	healthCalls := 0
+	rig.deployer.Health = func(hctx context.Context, inst, override string) error {
+		healthCalls++
+		if healthCalls == 1 {
+			cancel()
+			return hctx.Err()
+		}
+		return nil
+	}
+
+	res, err := rig.deployer.Deploy(ctx, "demo-dev", defaultDesired(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != state.StatusOK {
+		t.Fatalf("expected OK after the rollback, got %+v", res)
+	}
+	if rig.compose.upCount != 2 || healthCalls != 2 {
+		t.Fatalf("expected the new release and then the rollback to come up and be checked, up=%d health=%d", rig.compose.upCount, healthCalls)
+	}
+	cur := "0000000000000000000000000000000000000000"
+	if n := len(rig.repo.checkouts); n == 0 || rig.repo.checkouts[n-1] != cur {
+		t.Fatalf("expected the current commit checked out last, got %v", rig.repo.checkouts)
+	}
+	st, _ := rig.store.Load("demo-dev")
+	if st.Status != state.StatusOK || st.Current.InfraCommit != cur || st.Promoted || st.RollbackFailed || st.FailedHash != "" {
+		t.Fatalf("inconsistent state after rollback: %+v", st)
+	}
+	hist, _ := rig.store.History("demo-dev", 5)
+	if len(hist) == 0 || hist[len(hist)-1].Kind != "interrupted" {
+		t.Fatalf("expected an interrupted history entry, got %v", hist)
+	}
+}
+
+func TestRecoverPromotedDeployingForcesRedeploy(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	cur := state.Desired{InfraCommit: "0000000000000000000000000000000000000000"}
+	if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusDeploying, PriorStatus: state.StatusOK, Promoted: true, Current: &cur, FailedHash: "stale"}); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := rig.store.RecoverInterrupted("demo-dev", rig.fixedNow)
+	if err != nil || !ok {
+		t.Fatalf("recover: ok=%v err=%v", ok, err)
+	}
+	st, _ := rig.store.Load("demo-dev")
+	if st.Status != state.StatusFailed || st.FailedHash != "" || !st.RollbackFailed || st.Promoted {
+		t.Fatalf("a promoted crash must end FAILED with an empty FailedHash: %+v", st)
+	}
+}
+
+func TestInterruptKeepsPriorStatus(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	cur := state.Desired{InfraCommit: "0000000000000000000000000000000000000000"}
+	if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusDeploying, PriorStatus: state.StatusFailed, Current: &cur}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rig.store.RecoverInterrupted("demo-dev", rig.fixedNow); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := rig.store.Load("demo-dev")
+	if st.Status != state.StatusFailed {
+		t.Fatalf("expected the prior FAILED status, got %s", st.Status)
+	}
+}
+
+func TestWaitTimeout(t *testing.T) {
+	p := &contract.Project{}
+	if got := waitTimeout(p); got != 150*time.Second {
+		t.Fatalf("default = %s, want 150s", got)
+	}
+	p.X.Health.Timeout = 90 * time.Second
+	if got := waitTimeout(p); got != 210*time.Second {
+		t.Fatalf("= %s, want 210s", got)
+	}
+	if got := rollbackCap(&contract.Project{}); got != 5*time.Minute {
+		t.Fatalf("rollback cap = %s, want 5m", got)
+	}
+	p.X.Health.Timeout = 10 * time.Minute
+	if got := rollbackCap(p); got != 12*time.Minute {
+		t.Fatalf("rollback cap = %s, want 12m", got)
 	}
 }

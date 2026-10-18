@@ -79,11 +79,21 @@ func (p Project) Pull(ctx context.Context, services ...string) error {
 	return nil
 }
 
-func (p Project) UpData(ctx context.Context, services []string) error {
+// DefaultWaitTimeout is the --wait-timeout when the caller gives none: the
+// default health timeout (30s) plus 2 minutes.
+const DefaultWaitTimeout = 150 * time.Second
+
+// UpData starts services and waits until healthy for at most waitTimeout
+// (DefaultWaitTimeout when zero), rounded up to whole seconds.
+func (p Project) UpData(ctx context.Context, services []string, waitTimeout time.Duration) error {
 	if len(services) == 0 {
 		return nil
 	}
-	args := append([]string{"up", "-d", "--wait"}, services...)
+	if waitTimeout <= 0 {
+		waitTimeout = DefaultWaitTimeout
+	}
+	secs := int((waitTimeout + time.Second - 1) / time.Second)
+	args := append([]string{"up", "-d", "--wait", "--wait-timeout", strconv.Itoa(secs)}, services...)
 	cmd := p.Cmd(args...)
 	res, err := p.Run.Run(ctx, cmd)
 	if err != nil || res.ExitCode != 0 {

@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/deploy"
@@ -1576,9 +1577,9 @@ func TestProjectAddInitialStateSavedBeforeDeploy(t *testing.T) {
 
 type noopCompose struct{}
 
-func (noopCompose) Config(context.Context) error           { return nil }
-func (noopCompose) Pull(context.Context, ...string) error  { return nil }
-func (noopCompose) UpData(context.Context, []string) error { return nil }
+func (noopCompose) Config(context.Context) error                          { return nil }
+func (noopCompose) Pull(context.Context, ...string) error                 { return nil }
+func (noopCompose) UpData(context.Context, []string, time.Duration) error { return nil }
 func (noopCompose) ExecScript(context.Context, string, string) (sys.Result, error) {
 	return sys.Result{}, nil
 }

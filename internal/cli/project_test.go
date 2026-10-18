@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/notify"
@@ -553,9 +554,9 @@ func (cliFakeData) BackupService(context.Context, string, string) error { return
 
 type cliNoopCompose struct{}
 
-func (cliNoopCompose) Config(context.Context) error           { return nil }
-func (cliNoopCompose) Pull(context.Context, ...string) error  { return nil }
-func (cliNoopCompose) UpData(context.Context, []string) error { return nil }
+func (cliNoopCompose) Config(context.Context) error                          { return nil }
+func (cliNoopCompose) Pull(context.Context, ...string) error                 { return nil }
+func (cliNoopCompose) UpData(context.Context, []string, time.Duration) error { return nil }
 func (cliNoopCompose) ExecScript(context.Context, string, string) (sys.Result, error) {
 	return sys.Result{}, nil
 }

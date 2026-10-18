@@ -97,7 +97,7 @@ func TestRestoreHappyPathOrder(t *testing.T) {
 		"docker stop -t 120 " + recName,
 		"docker rm -f " + recName,
 		"APPLY",
-		cp + "up -d --wait db",
+		cp + "up -d --wait --wait-timeout 150 db",
 		cp + "exec -T -u postgres db pg_isready -U app -d appdb",
 		cp + "exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select 1",
 		cp + "exec -T -u postgres db wal-g backup-push /var/lib/postgresql/data",
@@ -455,7 +455,7 @@ func TestRestoreBackupPushFailureIsWarningNotRollback(t *testing.T) {
 
 func TestRestoreRollsBackWhenDataServiceDoesNotServe(t *testing.T) {
 	for name, fail := range map[string]string{
-		"wait":     cp + "up -d --wait db",
+		"wait":     cp + "up -d --wait --wait-timeout 150 db",
 		"isready":  cp + "exec -T -u postgres db pg_isready",
 		"select 1": cp + "exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select 1",
 	} {

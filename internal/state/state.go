@@ -61,7 +61,10 @@ type State struct {
 	Instance string `json:"instance"`
 	Status   Status `json:"status"`
 	// PriorStatus is the status before DEPLOYING, so an interrupted deploy can return to it.
-	PriorStatus    Status                  `json:"prior_status,omitempty"`
+	PriorStatus Status `json:"prior_status,omitempty"`
+	// Promoted marks a DEPLOYING deploy past the point where files and
+	// containers may differ from Current.
+	Promoted       bool                    `json:"promoted,omitempty"`
 	Current        *Desired                `json:"current,omitempty"`
 	Previous       *Desired                `json:"previous,omitempty"`
 	FailedHash     string                  `json:"failed_hash,omitempty"`
@@ -145,6 +148,7 @@ func (s *Store) Load(inst string) (*State, error) {
 func (s *Store) Save(st *State) error {
 	if st.Status != StatusDeploying {
 		st.PriorStatus = ""
+		st.Promoted = false
 	}
 	instDir := filepath.Join(s.root, st.Instance)
 	if err := s.fs.MkdirAll(instDir, 0o750, deployOwner); err != nil {
@@ -369,16 +373,25 @@ func (s *Store) Lock(inst string) (func(), error) {
 }
 
 // Interrupt returns an instance left in DEPLOYING to its last stable status
-// and records an "interrupted" history entry. The status is OK when Current
-// is set, otherwise the status held before the deploy started (FAILED when
-// unknown). The caller holds the instance lock.
+// and records an "interrupted" history entry. The status is the one held
+// before the deploy started; when that is unknown it is OK if Current is set,
+// else FAILED. A Promoted deploy always ends FAILED with an empty FailedHash
+// and RollbackFailed set, so the next tick redeploys. The caller holds the
+// instance lock.
 func (s *Store) Interrupt(st *State, want *Desired, id, actor, detail string, now time.Time) error {
 	prev := st.PriorStatus
 	switch {
-	case st.Current != nil:
-		prev = StatusOK
+	case st.Promoted:
+		// The new release may be half applied and Current was not restored:
+		// force the next tick to redeploy.
+		prev = StatusFailed
+		st.FailedHash = ""
+		st.RollbackFailed = true
 	case prev == "" || prev == StatusDeploying:
 		prev = StatusFailed
+		if st.Current != nil {
+			prev = StatusOK
+		}
 	}
 	st.Status = prev
 	st.UpdatedAt = now

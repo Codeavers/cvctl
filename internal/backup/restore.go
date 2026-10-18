@@ -325,7 +325,7 @@ func (r *Runner) flushWAL(ctx context.Context, inst, svc string, c kinds.Credent
 // verifyServing waits for the data service and proves it answers queries.
 func (r *Runner) verifyServing(ctx context.Context, inst, svc string, strategy string, c kinds.Credentials) error {
 	proj := r.Compose(inst)
-	if err := proj.UpData(ctx, []string{svc}); err != nil {
+	if err := proj.UpData(ctx, []string{svc}, 0); err != nil {
 		return err
 	}
 	if strategy != StrategyWalG {

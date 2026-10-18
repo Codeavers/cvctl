@@ -79,7 +79,7 @@ func (b *boundCompose) Pull(_ context.Context, services ...string) error {
 	return b.fake.failPull
 }
 
-func (b *boundCompose) UpData(_ context.Context, services []string) error {
+func (b *boundCompose) UpData(_ context.Context, services []string, _ time.Duration) error {
 	b.fake.mu.Lock()
 	defer b.fake.mu.Unlock()
 	b.fake.calls = append(b.fake.calls, "updata:"+strings.Join(services, ","))
@@ -2278,7 +2278,7 @@ func TestAutoRollbackSuccessSaveFailureStillNotifies(t *testing.T) {
 	fcfs := &failCountingFS{
 		FS:          rig.fs,
 		targetPath:  statePath,
-		failOnCount: 2, // 1st is DEPLOYING, 2nd is post-rollback save
+		failOnCount: 3, // 1st is DEPLOYING, 2nd the promoted marker, 3rd post-rollback save
 	}
 	rig.deployer.FS = fcfs
 	rig.deployer.Store = state.NewStore(fcfs, stateDir)
@@ -2525,7 +2525,7 @@ func TestDeploySuccessSaveFailureStillNotifies(t *testing.T) {
 	fcfs := &failCountingFS{
 		FS:          rig.fs,
 		targetPath:  filepath.Join(stateDir, "demo-dev", "state.json"),
-		failOnCount: 2, // 1st is DEPLOYING, 2nd is the success save
+		failOnCount: 3, // 1st is DEPLOYING, 2nd the promoted marker, 3rd the success save
 	}
 	rig.deployer.FS = fcfs
 	rig.deployer.Store = state.NewStore(fcfs, stateDir)

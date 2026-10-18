@@ -64,9 +64,9 @@ type opsStubCompose struct {
 	lastSvc    string
 }
 
-func (c *opsStubCompose) Config(_ context.Context) error             { return nil }
-func (c *opsStubCompose) Pull(_ context.Context, _ ...string) error  { return nil }
-func (c *opsStubCompose) UpData(_ context.Context, _ []string) error { return nil }
+func (c *opsStubCompose) Config(_ context.Context) error                              { return nil }
+func (c *opsStubCompose) Pull(_ context.Context, _ ...string) error                   { return nil }
+func (c *opsStubCompose) UpData(_ context.Context, _ []string, _ time.Duration) error { return nil }
 func (c *opsStubCompose) ExecScript(_ context.Context, _, _ string) (sys.Result, error) {
 	return sys.Result{}, nil
 }
@@ -1285,10 +1285,17 @@ func TestStatusUnreadableInstanceSkipped(t *testing.T) {
 	if !slices.Contains(res.Data.Warnings, goodWarn) {
 		t.Fatalf("expected good-dev warning in warnings: %v", res.Data.Warnings)
 	}
+	// An instance that cannot be loaded is reported, not skipped silently.
+	var sawBad, sawBadContract bool
 	for _, w := range res.Data.Warnings {
-		if strings.Contains(w, "bad-bucket") || strings.Contains(w, "bad-dev") || strings.Contains(w, "badcontract-dev") {
-			t.Fatalf("unexpected warning for bad instances: %s", w)
+		if strings.Contains(w, "bad-bucket") {
+			t.Fatalf("orphans of an unreadable instance must not be reported: %s", w)
 		}
+		sawBad = sawBad || strings.HasPrefix(w, "bad-dev: ")
+		sawBadContract = sawBadContract || strings.HasPrefix(w, "badcontract-dev: ")
+	}
+	if !sawBad || !sawBadContract {
+		t.Fatalf("expected load warnings for bad-dev and badcontract-dev: %v", res.Data.Warnings)
 	}
 
 	// Calling status directly on unreadable instances also succeeds and skips s3 warnings

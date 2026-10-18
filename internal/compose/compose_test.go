@@ -263,14 +263,14 @@ func TestComposeHelpers(t *testing.T) {
 		t.Fatalf("Pull failed: %v", err)
 	}
 
-	upDataCmd := p.Cmd("up", "-d", "--wait", "main-db", "cache")
+	upDataCmd := p.Cmd("up", "-d", "--wait", "--wait-timeout", "150", "main-db", "cache")
 	runner.On(upDataCmd.String(), sys.Result{ExitCode: 0})
-	if err := p.UpData(context.Background(), []string{"main-db", "cache"}); err != nil {
+	if err := p.UpData(context.Background(), []string{"main-db", "cache"}, 0); err != nil {
 		t.Fatalf("UpData failed: %v", err)
 	}
 
 	// Empty UpData is a no-op
-	if err := p.UpData(context.Background(), nil); err != nil {
+	if err := p.UpData(context.Background(), nil, 0); err != nil {
 		t.Fatalf("empty UpData failed: %v", err)
 	}
 
@@ -347,5 +347,15 @@ func TestRunHookTimeoutRemovesContainer(t *testing.T) {
 	}
 	if len(rm.Env) == 0 || rm.Env[0] != "DOCKER_CONFIG=/var/lib/cvctl/docker" {
 		t.Fatalf("cleanup must carry DOCKER_CONFIG, got %v", rm.Env)
+	}
+}
+
+func TestUpDataWaitTimeoutArgv(t *testing.T) {
+	runner := &systest.Runner{}
+	p := Project{Run: runner, Instance: "demo-dev", Dir: "/srv/deploy/demo-dev"}
+	cmd := p.Cmd("up", "-d", "--wait", "--wait-timeout", "211", "db")
+	runner.On(cmd.String(), sys.Result{})
+	if err := p.UpData(context.Background(), []string{"db"}, 210*time.Second+time.Millisecond); err != nil {
+		t.Fatalf("UpData: %v", err)
 	}
 }
