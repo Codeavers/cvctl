@@ -52,7 +52,7 @@ func newRig(t *testing.T) *rig {
 	t.Cleanup(func() { sys.LockFile = old })
 
 	run := &systest.Runner{}
-	run.On("docker network inspect app-prod_backup", sys.Result{})
+	run.On("docker network inspect -f {{.Internal}} app-prod_backup", sys.Result{})
 	fsys := systest.NewFS()
 	store := state.NewStore(fsys, "/var/lib/cvctl")
 	note := &recNotifier{}
@@ -141,7 +141,7 @@ func TestResticInitsMissingRepo(t *testing.T) {
 		t.Fatalf("res=%+v err=%v", res, err)
 	}
 	want := []string{
-		"docker network inspect app-prod_backup",
+		"docker network inspect -f {{.Internal}} app-prod_backup",
 		resticPrefix + "--env-file /srv/deploy/app-prod/restic-files.env restic/restic:0.19.1 snapshots --json",
 		resticPrefix + "--env-file /srv/deploy/app-prod/restic-files.env restic/restic:0.19.1 init",
 		resticPrefix + "-v app-prod_files-data:/data:ro --env-file /srv/deploy/app-prod/restic-files.env restic/restic:0.19.1 backup /data --host h1 --tag app-prod",

@@ -13,7 +13,7 @@ func TestEnsureNetwork(t *testing.T) {
 	ctx := context.Background()
 	t.Run("exists", func(t *testing.T) {
 		r := &systest.Runner{}
-		r.On("docker network inspect a_edge", sys.Result{})
+		r.On("docker network inspect -f {{.Internal}} a_edge", sys.Result{})
 		if err := sys.EnsureNetwork(ctx, r, "a_edge", false); err != nil {
 			t.Fatal(err)
 		}
@@ -23,7 +23,7 @@ func TestEnsureNetwork(t *testing.T) {
 	})
 	t.Run("missing internal", func(t *testing.T) {
 		r := &systest.Runner{}
-		r.On("docker network inspect a_backup", sys.Result{ExitCode: 1})
+		r.On("docker network inspect -f {{.Internal}} a_backup", sys.Result{ExitCode: 1})
 		r.On("docker network create --label cvctl.managed=true --internal a_backup", sys.Result{})
 		if err := sys.EnsureNetwork(ctx, r, "a_backup", true); err != nil {
 			t.Fatal(err)
@@ -31,7 +31,7 @@ func TestEnsureNetwork(t *testing.T) {
 	})
 	t.Run("race", func(t *testing.T) {
 		r := &systest.Runner{}
-		r.On("docker network inspect a_edge", sys.Result{ExitCode: 1})
+		r.On("docker network inspect -f {{.Internal}} a_edge", sys.Result{ExitCode: 1})
 		r.On("docker network create --label cvctl.managed=true a_edge", sys.Result{ExitCode: 1, Stderr: []byte("network with name a_edge already exists")})
 		if err := sys.EnsureNetwork(ctx, r, "a_edge", false); err != nil {
 			t.Fatal(err)
@@ -39,7 +39,7 @@ func TestEnsureNetwork(t *testing.T) {
 	})
 	t.Run("failure", func(t *testing.T) {
 		r := &systest.Runner{}
-		r.On("docker network inspect a_edge", sys.Result{ExitCode: 1})
+		r.On("docker network inspect -f {{.Internal}} a_edge", sys.Result{ExitCode: 1})
 		r.On("docker network create --label cvctl.managed=true a_edge", sys.Result{ExitCode: 1, Stderr: []byte("boom")})
 		if err := sys.EnsureNetwork(ctx, r, "a_edge", false); err == nil || !strings.Contains(err.Error(), "boom") {
 			t.Fatalf("err: %v", err)
@@ -64,5 +64,19 @@ func TestConnectNetwork(t *testing.T) {
 	r.On(cmd, sys.Result{ExitCode: 1, Stderr: []byte("no such container")})
 	if err := sys.ConnectNetwork(ctx, r, "a_edge", "cvctl-traefik", "a--web"); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestEnsureNetworkRejectsInternalMismatch(t *testing.T) {
+	r := &systest.Runner{}
+	r.On("docker network inspect -f {{.Internal}} a_backup", sys.Result{Stdout: []byte("true\n")})
+	err := sys.EnsureNetwork(context.Background(), r, "a_backup", false)
+	if err == nil || !strings.Contains(err.Error(), "internal=true") {
+		t.Fatalf("want an internal mismatch error, got %v", err)
+	}
+	r2 := &systest.Runner{}
+	r2.On("docker network inspect -f {{.Internal}} a_backup", sys.Result{Stdout: []byte("false\n")})
+	if err := sys.EnsureNetwork(context.Background(), r2, "a_backup", false); err != nil {
+		t.Fatal(err)
 	}
 }

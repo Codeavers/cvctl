@@ -55,7 +55,7 @@ func TestVerifyWalgSequenceAndCleanup(t *testing.T) {
 	}
 	name := "cvctl-verify-app-prod-db-1767323045-0a0b0c0d"
 	calls := g.calls()
-	if calls[0] != "docker network inspect app-prod_backup" || calls[1] != "docker volume create "+name {
+	if calls[0] != "docker network inspect -f {{.Internal}} app-prod_backup" || calls[1] != "docker volume create "+name {
 		t.Fatalf("calls: %v", calls)
 	}
 	run := calls[2]

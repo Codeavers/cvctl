@@ -123,7 +123,9 @@ func (d *Deployer) ensureNetworks(ctx context.Context, inst string, p *contract.
 	}
 	for _, ds := range p.Data {
 		if dec.Services[ds.Name].Mode == "local" && (ds.Backup == "wal-g" || ds.Backup == "volume") {
-			return sys.EnsureNetwork(ctx, d.Run, render.NetworkBackup(inst), true)
+			// Internal only with the host silo: external storage (R2, S3) is
+			// reached over the internet, so the network needs egress.
+			return sys.EnsureNetwork(ctx, d.Run, render.NetworkBackup(inst), d.Backup.Local)
 		}
 	}
 	return nil

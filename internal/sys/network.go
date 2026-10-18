@@ -2,7 +2,10 @@ package sys
 
 import (
 	"context"
+	"strconv"
 	"strings"
+
+	"github.com/codeavers/cvctl/internal/output"
 )
 
 func dockerCmd(args ...string) Cmd {
@@ -10,11 +13,20 @@ func dockerCmd(args ...string) Cmd {
 }
 
 // EnsureNetwork creates the docker network when missing. A concurrent creator
-// winning the race counts as success.
+// winning the race counts as success. An existing network whose internal flag
+// differs is an error: recreating it would cut the containers attached to it.
 func EnsureNetwork(ctx context.Context, run Runner, name string, internal bool) error {
-	res, err := run.Run(ctx, dockerCmd("network", "inspect", name))
+	res, err := run.Run(ctx, dockerCmd("network", "inspect", "-f", "{{.Internal}}", name))
 	if err == nil && res.ExitCode == 0 {
-		return nil
+		got := strings.TrimSpace(string(res.Stdout))
+		if got == "" || got == strconv.FormatBool(internal) {
+			return nil
+		}
+		return &output.Error{
+			Code:    "E_NETWORK",
+			Message: "network " + name + " has internal=" + got + ", want " + strconv.FormatBool(internal),
+			Hint:    "the storage mode changed: cvctl pause the instance, docker network rm " + name + ", then cvctl deploy",
+		}
 	}
 	args := []string{"network", "create", "--label", "cvctl.managed=true"}
 	if internal {

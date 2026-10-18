@@ -14,11 +14,12 @@ import (
 // resticExitNoRepo is restic's exit code for a repository that does not exist.
 const resticExitNoRepo = 10
 
-// backupNet makes sure the instance's internal backup network exists: backup
+// backupNet makes sure the instance's backup network exists (internal with the
+// host silo, with egress for external storage): backup
 // containers run from the host CLI, before or without a compose up.
 func (r *Runner) backupNet(ctx context.Context, inst string) (string, error) {
 	name := render.NetworkBackup(inst)
-	if err := sys.EnsureNetwork(ctx, r.Run, name, true); err != nil {
+	if err := sys.EnsureNetwork(ctx, r.Run, name, r.Host != nil && r.Host.Local); err != nil {
 		return "", err
 	}
 	return name, nil
