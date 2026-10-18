@@ -1008,7 +1008,12 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		hookCancel()
 		if timeoutErr != nil {
 			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-			return d.failTransient(ctx, inst, st, want, deployID, actor, now, timeoutErr.Error(), secrets)
+			if TimeoutError(ctx) != nil {
+				return d.failTransient(ctx, inst, st, want, deployID, actor, now, timeoutErr.Error(), secrets)
+			}
+			// The hook's own timeout is permanent for this desired state:
+			// retrying it would spend the agent's time on every tick.
+			return d.failPermanent(ctx, inst, st, want, deployID, actor, now, timeoutErr.Error(), secrets)
 		}
 		if err != nil || resHook.ExitCode != 0 {
 			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
@@ -1466,11 +1471,15 @@ func (d *Deployer) probeExternalBuckets(ctx context.Context, inst string, p *con
 	return nil
 }
 
+// hookTimeout is the hook's own timeout clamped to the host's
+// CVCTL_TIMEOUT_HOOK: a contract cannot buy more agent time than the host
+// allows.
 func (d *Deployer) hookTimeout(h contract.Hook) time.Duration {
+	host := d.Host.TimeoutHook()
 	if h.Timeout != "" {
-		if t, err := time.ParseDuration(h.Timeout); err == nil && t > 0 {
+		if t, err := time.ParseDuration(h.Timeout); err == nil && t > 0 && t < host {
 			return t
 		}
 	}
-	return d.Host.TimeoutHook()
+	return host
 }

@@ -79,7 +79,9 @@ func TestPullTimeoutIsTransient(t *testing.T) {
 	}
 }
 
-func TestHookTimeoutIsTransient(t *testing.T) {
+// A hook that exceeds its own timeout fails that desired state for good: the
+// agent must not spend the hook timeout again on every tick.
+func TestHookTimeoutIsPermanent(t *testing.T) {
 	rig := setupTestRig(t, "dev", "demo-dev")
 	seedCurrent(t, rig)
 	if err := rig.deployer.Host.Set("TIMEOUT_HOOK", "50ms"); err != nil {
@@ -87,7 +89,8 @@ func TestHookTimeoutIsTransient(t *testing.T) {
 	}
 	blockWith(rig, &blockingCompose{blockHook: true})
 
-	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{})
+	want := defaultDesired()
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,8 +98,24 @@ func TestHookTimeoutIsTransient(t *testing.T) {
 		t.Fatalf("unexpected result: %+v", res)
 	}
 	st, _ := rig.store.Load("demo-dev")
-	if st.FailedHash != "" {
-		t.Fatalf("a timeout must stay retryable, FailedHash = %q", st.FailedHash)
+	if st.FailedHash != want.Hash() {
+		t.Fatalf("a hook timeout must be permanent, FailedHash = %q", st.FailedHash)
+	}
+	res, err = rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{})
+	if err != nil || res.Detail != "desired state previously failed" {
+		t.Fatalf("same desired state retried: %+v %v", res, err)
+	}
+}
+
+func TestHookTimeoutClampedToHost(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	if err := rig.deployer.Host.Set("TIMEOUT_HOOK", "10m"); err != nil {
+		t.Fatal(err)
+	}
+	for in, want := range map[string]time.Duration{"": 10 * time.Minute, "5m": 5 * time.Minute, "2h": 10 * time.Minute, "bad": 10 * time.Minute} {
+		if got := rig.deployer.hookTimeout(contract.Hook{Service: "api", Timeout: in}); got != want {
+			t.Errorf("timeout %q: got %s, want %s", in, got, want)
+		}
 	}
 }
 
@@ -262,5 +281,25 @@ func TestWaitTimeout(t *testing.T) {
 	p.X.Health.Timeout = 10 * time.Minute
 	if got := rollbackCap(p); got != 12*time.Minute {
 		t.Fatalf("rollback cap = %s, want 12m", got)
+	}
+}
+
+// The deploy budget running out during a hook stays transient.
+func TestDeployTimeoutDuringHookIsTransient(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	seedCurrent(t, rig)
+	for k, v := range map[string]string{"TIMEOUT_HOOK": "10s", "TIMEOUT_DEPLOY": "100ms"} {
+		if err := rig.deployer.Host.Set(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	blockWith(rig, &blockingCompose{blockHook: true})
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _ := rig.store.Load("demo-dev")
+	if res.Status != state.StatusFailed || !strings.Contains(res.Detail, "E_TIMEOUT") || st.FailedHash != "" {
+		t.Fatalf("result %+v, FailedHash %q", res, st.FailedHash)
 	}
 }

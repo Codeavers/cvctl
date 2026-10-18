@@ -210,7 +210,11 @@ cvctl history aux-dev --json | jq -e '[.data.history[] | (.detail // "") | selec
 test "$(jqs '.status' aux-dev)" = "FAILED"
 test "$(jqs '.status')" = "OK"
 test "$(cur_digest demo-dev 'digests.api')" != "$api_before"
-echo "Assert 16: aux-dev hook timed out (E_TIMEOUT); demo-dev deployed the new image in the same tick"
+aux_events=$(cvctl history aux-dev -n 1000 --json | jq '.data.history | length')
+AGENT_ONCE || true
+test "$(cvctl history aux-dev -n 1000 --json | jq '.data.history | length')" = "$aux_events"
+test "$(jqs '.status' aux-dev)" = "FAILED"
+echo "Assert 16: aux-dev hook timed out (E_TIMEOUT) and is not retried for the same desired state; demo-dev deployed the new image in the same tick"
 
 echo "=== 17. Verify systemctl is-active cvctl-agent ==="
 active_status=$(systemctl is-active cvctl-agent)
