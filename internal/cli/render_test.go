@@ -13,6 +13,7 @@ const demoDecisions = `CVCTL_INSTANCE=demo-dev
 CVCTL_ENV=dev
 CVCTL_STRATEGY=recreate
 CVCTL_DOMAIN_API=api.example.com
+CVCTL_DOMAIN_MEDIA=media.example.com
 CVCTL_DIGEST_API=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 CVCTL_DIGEST_WORKER=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 CVCTL_SVC_MAIN_DB_MODE=local
