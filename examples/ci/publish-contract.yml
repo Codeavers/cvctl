@@ -20,7 +20,8 @@ env:
   CVCTL_VERSION: v0.0.0
 
 jobs:
-  publish:
+  develop:
+    if: github.ref_name == 'develop'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -33,9 +34,31 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
-          BRANCH: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
           docker run --rm -v "$PWD:/w" -e GITHUB_TOKEN -e GITHUB_ACTOR \
             "ghcr.io/codeavers/cvctl:$CVCTL_VERSION" \
-            publish "/w/$CONTRACT_DIR" "ghcr.io/${REPO,,}-infra:$BRANCH"
+            publish "/w/$CONTRACT_DIR" "ghcr.io/${REPO,,}-infra:develop"
+
+  main:
+    if: github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    # Prod hosts deploy what main publishes: protect this environment in
+    # GitHub settings (required reviewers, main branch only).
+    environment: production
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish contract
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+        run: |
+          docker run --rm -v "$PWD:/w" -e GITHUB_TOKEN -e GITHUB_ACTOR \
+            "ghcr.io/codeavers/cvctl:$CVCTL_VERSION" \
+            publish "/w/$CONTRACT_DIR" "ghcr.io/${REPO,,}-infra:main"
