@@ -19,6 +19,7 @@ import (
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/notify"
+	"github.com/codeavers/cvctl/internal/objstore"
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/render"
 	"github.com/codeavers/cvctl/internal/state"
@@ -2830,5 +2831,236 @@ func TestStaleBackupEnvRemovedOnPromote(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(rig.instDir, "backup-main-db.env")); err != nil {
 		t.Fatalf("wired backup env missing: %v", err)
+	}
+}
+
+var externalBucketsCvctlEnv = `CVCTL_INSTANCE=demo-dev
+CVCTL_ENV=dev
+CVCTL_STRATEGY=recreate
+CVCTL_INFRA_BRANCH=develop
+CVCTL_TRACK_TAG=develop
+CVCTL_INFRA_PATH=.
+CVCTL_DOMAIN_API=api.example.com
+CVCTL_DIGEST_API=sha256:0000000000000000000000000000000000000000000000000000000000000001
+CVCTL_SVC_MEDIA_MODE=external
+CVCTL_SVC_MEDIA_EXT_ENDPOINT=https://s3.example.com
+CVCTL_SVC_MEDIA_EXT_REGION=us-east-1
+CVCTL_SVC_MEDIA_EXT_ACCESS_KEY=extAccessKey1234
+CVCTL_SVC_MEDIA_EXT_SECRET_KEY=extSecretKey56789012
+CVCTL_SVC_MEDIA_EXT_BUCKET_PRODUCTS=real-products
+CVCTL_SVC_MEDIA_EXT_PUBLIC_URL_PRODUCTS=https://cdn.example.com
+CVCTL_SVC_MEDIA_EXT_BUCKET_PRESCRIPTIONS=real-prescriptions
+`
+
+const externalBucketsComposeYAML = `x-cvctl:
+  health: { service: api, http: /health, timeout: 30s }
+  hooks:
+    pre-deploy:  [{ service: api, run: "node dist/migrate.js" }]
+  s3:
+    media:
+      buckets:
+        products: { public: true }
+        prescriptions: {}
+
+services:
+  api:
+    image: ghcr.io/org/project-api
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+    labels:
+      cvctl.role: app
+      cvctl.expose: "3000"
+    deploy: { resources: { limits: { memory: 512m } } }
+  media:
+    labels: { cvctl.kind: s3, cvctl.env: S3, cvctl.expose: "9000", cvctl.external: allowed }
+`
+
+func setupExternalBucketsRig(t *testing.T) *testRig {
+	t.Helper()
+	rig := setupTestRig(t, "dev", "demo-dev")
+	for path, content := range map[string]string{
+		filepath.Join(rig.infraDir, "compose.yml"):  externalBucketsComposeYAML,
+		filepath.Join(rig.infraDir, "env.spec.yml"): bucketsEnvSpecYAML,
+		filepath.Join(rig.instDir, "cvctl.env"):     externalBucketsCvctlEnv,
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return rig
+}
+
+func TestDeployProbesExternalBucketsHappyPath(t *testing.T) {
+	rig := setupExternalBucketsRig(t)
+	var probedConfig objstore.Config
+	var probedBuckets []objstore.BucketCheck
+	probeCalls := 0
+
+	rig.deployer.ProbeS3 = func(ctx context.Context, c objstore.Config, b []objstore.BucketCheck) error {
+		probeCalls++
+		probedConfig = c
+		probedBuckets = b
+		return nil
+	}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if res.Status != state.StatusOK {
+		t.Fatalf("status = %v, detail = %q", res.Status, res.Detail)
+	}
+
+	if probeCalls != 1 {
+		t.Fatalf("expected 1 ProbeS3 call, got %d", probeCalls)
+	}
+	if probedConfig.Endpoint != "https://s3.example.com" || probedConfig.AccessKey != "extAccessKey1234" || probedConfig.SecretKey != "extSecretKey56789012" || probedConfig.Region != "us-east-1" {
+		t.Fatalf("unexpected probedConfig: %+v", probedConfig)
+	}
+	if len(probedBuckets) != 2 {
+		t.Fatalf("expected 2 probed buckets, got %d", len(probedBuckets))
+	}
+	if probedBuckets[0].Name != "real-prescriptions" || probedBuckets[0].PublicURL != "" {
+		t.Fatalf("unexpected prescriptions bucket: %+v", probedBuckets[0])
+	}
+	if probedBuckets[1].Name != "real-products" || probedBuckets[1].PublicURL != "https://cdn.example.com" {
+		t.Fatalf("unexpected products bucket: %+v", probedBuckets[1])
+	}
+
+	order := strings.Join(rig.compose.calls, " ")
+	iHook := strings.Index(order, "runhook:api:")
+	if iHook < 0 {
+		t.Fatalf("expected runhook:api in calls, got %q", order)
+	}
+	if strings.Contains(order, "updata:media") {
+		t.Fatalf("external media should not be in updata calls: %q", order)
+	}
+}
+
+func TestDeployProbeExternalBucketsFailureIsTransientAndRunsNoHooks(t *testing.T) {
+	rig := setupExternalBucketsRig(t)
+	rig.deployer.ProbeS3 = func(ctx context.Context, c objstore.Config, b []objstore.BucketCheck) error {
+		return &output.Error{
+			Code:    "E_S3_PROBE",
+			Message: "bucket real-products: public-get: HTTP 403",
+			Hint:    "check the bucket name, the app keys and the public URL: cvctl project update demo-dev",
+		}
+	}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if res.Status != state.StatusFailed {
+		t.Fatalf("expected StatusFailed, got %v", res.Status)
+	}
+	if !strings.Contains(res.Detail, "E_S3_PROBE") || !strings.Contains(res.Detail, "public-get: HTTP 403") {
+		t.Fatalf("detail = %q, want E_S3_PROBE with 403 message", res.Detail)
+	}
+	if !strings.Contains(res.Detail, "will retry next cycle") {
+		t.Fatalf("detail missing 'will retry next cycle': %q", res.Detail)
+	}
+
+	st, err := rig.store.Load("demo-dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.FailedHash != "" {
+		t.Fatalf("probe failure must be transient, FailedHash = %q", st.FailedHash)
+	}
+	if st.Current != nil {
+		t.Fatalf("Current must remain nil, got %+v", st.Current)
+	}
+
+	for _, c := range rig.compose.calls {
+		if strings.HasPrefix(c, "runhook:") || c == "up" {
+			t.Fatalf("%s ran after probe failure", c)
+		}
+	}
+
+	if _, err := os.Stat(filepath.Join(rig.instDir, ".staging")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staging dir should be deleted, stat err = %v", err)
+	}
+}
+
+func TestDeployProbeExternalSingleBucketWhenNoneDeclared(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	const s3ComposeYAML = `x-cvctl:
+  health: { service: api, http: /health, timeout: 30s }
+services:
+  api:
+    image: ghcr.io/org/project-api
+    labels:
+      cvctl.role: app
+      cvctl.expose: "3000"
+    deploy: { resources: { limits: { memory: 512m } } }
+  media:
+    labels: { cvctl.kind: s3, cvctl.env: S3, cvctl.external: allowed }
+`
+	const s3CvctlEnv = `CVCTL_INSTANCE=demo-dev
+CVCTL_ENV=dev
+CVCTL_STRATEGY=recreate
+CVCTL_INFRA_BRANCH=develop
+CVCTL_TRACK_TAG=develop
+CVCTL_INFRA_PATH=.
+CVCTL_DOMAIN_API=api.example.com
+CVCTL_DIGEST_API=sha256:0000000000000000000000000000000000000000000000000000000000000001
+CVCTL_SVC_MEDIA_MODE=external
+CVCTL_SVC_MEDIA_EXT_ENDPOINT=https://s3.example.com
+CVCTL_SVC_MEDIA_EXT_REGION=us-east-1
+CVCTL_SVC_MEDIA_EXT_ACCESS_KEY=extAccessKey1234
+CVCTL_SVC_MEDIA_EXT_SECRET_KEY=extSecretKey56789012
+CVCTL_SVC_MEDIA_EXT_BUCKET=my-single-bucket
+`
+	for path, content := range map[string]string{
+		filepath.Join(rig.infraDir, "compose.yml"):  s3ComposeYAML,
+		filepath.Join(rig.infraDir, "env.spec.yml"): bucketsEnvSpecYAML,
+		filepath.Join(rig.instDir, "cvctl.env"):     s3CvctlEnv,
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var probedBuckets []objstore.BucketCheck
+	rig.deployer.ProbeS3 = func(ctx context.Context, c objstore.Config, b []objstore.BucketCheck) error {
+		probedBuckets = b
+		return nil
+	}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if res.Status != state.StatusOK {
+		t.Fatalf("status = %v, detail = %q", res.Status, res.Detail)
+	}
+
+	if len(probedBuckets) != 1 || probedBuckets[0].Name != "my-single-bucket" || probedBuckets[0].PublicURL != "" {
+		t.Fatalf("unexpected single bucket check: %+v", probedBuckets)
+	}
+}
+
+func TestDeployProbeExternalBucketsRedactsSecrets(t *testing.T) {
+	rig := setupExternalBucketsRig(t)
+	rig.deployer.ProbeS3 = func(ctx context.Context, c objstore.Config, b []objstore.BucketCheck) error {
+		return errors.New("probe failed with extSecretKey56789012 in error string")
+	}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"})
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if res.Status != state.StatusFailed {
+		t.Fatalf("status = %v", res.Status)
+	}
+	if strings.Contains(res.Detail, "extSecretKey56789012") {
+		t.Fatalf("secret leaked in detail: %q", res.Detail)
+	}
+	for _, m := range rig.notifier.messages {
+		if strings.Contains(m.Text, "extSecretKey56789012") {
+			t.Fatalf("secret leaked in notification: %q", m.Text)
+		}
 	}
 }

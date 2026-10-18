@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -213,4 +215,149 @@ func probeErr(op string, err error) error {
 		Message: fmt.Sprintf("storage %s: %v", op, err),
 		Hint:    "check S3 endpoint, bucket and credentials",
 	}
+}
+
+// BucketCheck pairs a bucket name with its optional public URL.
+type BucketCheck struct {
+	Name      string
+	PublicURL string
+}
+
+// ProbeBuckets checks each bucket by putting, reading back, comparing and
+// deleting an object. When PublicURL is non-empty, it also performs an
+// unsigned GET against the public URL.
+func ProbeBuckets(ctx context.Context, base Config, buckets []BucketCheck, hc *http.Client) error {
+	return probeBuckets(ctx, base, buckets, hc, New)
+}
+
+func probeBuckets(ctx context.Context, base Config, buckets []BucketCheck, hc *http.Client, newStore func(Config) (Store, error)) error {
+	if newStore == nil {
+		newStore = New
+	}
+	var client http.Client
+	if hc != nil {
+		client = *hc
+	}
+	if client.Timeout == 0 {
+		client.Timeout = 10 * time.Second
+	}
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	for _, b := range buckets {
+		cfg := base
+		cfg.Bucket = b.Name
+		store, err := newStore(cfg)
+		if err != nil {
+			return probeBucketErr(b.Name, "put", err, base)
+		}
+
+		var rnd [8]byte
+		if _, err := rand.Read(rnd[:]); err != nil {
+			return probeBucketErr(b.Name, "put", err, base)
+		}
+		hexID := hex.EncodeToString(rnd[:])
+		objKey := "_cvctl-probe-" + hexID
+		payload := []byte(objKey)
+
+		if err := store.Put(ctx, objKey, payload); err != nil {
+			return probeBucketErr(b.Name, "put", err, base)
+		}
+
+		got, err := store.Get(ctx, objKey)
+		if err != nil {
+			_ = store.Delete(ctx, objKey)
+			return probeBucketErr(b.Name, "get", err, base)
+		}
+		if !bytes.Equal(got, payload) {
+			_ = store.Delete(ctx, objKey)
+			return probeBucketErr(b.Name, "compare", errors.New("content mismatch"), base)
+		}
+
+		if b.PublicURL != "" {
+			if err := func() error {
+				urlStr := strings.TrimRight(b.PublicURL, "/") + "/" + objKey
+				req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+				if err != nil {
+					return probeBucketErr(b.Name, "public-get", err, base)
+				}
+				resp, err := client.Do(req)
+				if err != nil {
+					return probeBucketErr(b.Name, "public-get", err, base)
+				}
+				defer resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					return probeBucketErr(b.Name, "public-get", fmt.Errorf("HTTP %d", resp.StatusCode), base)
+				}
+				pubBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+				if err != nil {
+					return probeBucketErr(b.Name, "public-get", err, base)
+				}
+				if !bytes.Equal(pubBody, payload) {
+					return probeBucketErr(b.Name, "public-get", errors.New("content mismatch"), base)
+				}
+				return nil
+			}(); err != nil {
+				_ = store.Delete(ctx, objKey)
+				return err
+			}
+		}
+
+		if err := store.Delete(ctx, objKey); err != nil {
+			return probeBucketErr(b.Name, "delete", err, base)
+		}
+	}
+	return nil
+}
+
+func probeBucketErr(bucket, step string, err error, base Config) error {
+	var oe *output.Error
+	if errors.As(err, &oe) && oe.Code == "E_S3_PROBE" {
+		return oe
+	}
+	var reason string
+	if errors.As(err, &oe) {
+		reason = oe.Message
+	} else {
+		er := minio.ToErrorResponse(err)
+		if er.Code != "" {
+			reason = er.Code
+		} else if er.StatusCode != 0 {
+			reason = fmt.Sprintf("HTTP %d", er.StatusCode)
+		} else {
+			reason = err.Error()
+		}
+	}
+	reason = strings.TrimPrefix(reason, "storage "+step+": ")
+	reason = strings.TrimPrefix(reason, "storage: ")
+	reason = sanitizeReason(reason, base)
+
+	return &output.Error{
+		Code:    "E_S3_PROBE",
+		Message: fmt.Sprintf("bucket %s: %s: %s", bucket, step, reason),
+		Hint:    "check the bucket name, the app keys and the public URL: cvctl project update <inst>",
+	}
+}
+
+func sanitizeReason(reason string, base Config) string {
+	for {
+		idx := strings.Index(reason, "?")
+		if idx == -1 {
+			break
+		}
+		end := strings.IndexAny(reason[idx:], " \t\n\r\"'>")
+		if end == -1 {
+			reason = reason[:idx]
+			break
+		}
+		reason = reason[:idx] + reason[idx+end:]
+	}
+	if base.SecretKey != "" {
+		reason = strings.ReplaceAll(reason, base.SecretKey, "***")
+	}
+	if base.AccessKey != "" {
+		reason = strings.ReplaceAll(reason, base.AccessKey, "***")
+	}
+	return strings.TrimSpace(reason)
 }
