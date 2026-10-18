@@ -177,7 +177,14 @@ if docker run --rm --network aux-dev_edge alpine:3 getent hosts demo-dev--api; t
 for net in aux-dev_edge aux-dev_data aux-dev_backup; do
   if docker run --rm --network "$net" alpine:3 nc -z -w 3 "$db_ip" 5432; then echo "$net reaches demo-dev db"; exit 1; fi
 done
-echo "Assert 14: aux-dev neither resolves demo-dev's alias nor reaches its database"
+rm -rf /tmp/aux-hijack && cp -r /tmp/aux-work /tmp/aux-hijack
+sed -i 's|^services:$|services:\n  demo-dev--api:\n    image: localhost:5000/e2e/api\n    labels: { cvctl.role: app, cvctl.expose: "8080" }\n    deploy: { resources: { limits: { memory: 64m } } }|' /tmp/aux-hijack/compose.yml
+grep -q '^  demo-dev--api:$' /tmp/aux-hijack/compose.yml
+if hijack=$(cvctl publish /tmp/aux-hijack "$AUX_REF:develop" --json); then echo "publish accepted service demo-dev--api"; exit 1; fi
+echo "$hijack" | grep -q E_CONTRACT_SERVICE_NAME
+greeting=$(curl -sk --resolve api.e2e.local:443:127.0.0.1 https://api.e2e.local/health)
+test "$greeting" = "ok hello"
+echo "Assert 14: aux-dev neither resolves demo-dev's alias nor reaches its database; a service named demo-dev--api is rejected"
 
 echo "=== 15. An instance's backup user cannot read another instance's backups ==="
 cvctl backup now demo-dev db --json | jq -e '.ok == true'

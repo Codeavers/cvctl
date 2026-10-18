@@ -16,6 +16,14 @@ import (
 
 var bucketNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}$`)
 
+// serviceNameRe forbids "--" and leading/trailing separators: compose
+// registers the service name as a DNS alias on every network, so a service
+// named "<inst>--<svc>" could capture another instance's edge alias.
+var serviceNameRe = regexp.MustCompile(`^[a-z0-9]+([-_][a-z0-9]+)*$`)
+
+// MaxHealthTimeout caps x-cvctl.health.timeout.
+const MaxHealthTimeout = 10 * time.Minute
+
 func exposedApp(p *Project, name string) bool {
 	for _, a := range p.Apps {
 		if a.Name == name && a.ExposePort > 0 {
@@ -63,6 +71,11 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 				"rename one of the services so their names differ after upper-casing and mapping - and . to _")
 		}
 		seen[Normalize(name)] = name
+
+		if !serviceNameRe.MatchString(name) {
+			add("E_CONTRACT_SERVICE_NAME", name, fmt.Sprintf("service name %q must match ^[a-z0-9]+([-_][a-z0-9]+)*$", name),
+				"use lowercase letters and digits separated by single - or _ (no \"--\", no leading or trailing separator)")
+		}
 
 		if isData[name] && name == "backup" {
 			add("E_CONTRACT_NAME_RESERVED", name, "data service name backup is reserved",
@@ -206,6 +219,11 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 				fmt.Sprintf("health service %q has neither cvctl.expose nor x-cvctl.health.port", p.X.Health.Service),
 				fmt.Sprintf("add cvctl.expose to %s or x-cvctl.health.port", p.X.Health.Service))
 		}
+	}
+
+	if p.X.Health.Timeout > MaxHealthTimeout {
+		add("E_CONTRACT_HEALTH_TIMEOUT", p.X.Health.Service, fmt.Sprintf("x-cvctl.health.timeout %s exceeds %s", p.X.Health.Timeout, MaxHealthTimeout),
+			"use a duration of at most 10m")
 	}
 
 	for _, hooks := range [][]Hook{p.X.Hooks.PreDeploy, p.X.Hooks.PostDeploy} {

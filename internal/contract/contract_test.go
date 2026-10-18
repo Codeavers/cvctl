@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codeavers/cvctl/internal/envspec"
 	"github.com/codeavers/cvctl/internal/output"
@@ -338,6 +339,52 @@ func TestHookTimeoutValidation(t *testing.T) {
 		}
 		if found != bad {
 			t.Errorf("timeout %q: E_CONTRACT_HOOK_TIMEOUT = %v, want %v", timeout, found, bad)
+		}
+	}
+}
+
+func TestServiceNameValidation(t *testing.T) {
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, bad := range map[string]bool{"a--api": true, "api": false, "main-db": false, "main_db": false, "a-b_c1": false, "-api": true, "api-": true, "a__b": true, "API": true, "a.b": true} {
+		p, err := Load("testdata/valid", cat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.Compose.Services[name] = p.Compose.Services["api"]
+		found := false
+		for _, iss := range Validate(p, cat, nil) {
+			if iss.Code == "E_CONTRACT_SERVICE_NAME" && iss.Service == name {
+				found = true
+			}
+		}
+		if found != bad {
+			t.Errorf("service %q: E_CONTRACT_SERVICE_NAME = %v, want %v", name, found, bad)
+		}
+	}
+}
+
+func TestHealthTimeoutCap(t *testing.T) {
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load("testdata/valid", cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for d, bad := range map[time.Duration]bool{0: false, 30 * time.Second: false, 10 * time.Minute: false, 10*time.Minute + time.Second: true} {
+		p.X.Health.Timeout = d
+		found := false
+		for _, iss := range Validate(p, cat, nil) {
+			if iss.Code == "E_CONTRACT_HEALTH_TIMEOUT" {
+				found = true
+			}
+		}
+		if found != bad {
+			t.Errorf("health timeout %s: E_CONTRACT_HEALTH_TIMEOUT = %v, want %v", d, found, bad)
 		}
 	}
 }
