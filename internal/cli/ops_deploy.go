@@ -116,6 +116,9 @@ func newDeployCmd() *cobra.Command {
 					return nil
 				}
 			}
+			if e.Deployer.Contracts == nil {
+				e.Deployer.Contracts = deploy.OCIFetcher(deps.OCI)
+			}
 			if e.Deployer.Catalog == nil {
 				e.Deployer.Catalog = cat
 			}

@@ -186,7 +186,8 @@ func newProjectAddCmd() *cobra.Command {
 		Short: "Add and deploy a new project instance",
 		Example: `  cvctl project add git@github.com:myorg/my-infra.git
   cvctl project add https://github.com/myorg/my-infra.git --env prod --branch main
-  cvctl project add git@github.com:myorg/my-infra.git --set FOO=bar --domain api=api.example.com --non-interactive`,
+  cvctl project add git@github.com:myorg/my-infra.git --set FOO=bar --domain api=api.example.com --non-interactive
+  cvctl project add oci://ghcr.io/myorg/my-infra --env dev`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repoURL := args[0]
@@ -195,6 +196,7 @@ func newProjectAddCmd() *cobra.Command {
 			branch, _ := cmd.Flags().GetString("branch")
 			tag, _ := cmd.Flags().GetString("tag")
 			strategy, _ := cmd.Flags().GetString("strategy")
+			infraPath, _ := cmd.Flags().GetString("infra-path")
 			nonInt, _ := cmd.Flags().GetBool("non-interactive")
 			asJSON, _ := cmd.Flags().GetBool("json")
 			setFlags, _ := cmd.Flags().GetStringArray("set")
@@ -224,14 +226,15 @@ func newProjectAddCmd() *cobra.Command {
 			}
 
 			res, err := project.Add(cmd.Context(), e, repoURL, project.AddOptions{
-				Project:  projectName,
-				Env:      envName,
-				Branch:   branch,
-				TrackTag: tag,
-				Strategy: strategy,
-				Set:      setMap,
-				Domains:  domainMap,
-				Ext:      extMap,
+				Project:   projectName,
+				Env:       envName,
+				Branch:    branch,
+				TrackTag:  tag,
+				Strategy:  strategy,
+				InfraPath: infraPath,
+				Set:       setMap,
+				Domains:   domainMap,
+				Ext:       extMap,
 			})
 			if err != nil {
 				return err
@@ -269,6 +272,7 @@ func newProjectAddCmd() *cobra.Command {
 	cmd.Flags().StringP("branch", "b", "", "infra git branch to clone")
 	cmd.Flags().StringP("tag", "t", "", "image tag to track (dev only)")
 	cmd.Flags().String("strategy", "recreate", "deployment strategy (recreate|blue-green)")
+	cmd.Flags().String("infra-path", "", "contract directory inside the infra git repo (monorepos)")
 	cmd.Flags().Bool("non-interactive", false, "never prompt; use defaults and --set values")
 	cmd.Flags().StringArray("set", nil, "pre-seed app.env values (KEY=VALUE, repeatable)")
 	cmd.Flags().StringArray("domain", nil, "domain for exposed service (svc=host, repeatable)")
@@ -401,7 +405,7 @@ new backup generation so the restored timeline never mixes with the old one.`,
 			return nil
 		},
 	}
-	cmd.Flags().String("repo", "", "infra repository URL (overrides CVCTL_INFRA_URL from cvctl.env)")
+	cmd.Flags().String("repo", "", "infra repository URL or oci://host/repository (overrides CVCTL_INFRA_REF and CVCTL_INFRA_URL from cvctl.env)")
 	return cmd
 }
 

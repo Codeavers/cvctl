@@ -176,6 +176,9 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 		return nil, err
 	}
 	repoURL := opts.Repo
+	if repoURL == "" && rawEnv[keySource] == instance.SourceOCI && rawEnv[keyRef] != "" {
+		repoURL = ociScheme + rawEnv[keyRef]
+	}
 	if repoURL == "" {
 		repoURL = rawEnv[keyInfraURL]
 	}
@@ -189,6 +192,7 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 	if err := validateRepoURL(repoURL); err != nil {
 		return nil, err
 	}
+	isOCI := isOCIURL(repoURL)
 	branch := rawEnv["CVCTL_INFRA_BRANCH"]
 	if branch == "" {
 		branch = "develop"
@@ -241,22 +245,46 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 		return nil, rep.apply(err)
 	}
 
-	repo := e.repo(infraDir, keyPath)
+	var repo RepoLike
 	cloned = true
-	if err := repo.Clone(ctx, repoURL, branch); err != nil {
-		return fail(err)
+	// The source given by --repo is recorded, so the deploy below and the
+	// agent use it.
+	sourceUpdates := map[string]string{}
+	if isOCI {
+		ref := strings.TrimPrefix(repoURL, ociScheme)
+		if _, err := installOCI(ctx, e, instDir, ref, ociTrackTag(rawEnv["CVCTL_ENV"], rawEnv["CVCTL_TRACK_TAG"])); err != nil {
+			return fail(err)
+		}
+		if rawEnv[keySource] != instance.SourceOCI || rawEnv[keyRef] != ref {
+			sourceUpdates[keySource] = instance.SourceOCI
+			sourceUpdates[keyRef] = ref
+		}
+	} else {
+		repo = e.repo(infraDir, keyPath)
+		if err := repo.Clone(ctx, repoURL, branch); err != nil {
+			return fail(err)
+		}
+		if rawEnv[keySource] == instance.SourceOCI {
+			sourceUpdates[keySource] = instance.SourceGit
+		}
 	}
 	cat, err := e.catalog()
 	if err != nil {
 		return fail(err)
 	}
-	p, _, err := loadContractAndSpec(e.fs(), infraDir, cat)
+	p, _, err := loadContractAndSpec(e.fs(), contractDir(infraDir, rawEnv["CVCTL_INFRA_PATH"]), cat)
 	if err != nil {
 		return fail(err)
 	}
 	d, err := instance.Read(cvctlEnvPath, p)
 	if err != nil {
 		return fail(err)
+	}
+	if v, ok := sourceUpdates[keySource]; ok {
+		d.InfraSource = v
+		if isOCI {
+			d.InfraRef = sourceUpdates[keyRef]
+		}
 	}
 
 	targets := backup.Targets(p, d)
@@ -317,6 +345,9 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 	// rendered backup env point there, never at the generation restored from.
 	var walg []string
 	updates := map[string]string{}
+	for k, v := range sourceUpdates {
+		updates[k] = v
+	}
 	genUpdates = updates
 	// A bundle from before per-instance keys: the new generation (restic: a new
 	// repository) is the first one the instance's own keys encrypt.

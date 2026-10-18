@@ -122,13 +122,8 @@ func newStatusCmd() *cobra.Command {
 				}
 
 				commitStr := "-"
-				if st != nil && st.Current != nil && st.Current.InfraCommit != "" {
-					c := st.Current.InfraCommit
-					if len(c) > 7 {
-						commitStr = c[:7]
-					} else {
-						commitStr = c
-					}
+				if st != nil && st.Current != nil && (st.Current.InfraCommit != "" || st.Current.InfraDigest != "") {
+					commitStr = deploy.RevShort(*st.Current)
 				}
 
 				ageStr := "-"

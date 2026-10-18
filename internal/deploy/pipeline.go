@@ -91,6 +91,8 @@ type Deployer struct {
 	Health     func(ctx context.Context, inst, override string) error
 	// Run executes the docker network commands; Wire sets it.
 	Run sys.Runner
+	// Contracts pulls the contract artifact of OCI-sourced instances.
+	Contracts ContractFetcher
 	// Allowed lists permitted image registries. Nil disables the post-checkout
 	// image check; Wire sets it (non-nil) from the host configuration.
 	Allowed []string
@@ -400,7 +402,7 @@ func waitTimeout(p *contract.Project) time.Duration {
 // notified and the same desired state is retried. After promotion the previous
 // release is restored first, on a context that outlives the cancellation.
 func (d *Deployer) interrupted(ctx context.Context, inst string, st *state.State, want state.Desired, deployID, actor string, now time.Time) (Result, error) {
-	if st.Promoted && st.Current != nil && st.Current.InfraCommit != "" {
+	if st.Promoted && hasInfra(st.Current) {
 		rb, _ := ctx.Value(rollbackKey{}).(*rollbackInfo)
 		if rb == nil {
 			rb = &rollbackInfo{cap: 5 * time.Minute}
@@ -523,9 +525,9 @@ func (d *Deployer) handlePromoteFailure(ctx context.Context, inst string, st *st
 	restoreMsg := ""
 	if st.Current != nil {
 		if rErr := d.executeSwap(ctx, inst, st.Current, existingEnv, appEnvAbsent); rErr != nil {
-			restoreMsg = fmt.Sprintf("; restore to %s failed: %v", commitShort(st.Current.InfraCommit), rErr)
+			restoreMsg = fmt.Sprintf("; restore to %s failed: %v", RevShort(*st.Current), rErr)
 		} else {
-			restoreMsg = fmt.Sprintf("; restored to %s", commitShort(st.Current.InfraCommit))
+			restoreMsg = fmt.Sprintf("; restored to %s", RevShort(*st.Current))
 		}
 	}
 	return d.failPermanent(ctx, inst, st, want, deployID, actor, now, failedMsg+restoreMsg, resEnvVals)
@@ -653,30 +655,26 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		}
 	}
 
-	// Step 2: Checkout want.InfraCommit, load contract, spec, decisions, Validate + Check
+	// Step 2: Checkout want (commit or contract digest), load contract, spec, decisions, Validate + Check
 	promoted := false
 	defer func() {
-		if !promoted && st.Current != nil && st.Current.InfraCommit != "" {
-			if r := d.repo(inst); r != nil {
-				// The restore must also run after a cancel or timeout of ctx.
-				rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-				defer rcancel()
-				if rErr := r.Checkout(rctx, st.Current.InfraCommit); rErr != nil {
-					errMsg := fmt.Sprintf("restore checkout failed: %v", rErr)
-					if res.Detail != "" {
-						res.Detail += "; " + errMsg
-					} else {
-						res.Detail = errMsg
-					}
+		if !promoted && hasInfra(st.Current) {
+			// The restore must also run after a cancel or timeout of ctx.
+			rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+			defer rcancel()
+			if rErr := d.checkout(rctx, inst, *st.Current); rErr != nil {
+				errMsg := fmt.Sprintf("restore checkout failed: %v", rErr)
+				if res.Detail != "" {
+					res.Detail += "; " + errMsg
+				} else {
+					res.Detail = errMsg
 				}
 			}
 		}
 	}()
 
-	if r := d.repo(inst); r != nil {
-		if err := r.Checkout(ctx, want.InfraCommit); err != nil {
-			return Result{}, err
-		}
+	if err := d.checkout(ctx, inst, want); err != nil {
+		return Result{}, err
 	}
 
 	instDir := filepath.Join(d.deployRoot(), inst)
@@ -1103,12 +1101,12 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			}
 		}
 
-		okDetail := fmt.Sprintf("commit %s deployed", commitShort(want.InfraCommit))
+		okDetail := fmt.Sprintf("%s %s deployed", revWord(want), RevShort(want))
 		_ = d.notifier().Send(ctx, notify.Message{
 			Host:  d.hostName(),
 			Level: "info",
 			Title: fmt.Sprintf("%s deploy OK", inst),
-			Text:  fmt.Sprintf("commit %s deployed successfully", commitShort(want.InfraCommit)),
+			Text:  fmt.Sprintf("%s %s deployed successfully", revWord(want), RevShort(want)),
 		})
 
 		st.Previous = st.Current
@@ -1170,7 +1168,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 	redactedLogs := lastLines(redact(timeoutPrefix+logs, secrets), 20)
 
-	if st.Current == nil || st.Current.InfraCommit == "" {
+	if !hasInfra(st.Current) {
 		st.Status = state.StatusFailed
 		st.FailedHash = want.Hash()
 		if timeoutPrefix != "" {

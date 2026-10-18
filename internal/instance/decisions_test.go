@@ -711,3 +711,52 @@ func TestBackupKeysAreStoredUnderTheirKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestInfraSourceRoundTrip(t *testing.T) {
+	p, _ := load(t)
+	path := filepath.Join(t.TempDir(), "cvctl.env")
+	d := full()
+	d.InfraSource, d.InfraRef = SourceOCI, "ghcr.io/org/proj-infra"
+	if err := Write(path, d); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), "CVCTL_INFRA_SOURCE=oci\n") || !strings.Contains(string(raw), "CVCTL_INFRA_REF=ghcr.io/org/proj-infra\n") {
+		t.Fatalf("cvctl.env:\n%s", raw)
+	}
+	got, err := Read(path, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.IsOCI() || got.InfraRef != d.InfraRef {
+		t.Fatalf("read back %q %q", got.InfraSource, got.InfraRef)
+	}
+
+	g := full()
+	g.InfraSource = SourceGit
+	if _, ok := g.Entries()["CVCTL_INFRA_SOURCE"]; ok {
+		t.Fatal("git is the default and must not be written")
+	}
+}
+
+func TestCheckInfraSource(t *testing.T) {
+	p, cat := load(t)
+	d := full()
+	d.InfraSource = SourceOCI
+	if !hasCode(Check(d, p, cat), "E_DECISION_MISSING") {
+		t.Fatal("oci without CVCTL_INFRA_REF must be rejected")
+	}
+	d.InfraSource = "svn"
+	if !hasCode(Check(d, p, cat), "E_DECISION_INVALID") {
+		t.Fatal("unknown infra source must be rejected")
+	}
+}
+
+func hasCode(is []output.Issue, code string) bool {
+	for _, i := range is {
+		if i.Code == code {
+			return true
+		}
+	}
+	return false
+}

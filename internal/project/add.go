@@ -137,9 +137,11 @@ type AddOptions struct {
 	Branch   string
 	TrackTag string
 	Strategy string
-	Set      map[string]string
-	Domains  map[string]string
-	Ext      map[string]map[string]string
+	// InfraPath is the contract directory inside a git infra repo (monorepos).
+	InfraPath string
+	Set       map[string]string
+	Domains   map[string]string
+	Ext       map[string]map[string]string
 }
 
 type UpdateOptions struct {
@@ -220,13 +222,16 @@ func repoURLErr(url string) error {
 	return &output.Error{
 		Code:    "E_PROJECT_REPO_URL",
 		Message: fmt.Sprintf("invalid repository URL %q", gitrepo.RedactURL(url)),
-		Hint:    "accepted formats: ssh://..., git@host:path, https://... (or file://... with CVCTL_ALLOW_FILE_REPOS=1)",
+		Hint:    "accepted formats: ssh://..., git@host:path, https://..., oci://host/repository (or file://... with CVCTL_ALLOW_FILE_REPOS=1)",
 	}
 }
 
 func validateRepoURL(repoURL string) error {
 	if strings.HasPrefix(repoURL, "-") {
 		return repoURLErr(repoURL)
+	}
+	if isOCIURL(repoURL) {
+		return validateOCIRef(repoURL)
 	}
 	if strings.HasPrefix(repoURL, "file://") {
 		if os.Getenv("CVCTL_ALLOW_FILE_REPOS") == "1" {
@@ -779,6 +784,9 @@ func runDeploy(ctx context.Context, e *Env, repo RepoLike, d *instance.Decisions
 		}
 	}
 	deps := deploy.SourceDepsWithRoots(d.Instance, e.runner(), e.Host, e.Secrets, e.deployRoot(), e.stateRoot(), e.fs())
+	if e.Deployer.Contracts == nil {
+		e.Deployer.Contracts = deploy.OCIFetcher(deps.OCI)
+	}
 	if repo != nil {
 		deps.Repo = repo
 	}
@@ -842,6 +850,21 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	if err := validateRepoURL(repoURL); err != nil {
 		return nil, err
 	}
+	isOCI := isOCIURL(repoURL)
+	infraPath := "."
+	if opts.InfraPath != "" {
+		if isOCI {
+			return nil, &output.UsageError{Err: &output.Error{
+				Code:    "E_USAGE_INVALID",
+				Message: "--infra-path applies to git sources only",
+				Hint:    "an OCI artifact holds the contract at its root; drop --infra-path",
+			}}
+		}
+		if err := validateInfraPath(opts.InfraPath); err != nil {
+			return nil, err
+		}
+		infraPath = opts.InfraPath
+	}
 
 	inst := DeriveInstanceName(repoURL, opts.Project, envName)
 	if err := ValidateInstance(e.deployRoot(), e.stateRoot(), inst, envName); err != nil {
@@ -862,7 +885,8 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 
 	keyPath := ""
 	pubKey := ""
-	if !isFileRepo {
+	// An OCI source uses the host's registry token: no deploy key, no git.
+	if !isFileRepo && !isOCI {
 		keyDir := filepath.Join(e.stateRoot(), inst)
 		keyPath = filepath.Join(keyDir, "deploy_key")
 		pubPath := keyPath + ".pub"
@@ -962,11 +986,26 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		}
 	}
 
+	trackTag := opts.TrackTag
+	if trackTag == "" && envName == "dev" {
+		trackTag = "develop"
+	}
+
 	infraDir := filepath.Join(instDir, "infra")
-	repo := e.repo(infraDir, keyPath)
-	if err := repo.Clone(ctx, repoURL, branch); err != nil {
-		cleanupInst()
-		return nil, err
+	var repo RepoLike
+	ociRef := ""
+	if isOCI {
+		ociRef = strings.TrimPrefix(repoURL, ociScheme)
+		if _, err := installOCI(ctx, e, instDir, ociRef, ociTrackTag(envName, trackTag)); err != nil {
+			cleanupInst()
+			return nil, err
+		}
+	} else {
+		repo = e.repo(infraDir, keyPath)
+		if err := repo.Clone(ctx, repoURL, branch); err != nil {
+			cleanupInst()
+			return nil, err
+		}
 	}
 
 	cat, err := e.catalog()
@@ -975,7 +1014,7 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		return nil, err
 	}
 
-	p, spec, err := loadContractAndSpec(e.fs(), infraDir, cat)
+	p, spec, err := loadContractAndSpec(e.fs(), contractDir(infraDir, infraPath), cat)
 	if err != nil {
 		cleanupInst()
 		return nil, err
@@ -1003,21 +1042,21 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		}
 	}
 
-	trackTag := opts.TrackTag
-	if trackTag == "" && envName == "dev" {
-		trackTag = "develop"
-	}
-
 	d := &instance.Decisions{
 		Instance:    inst,
 		Env:         envName,
 		InfraBranch: branch,
 		TrackTag:    trackTag,
-		InfraPath:   ".",
+		InfraPath:   infraPath,
 		Strategy:    opts.Strategy,
 		Services:    make(map[string]instance.ServiceDecision),
 		Domains:     make(map[string]string),
 		Digests:     make(map[string]string),
+	}
+	if isOCI {
+		d.InfraBranch = ""
+		d.InfraSource = instance.SourceOCI
+		d.InfraRef = ociRef
 	}
 	for k, v := range opts.Domains {
 		d.Domains[k] = v
@@ -1066,11 +1105,13 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	appEnvPath := filepath.Join(instDir, "app.env")
 
 	addEntries := d.Entries()
-	storedURL, stripped := storableInfraURL(repoURL)
-	addEntries[keyInfraURL] = storedURL
 	var warnings []string
-	if stripped {
-		warnings = append(warnings, strippedURLWarning)
+	if !isOCI {
+		storedURL, stripped := storableInfraURL(repoURL)
+		addEntries[keyInfraURL] = storedURL
+		if stripped {
+			warnings = append(warnings, strippedURLWarning)
+		}
 	}
 	if err := e.fs().WriteFile(cvctlEnvPath, instance.FormatEnv(addEntries), 0o640, deployOwner); err != nil {
 		cleanupInst()
@@ -1162,28 +1203,45 @@ func Update(ctx context.Context, e *Env, inst string, opts UpdateOptions) (*AddR
 	}
 
 	infraDir := filepath.Join(instDir, "infra")
-	repo := e.repo(infraDir, keyPath)
 
 	rawEnv, err := readRawEnv(e.fs(), cvctlEnvPath)
 	if err != nil {
 		return nil, err
 	}
-	branch := rawEnv["CVCTL_INFRA_BRANCH"]
-	if branch == "" {
-		branch = "develop"
-		if rawEnv["CVCTL_ENV"] == "prod" {
-			branch = "main"
-		}
-	}
+	isOCI := rawEnv[keySource] == instance.SourceOCI
 
 	// Decisions must be asked against the contract that will be deployed, so the
-	// working tree is moved to the origin tip before anything is loaded.
-	commit, err := repo.Fetch(ctx, branch)
-	if err != nil {
-		return nil, err
-	}
-	if err := repo.Checkout(ctx, commit); err != nil {
-		return nil, err
+	// infra tree is moved to the tip (git) or the tag's artifact (OCI) before
+	// anything is loaded.
+	var repo RepoLike
+	if isOCI {
+		ref := rawEnv[keyRef]
+		if ref == "" {
+			return nil, &output.Error{
+				Code:    "E_DECISION_MISSING",
+				Message: fmt.Sprintf("%s has %s=oci but no %s", cvctlEnvPath, keySource, keyRef),
+				Hint:    "set " + keyRef + " to host/repository",
+			}
+		}
+		if _, err := installOCI(ctx, e, instDir, ref, ociTrackTag(rawEnv["CVCTL_ENV"], rawEnv["CVCTL_TRACK_TAG"])); err != nil {
+			return nil, err
+		}
+	} else {
+		repo = e.repo(infraDir, keyPath)
+		branch := rawEnv["CVCTL_INFRA_BRANCH"]
+		if branch == "" {
+			branch = "develop"
+			if rawEnv["CVCTL_ENV"] == "prod" {
+				branch = "main"
+			}
+		}
+		commit, err := repo.Fetch(ctx, branch)
+		if err != nil {
+			return nil, err
+		}
+		if err := repo.Checkout(ctx, commit); err != nil {
+			return nil, err
+		}
 	}
 
 	cat, err := e.catalog()
@@ -1191,7 +1249,7 @@ func Update(ctx context.Context, e *Env, inst string, opts UpdateOptions) (*AddR
 		return nil, err
 	}
 
-	p, spec, err := loadContractAndSpec(e.fs(), infraDir, cat)
+	p, spec, err := loadContractAndSpec(e.fs(), contractDir(infraDir, rawEnv["CVCTL_INFRA_PATH"]), cat)
 	if err != nil {
 		return nil, err
 	}
@@ -1265,7 +1323,7 @@ func Update(ctx context.Context, e *Env, inst string, opts UpdateOptions) (*AddR
 		merged[k] = v
 	}
 	var warnings []string
-	if merged[keyInfraURL] == "" {
+	if merged[keyInfraURL] == "" && !isOCI {
 		if url, stripped := recordedInfraURL(ctx, e, infraDir); url != "" {
 			merged[keyInfraURL] = url
 			if stripped {

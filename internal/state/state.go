@@ -32,12 +32,16 @@ const (
 )
 
 type Desired struct {
-	InfraCommit string            `json:"infra_commit"`
+	InfraCommit string `json:"infra_commit"`
+	// InfraDigest is the contract artifact manifest digest of an OCI source.
+	InfraDigest string            `json:"infra_digest,omitempty"`
 	Digests     map[string]string `json:"digests,omitempty"`
 }
 
 type canonicalDesired struct {
-	InfraCommit string      `json:"infra_commit"`
+	InfraCommit string `json:"infra_commit"`
+	// omitempty keeps the hash of git-sourced states unchanged.
+	InfraDigest string      `json:"infra_digest,omitempty"`
 	Digests     [][2]string `json:"digests"`
 }
 
@@ -51,6 +55,7 @@ func (d Desired) Hash() string {
 	})
 	payload, _ := json.Marshal(canonicalDesired{
 		InfraCommit: d.InfraCommit,
+		InfraDigest: d.InfraDigest,
 		Digests:     digests,
 	})
 	h := sha256.Sum256(payload)

@@ -40,6 +40,8 @@ type Decisions struct {
 	InfraBranch string
 	TrackTag    string // dev only
 	InfraPath   string
+	InfraSource string // git | oci; empty means git
+	InfraRef    string // oci only: artifact repository host/repo, no tag
 	Strategy    string // recreate | blue-green
 	Services    map[string]ServiceDecision
 	Domains     map[string]string
@@ -68,6 +70,8 @@ const (
 	keyBranch   = "CVCTL_INFRA_BRANCH"
 	keyTrack    = "CVCTL_TRACK_TAG"
 	keyPath     = "CVCTL_INFRA_PATH"
+	keySource   = "CVCTL_INFRA_SOURCE"
+	keyRef      = "CVCTL_INFRA_REF"
 	keyStrategy = "CVCTL_STRATEGY"
 	svcPrefix   = "CVCTL_SVC_"
 	domPrefix   = "CVCTL_DOMAIN_"
@@ -80,6 +84,15 @@ const (
 	keyBackupRestic    = "CVCTL_BACKUP_RESTIC_PASSWORD"
 	backupExtPrefix    = "CVCTL_BACKUP_EXT_"
 )
+
+// Infra sources.
+const (
+	SourceGit = "git"
+	SourceOCI = "oci"
+)
+
+// IsOCI reports whether the contract comes from an OCI artifact.
+func (d *Decisions) IsOCI() bool { return d != nil && d.InfraSource == SourceOCI }
 
 func readErr(path string, err error) error {
 	return &output.Error{
@@ -111,6 +124,8 @@ func Read(path string, p *contract.Project) (*Decisions, error) {
 		InfraBranch: m[keyBranch],
 		TrackTag:    m[keyTrack],
 		InfraPath:   m[keyPath],
+		InfraSource: m[keySource],
+		InfraRef:    m[keyRef],
 		Strategy:    m[keyStrategy],
 		Services:    map[string]ServiceDecision{},
 		Domains:     map[string]string{},
@@ -235,6 +250,11 @@ func (d *Decisions) Entries() map[string]string {
 	set(keyBranch, d.InfraBranch)
 	set(keyTrack, d.TrackTag)
 	set(keyPath, d.InfraPath)
+	// git is the default, so git instances keep the file they had.
+	if d.InfraSource != SourceGit {
+		set(keySource, d.InfraSource)
+	}
+	set(keyRef, d.InfraRef)
 	set(keyStrategy, d.Strategy)
 	for name, s := range d.Services {
 		pre := svcPrefix + contract.Normalize(name) + "_"
@@ -478,6 +498,15 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 	case "dev", "prod":
 	default:
 		add("E_DECISION_INVALID", "", fmt.Sprintf("env %q is not valid", d.Env), "use dev or prod")
+	}
+	switch d.InfraSource {
+	case "", SourceGit:
+	case SourceOCI:
+		if d.InfraRef == "" {
+			add("E_DECISION_MISSING", "", "oci infra source has no artifact reference", "set CVCTL_INFRA_REF to host/repository")
+		}
+	default:
+		add("E_DECISION_INVALID", "", fmt.Sprintf("infra source %q is not valid", d.InfraSource), "use git or oci")
 	}
 	switch d.Strategy {
 	case "":

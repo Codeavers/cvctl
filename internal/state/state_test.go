@@ -13,6 +13,26 @@ import (
 	"github.com/codeavers/cvctl/internal/sys/systest"
 )
 
+// The pinned values were computed before InfraDigest existed; a change
+// would redeploy every git-sourced instance once.
+func TestDesiredHashGitPinned(t *testing.T) {
+	d := Desired{InfraCommit: "0123456789abcdef0123456789abcdef01234567", Digests: map[string]string{
+		"web": "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+		"api": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+	}}
+	if got := d.Hash(); got != "55224c3bb801de423b1e80dbefdb1a7abf31e7bccc80a67c941c05c786074807" {
+		t.Fatalf("git desired hash changed: %s", got)
+	}
+	if got := (Desired{InfraCommit: "abc"}).Hash(); got != "4557f132d28b9bd16e1c718a163b85273d2c771083fcf104cd6e026fb7979816" {
+		t.Fatalf("git desired hash without digests changed: %s", got)
+	}
+	o := d
+	o.InfraDigest = "sha256:" + strings.Repeat("1", 64)
+	if o.Hash() == d.Hash() {
+		t.Fatal("InfraDigest must change the hash")
+	}
+}
+
 func TestDesiredHashStable(t *testing.T) {
 	d1 := Desired{
 		InfraCommit: "a1b2c3d4e5",

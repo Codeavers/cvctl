@@ -25,6 +25,10 @@ func Wire(d *Deployer, run sys.Runner) {
 		d.Backup = BackupTargetFrom(d.Host, d.Secrets)
 	}
 
+	if d.Contracts == nil {
+		d.Contracts = OCIFetcher(OCIAuth(d.Host, d.Secrets))
+	}
+
 	d.Repo = func(inst string) CheckoutAPI {
 		keyPath := filepath.Join(d.stateRoot(), inst, "deploy_key")
 		exists := false
