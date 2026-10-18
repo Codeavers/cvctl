@@ -34,10 +34,12 @@ var instanceNameRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 const alphaNum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-func randomPassword32() (string, error) {
-	b := make([]byte, 32)
+func randomPassword32() (string, error) { return randomAlnum(32) }
+
+func randomAlnum(n int) (string, error) {
+	b := make([]byte, n)
 	var buf [1]byte
-	for i := 0; i < 32; {
+	for i := 0; i < n; {
 		if _, err := rand.Read(buf[:]); err != nil {
 			return "", err
 		}
@@ -1012,7 +1014,17 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	for k, v := range opts.Domains {
 		d.Domains[k] = v
 	}
-	if err := applyExt(d, p, cat, opts.Ext); err != nil {
+	ext, err := takeBackupExt(d, p, opts.Ext)
+	if err != nil {
+		cleanupInst()
+		return nil, err
+	}
+	if err := applyExt(d, p, cat, ext); err != nil {
+		cleanupInst()
+		return nil, err
+	}
+	// A new instance has no backups yet: every generation uses its own keys.
+	if _, err := ensureBackupKeys(d); err != nil {
 		cleanupInst()
 		return nil, err
 	}
@@ -1181,8 +1193,22 @@ func Update(ctx context.Context, e *Env, inst string, opts UpdateOptions) (*AddR
 		return nil, err
 	}
 
-	if err := applyExt(d, p, cat, opts.Ext); err != nil {
+	ext, err := takeBackupExt(d, p, opts.Ext)
+	if err != nil {
 		return nil, err
+	}
+	if err := applyExt(d, p, cat, ext); err != nil {
+		return nil, err
+	}
+	// Backups taken so far are encrypted with the host keys: services that may
+	// hold them move to a new generation (restic: a new repository) that the
+	// instance's own keys encrypt. Services first decided below have none.
+	newKeys, err := ensureBackupKeys(d)
+	if err != nil {
+		return nil, err
+	}
+	if newKeys {
+		migrateBackupKeyGen(d, p, nil)
 	}
 
 	appEnvPath := filepath.Join(instDir, "app.env")

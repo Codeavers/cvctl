@@ -34,6 +34,94 @@ type Options struct {
 // BackupTarget is the object storage destination and key material for wal-g.
 type BackupTarget struct {
 	Host, Endpoint, Bucket, Region, AccessKey, SecretKey, LibsodiumKey, ResticPassword string
+	// Local is the host silo: per-instance users are provisioned in it.
+	Local bool
+	// Instance is set on a per-instance target (BackupTargetFor): AccessKey is
+	// that instance's own silo user or external key.
+	Instance string
+	// HostLibsodiumKey and HostResticPassword decrypt what was written before
+	// the instance got its own keys: WAL-G generations and restic repository
+	// indexes below KeyGen[svc].
+	HostLibsodiumKey, HostResticPassword string
+	KeyGen                               map[string]int
+}
+
+// BackupTargetFor is the backup target of one instance: its own credentials
+// and keys over the host's endpoint, bucket and region, or its own external
+// bucket when Backup.Ext is set and the host is not the silo. An instance
+// without its own keys keeps the host target, as before per-instance keys.
+func BackupTargetFor(host *BackupTarget, d *instance.Decisions) *BackupTarget {
+	if host == nil || d == nil {
+		return host
+	}
+	bd := d.Backup
+	if !bd.HasKeys() {
+		return host
+	}
+	t := *host
+	t.Instance = d.Instance
+	t.HostLibsodiumKey, t.HostResticPassword = host.LibsodiumKey, host.ResticPassword
+	t.LibsodiumKey, t.ResticPassword = bd.LibsodiumKey, bd.ResticPassword
+	t.KeyGen = map[string]int{}
+	for name, s := range d.Services {
+		if s.BackupKeyGen > 0 {
+			t.KeyGen[name] = s.BackupKeyGen
+		}
+	}
+	switch {
+	case !host.Local && bd.Ext["access_key"] != "" && bd.Ext["secret_key"] != "":
+		t.AccessKey, t.SecretKey = bd.Ext["access_key"], bd.Ext["secret_key"]
+		if v := bd.Ext["endpoint"]; v != "" {
+			t.Endpoint = v
+		}
+		if v := bd.Ext["bucket"]; v != "" {
+			t.Bucket = v
+		}
+		if v := bd.Ext["region"]; v != "" {
+			t.Region = v
+		}
+	case host.Local && bd.AccessKey != "" && bd.SecretKey != "":
+		t.AccessKey, t.SecretKey = bd.AccessKey, bd.SecretKey
+	default:
+		// External storage without per-instance credentials: the host's
+		// credentials (status warns), but still the instance's keys.
+		t.Instance = ""
+	}
+	return &t
+}
+
+// UserPrefix is the part of the bucket the instance's silo user may touch.
+func (b *BackupTarget) UserPrefix(inst string) string { return b.Host + "/" + inst }
+
+// libsodiumKey is the key of WAL-G generation gen of svc.
+func (b *BackupTarget) libsodiumKey(svc string, gen int) string {
+	if b.HostLibsodiumKey != "" && gen < b.KeyGen[svc] {
+		return b.HostLibsodiumKey
+	}
+	return b.LibsodiumKey
+}
+
+// ResticRepoIndex is the restic repository svc backs up into: a service that
+// got per-instance keys after its first backups moves to a new repository.
+func (b *BackupTarget) ResticRepoIndex(svc string) int { return b.KeyGen[svc] }
+
+// ResticEnv is the restic environment of repository index idx of svc.
+func (b *BackupTarget) ResticEnv(inst, svc string, idx int) map[string]string {
+	repo := "s3:" + b.Endpoint + "/" + b.Bucket + "/" + b.Host + "/" + inst + "/" + svc
+	if idx > 0 {
+		repo += "/r" + strconv.Itoa(idx)
+	}
+	pass := b.ResticPassword
+	if b.HostResticPassword != "" && idx < b.KeyGen[svc] {
+		pass = b.HostResticPassword
+	}
+	return map[string]string{
+		"RESTIC_REPOSITORY":     repo,
+		"RESTIC_PASSWORD":       pass,
+		"AWS_ACCESS_KEY_ID":     b.AccessKey,
+		"AWS_SECRET_ACCESS_KEY": b.SecretKey,
+		"AWS_DEFAULT_REGION":    b.Region,
+	}
 }
 
 // NetworkEdge is the per-instance network shared with Traefik.
@@ -71,7 +159,7 @@ func (b *BackupTarget) Env(inst, svc string, gen int) map[string]string {
 		"AWS_ENDPOINT":                 b.Endpoint,
 		"AWS_REGION":                   b.Region,
 		"AWS_S3_FORCE_PATH_STYLE":      "true",
-		"WALG_LIBSODIUM_KEY":           b.LibsodiumKey,
+		"WALG_LIBSODIUM_KEY":           b.libsodiumKey(svc, gen),
 		"WALG_LIBSODIUM_KEY_TRANSFORM": "hex",
 		"WALG_COMPRESSION_METHOD":      "zstd",
 	}

@@ -30,21 +30,17 @@ func (r *Runner) resticEnvPath(inst, svc string) string {
 
 // writeResticEnv keeps the secrets out of argv: docker reads them from the file.
 func (r *Runner) writeResticEnv(inst, svc string) (string, error) {
-	if r.Host.ResticPassword == "" {
+	b := r.Host
+	idx := b.ResticRepoIndex(svc)
+	env := b.ResticEnv(inst, svc, idx)
+	if env["RESTIC_PASSWORD"] == "" {
 		return "", &output.Error{
 			Code:    "E_BACKUP_NOT_CONFIGURED",
 			Message: "restic_password is not set",
 			Hint:    "create /etc/cvctl/secrets/restic_password (run cvctl init)",
 		}
 	}
-	b := r.Host
-	body := envFileBody(map[string]string{
-		"RESTIC_REPOSITORY":     "s3:" + b.Endpoint + "/" + b.Bucket + "/" + b.Host + "/" + inst + "/" + svc,
-		"RESTIC_PASSWORD":       b.ResticPassword,
-		"AWS_ACCESS_KEY_ID":     b.AccessKey,
-		"AWS_SECRET_ACCESS_KEY": b.SecretKey,
-		"AWS_DEFAULT_REGION":    b.Region,
-	})
+	body := envFileBody(env)
 	path := r.resticEnvPath(inst, svc)
 	if err := r.FS.WriteFile(path, body, 0o640, deployOwner); err != nil {
 		return "", &output.Error{

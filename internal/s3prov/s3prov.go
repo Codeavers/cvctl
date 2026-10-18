@@ -120,10 +120,11 @@ type policyDoc struct {
 }
 
 type statement struct {
-	Effect    string     `json:"Effect"`
-	Principal *principal `json:"Principal,omitempty"`
-	Action    []string   `json:"Action"`
-	Resource  []string   `json:"Resource"`
+	Effect    string                         `json:"Effect"`
+	Principal *principal                     `json:"Principal,omitempty"`
+	Action    []string                       `json:"Action"`
+	Resource  []string                       `json:"Resource"`
+	Condition map[string]map[string][]string `json:"Condition,omitempty"`
 }
 
 type principal struct {

@@ -352,6 +352,10 @@ func (e *OpsEnv) s3Warnings(instances []string) []string {
 		if err != nil {
 			continue
 		}
+		if e.Host != nil && e.Host.Storage == "s3" && len(backup.Targets(p, d)) > 0 &&
+			(d.Backup.Ext["access_key"] == "" || d.Backup.Ext["secret_key"] == "") {
+			warnings = append(warnings, fmt.Sprintf("%s: backups use the host S3 credentials; any instance can delete them (set per-instance credentials)", inst))
+		}
 		for _, ds := range p.Data {
 			sd := d.Services[ds.Name]
 			if d.Env != "prod" && sd.Mode == "local" {

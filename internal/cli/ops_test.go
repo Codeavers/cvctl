@@ -1297,3 +1297,35 @@ func TestStatusUnreadableInstanceSkipped(t *testing.T) {
 		t.Fatalf("expected json exit 0 for badcontract-dev, got %d out=%s err=%s", code, out, errb)
 	}
 }
+
+func TestStatusWarnsHostS3CredentialsForBackups(t *testing.T) {
+	tmp, env := setupOpsFixture(t, "demo-dev")
+	writeStatusInstance(t, tmp, "demo-dev", "dev", "local")
+	compose := strings.Replace(statusS3Compose, "cvctl.backup: none", "cvctl.backup: volume", 1)
+	if err := os.WriteFile(filepath.Join(tmp, "demo-dev", "infra", "compose.yml"), []byte(compose), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env.Host = &hostcfg.Config{Storage: "s3"}
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+
+	const want = "demo-dev: backups use the host S3 credentials; any instance can delete them (set per-instance credentials)"
+	code, out, errb := run(t, "status")
+	if code != 0 || !strings.Contains(out, "warning: "+want) {
+		t.Fatalf("code=%d out=%s err=%s", code, out, errb)
+	}
+
+	envPath := filepath.Join(tmp, "demo-dev", "cvctl.env")
+	raw, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = append(raw, []byte("CVCTL_BACKUP_EXT_ACCESS_KEY=ownkey\nCVCTL_BACKUP_EXT_SECRET_KEY=ownsecret\n")...)
+	if err := os.WriteFile(envPath, raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, _ := run(t, "status"); code != 0 || strings.Contains(out, want) {
+		t.Fatalf("per-instance credentials must silence the warning: code=%d out=%s", code, out)
+	}
+}

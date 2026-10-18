@@ -383,6 +383,9 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 	if err != nil {
 		return nil, err
 	}
+	if r, err = r.forInstance(ctx, inst, p, d); err != nil {
+		return nil, err
+	}
 	var target *Target
 	for _, t := range Targets(p, d) {
 		if t.Service == svc {

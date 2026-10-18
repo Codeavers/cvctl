@@ -181,13 +181,13 @@ func TestBackupTargetFrom(t *testing.T) {
 	_ = cfg.Set("S3_BUCKET", "b")
 
 	got := deploy.BackupTargetFrom(cfg, sec)
-	if got == nil || got.Endpoint != "http://ext:9000" || got.Region != "us-east-1" || got.Host != "h1" || got.ResticPassword != "rp" {
+	if got == nil || got.Endpoint != "http://ext:9000" || got.Region != "us-east-1" || got.Host != "h1" || got.ResticPassword != "rp" || got.Local {
 		t.Fatalf("fallback/default wrong: %+v", got)
 	}
 	_ = cfg.Set("S3_ENDPOINT_INTERNAL", "http://cvctl-storage:9000")
 	_ = cfg.Set("S3_REGION", "eu-west-1")
 	got = deploy.BackupTargetFrom(cfg, sec)
-	if got.Endpoint != "http://cvctl-storage:9000" || got.Region != "eu-west-1" {
+	if got.Endpoint != "http://cvctl-storage:9000" || got.Region != "eu-west-1" || !got.Local {
 		t.Fatalf("internal endpoint/region not used: %+v", got)
 	}
 	if deploy.BackupTargetFrom(nil, sec) != nil || deploy.BackupTargetFrom(cfg, nil) != nil {

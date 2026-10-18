@@ -19,6 +19,10 @@ func (r *Runner) RestoreFresh(ctx context.Context, inst, svc string, p *contract
 	if r.Host == nil {
 		return notConfigured()
 	}
+	r, err := r.forInstance(ctx, inst, p, d)
+	if err != nil {
+		return err
+	}
 	var target *Target
 	for _, t := range Targets(p, d) {
 		if t.Service == svc {

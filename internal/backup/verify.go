@@ -74,7 +74,7 @@ func (r *Runner) Verify(ctx context.Context, inst, only string) ([]Result, error
 	if err != nil {
 		return nil, err
 	}
-	ts, err := r.targets(inst, only)
+	r, ts, err := r.targets(ctx, inst, only)
 	if err != nil {
 		return nil, err
 	}

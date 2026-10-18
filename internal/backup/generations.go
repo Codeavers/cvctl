@@ -29,6 +29,9 @@ func (r *Runner) BucketGenerations(ctx context.Context, inst, svc string) (highe
 	if err != nil {
 		return -1, -1, err
 	}
+	if r, err = r.forInstance(ctx, inst, p, d); err != nil {
+		return -1, -1, err
+	}
 	return r.bucketGenerations(ctx, inst, svc, p, d)
 }
 

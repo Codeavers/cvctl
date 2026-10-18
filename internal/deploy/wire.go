@@ -149,5 +149,6 @@ func BackupTargetFrom(cfg *hostcfg.Config, sec *hostcfg.Secrets) *render.BackupT
 	return &render.BackupTarget{
 		Host: cfg.HostName, Endpoint: endpoint, Bucket: cfg.S3Bucket, Region: region,
 		AccessKey: ak, SecretKey: sk, LibsodiumKey: key, ResticPassword: pass,
+		Local: cfg.Storage != "s3" && cfg.S3EndpointInternal != "",
 	}
 }

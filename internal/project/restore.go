@@ -315,17 +315,39 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 	var walg []string
 	updates := map[string]string{}
 	genUpdates = updates
+	// A bundle from before per-instance keys: the new generation (restic: a new
+	// repository) is the first one the instance's own keys encrypt.
+	newKeys, err := ensureBackupKeys(d)
+	if err != nil {
+		return fail(err)
+	}
+	if newKeys {
+		for k, v := range d.Entries() {
+			if strings.HasPrefix(k, "CVCTL_BACKUP_") {
+				updates[k] = v
+			}
+		}
+	}
 	for _, t := range targets {
+		sd := d.Services[t.Service]
+		pre := "CVCTL_SVC_" + contract.Normalize(t.Service) + "_BACKUP_"
 		if t.Strategy != backup.StrategyWalG {
+			if newKeys {
+				sd.BackupKeyGen = 1
+				d.Services[t.Service] = sd
+				updates[pre+"KEY_GEN"] = "1"
+			}
 			continue
 		}
-		sd := d.Services[t.Service]
 		next := max(sd.BackupGenMax, sd.BackupGen, usedGen[t.Service]) + 1
 		sd.BackupGen, sd.BackupGenMax = next, next
+		if newKeys {
+			sd.BackupKeyGen = next
+			updates[pre+"KEY_GEN"] = strconv.Itoa(next)
+		}
 		d.Services[t.Service] = sd
-		key := "CVCTL_SVC_" + contract.Normalize(t.Service) + "_BACKUP_GEN"
-		updates[key] = strconv.Itoa(next)
-		updates[key+"_MAX"] = strconv.Itoa(next)
+		updates[pre+"GEN"] = strconv.Itoa(next)
+		updates[pre+"GEN_MAX"] = strconv.Itoa(next)
 		walg = append(walg, t.Service)
 	}
 	if len(updates) > 0 {

@@ -184,7 +184,9 @@ func TestRestoreOrderOfOperations(t *testing.T) {
 		t.Fatalf("res: %+v", res)
 	}
 	raw, _ := os.ReadFile(filepath.Join(rig.instDir, "cvctl.env"))
-	for _, w := range []string{"CVCTL_SVC_DB_BACKUP_GEN=4", "CVCTL_SVC_DB_BACKUP_GEN_MAX=4", "CVCTL_INFRA_URL=", "CVCTL_SVC_DB_PASSWORD=existingpass123456789012345678"} {
+	// The bundle predates per-instance keys: the new generation is the first
+	// one the instance's own key encrypts.
+	for _, w := range []string{"CVCTL_SVC_DB_BACKUP_GEN=4", "CVCTL_SVC_DB_BACKUP_GEN_MAX=4", "CVCTL_SVC_DB_BACKUP_KEY_GEN=4", "CVCTL_BACKUP_LIBSODIUM_KEY=", "CVCTL_BACKUP_SECRET_KEY=", "CVCTL_INFRA_URL=", "CVCTL_SVC_DB_PASSWORD=existingpass123456789012345678"} {
 		if !strings.Contains(string(raw), w) {
 			t.Fatalf("cvctl.env missing %q:\n%s", w, raw)
 		}

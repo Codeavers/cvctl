@@ -30,12 +30,16 @@ func full() *Decisions {
 		Instance: "proj-dev", Env: "dev", InfraBranch: "develop", TrackTag: "dev",
 		InfraPath: ".", Strategy: "recreate",
 		Services: map[string]ServiceDecision{
-			"main-db": {Mode: "local", Version: "16", Creds: kinds.Credentials{User: "u", Password: "p\"w $x #y \\z\nline2 'q'", DB: "d"}},
+			"main-db": {Mode: "local", Version: "16", BackupGen: 3, BackupGenMax: 3, BackupKeyGen: 2, Creds: kinds.Credentials{User: "u", Password: "p\"w $x #y \\z\nline2 'q'", DB: "d"}},
 			"cache":   {Mode: "external", External: map[string]string{"url": "redis://h:6379/0?a=b#c"}},
 			"media":   {Mode: "external", External: map[string]string{"endpoint": "https://s3", "bucket": "b", "access_key": "ak", "secret_key": "sk", "region": "r"}},
 		},
 		Domains: map[string]string{"api": "api.example.com"},
 		Digests: map[string]string{"api": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		Backup: BackupDecision{
+			AccessKey: "bk-proj-dev", SecretKey: "s3cr3t", LibsodiumKey: "abcd", ResticPassword: "pw",
+			Ext: map[string]string{"bucket": "own", "access_key": "eak", "secret_key": "esk", "endpoint": "https://r2", "region": "auto"},
+		},
 	}
 }
 
@@ -691,5 +695,19 @@ func TestCheckProdPublicLocalRule(t *testing.T) {
 	p.X.S3["media"] = []contract.Bucket{{Name: "cache", Public: false}}
 	if is := Check(d, p, cat); len(is) != 0 {
 		t.Fatalf("prod with only private buckets should pass: %v", is)
+	}
+}
+
+func TestBackupKeysAreStoredUnderTheirKeys(t *testing.T) {
+	m := full().Entries()
+	for k, want := range map[string]string{
+		"CVCTL_BACKUP_ACCESS_KEY": "bk-proj-dev", "CVCTL_BACKUP_SECRET_KEY": "s3cr3t",
+		"CVCTL_BACKUP_LIBSODIUM_KEY": "abcd", "CVCTL_BACKUP_RESTIC_PASSWORD": "pw",
+		"CVCTL_BACKUP_EXT_ACCESS_KEY": "eak", "CVCTL_BACKUP_EXT_BUCKET": "own",
+		"CVCTL_SVC_MAIN_DB_BACKUP_KEY_GEN": "2",
+	} {
+		if m[k] != want {
+			t.Errorf("%s = %q, want %q", k, m[k], want)
+		}
 	}
 }

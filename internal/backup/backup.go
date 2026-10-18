@@ -239,7 +239,7 @@ func (r *Runner) secrets() []string {
 		return nil
 	}
 	var out []string
-	for _, s := range []string{r.Host.AccessKey, r.Host.SecretKey, r.Host.LibsodiumKey, r.Host.ResticPassword} {
+	for _, s := range []string{r.Host.AccessKey, r.Host.SecretKey, r.Host.LibsodiumKey, r.Host.ResticPassword, r.Host.HostLibsodiumKey, r.Host.HostResticPassword} {
 		if len(s) >= 4 {
 			out = append(out, s)
 		}
@@ -283,21 +283,48 @@ func (r *Runner) exec(ctx context.Context, cmd sys.Cmd) (sys.Result, error) {
 	return res, nil
 }
 
-func (r *Runner) targets(inst, only string) ([]Target, error) {
+// forInstance returns a copy of r whose Host is inst's own backup target. On
+// the local silo it first makes sure the instance's backup user exists, so a
+// backup or verify works before the instance's first deploy with its own keys.
+func (r *Runner) forInstance(ctx context.Context, inst string, p *contract.Project, d *instance.Decisions) (*Runner, error) {
+	rr := *r
+	rr.Host = render.BackupTargetFor(r.Host, d)
+	if rr.Host == nil || !rr.Host.Local || rr.Host.Instance == "" || len(Targets(p, d)) == 0 {
+		return &rr, nil
+	}
+	if _, err := rr.backupNet(ctx, inst); err != nil {
+		return nil, err
+	}
+	if err := ProvisionUser(ctx, rr.Run, rr.Host, inst); err != nil {
+		var oe *output.Error
+		if errors.As(err, &oe) {
+			oe.Message = rr.redact(oe.Message)
+			oe.Hint = "deploy the instance first: cvctl deploy " + inst
+		}
+		return nil, err
+	}
+	return &rr, nil
+}
+
+func (r *Runner) targets(ctx context.Context, inst, only string) (*Runner, []Target, error) {
 	p, d, err := r.Load(inst)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	rr, err := r.forInstance(ctx, inst, p, d)
+	if err != nil {
+		return nil, nil, err
 	}
 	all := Targets(p, d)
 	if only == "" {
-		return all, nil
+		return rr, all, nil
 	}
 	for _, t := range all {
 		if t.Service == only {
-			return []Target{t}, nil
+			return rr, []Target{t}, nil
 		}
 	}
-	return nil, &output.Error{
+	return nil, nil, &output.Error{
 		Code:    "E_BACKUP_NO_TARGET",
 		Message: fmt.Sprintf("service %q of %s has no backup (not a local data service with backups)", only, inst),
 		Hint:    "run cvctl backup list <instance> to see which services are backed up",
@@ -311,7 +338,7 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 	if r.Host == nil {
 		return nil, notConfigured()
 	}
-	ts, err := r.targets(inst, only)
+	r, ts, err := r.targets(ctx, inst, only)
 	if err != nil {
 		return nil, err
 	}
@@ -364,7 +391,7 @@ func (r *Runner) List(ctx context.Context, inst, svc string) ([]Snapshot, error)
 	if r.Host == nil {
 		return nil, notConfigured()
 	}
-	ts, err := r.targets(inst, svc)
+	r, ts, err := r.targets(ctx, inst, svc)
 	if err != nil {
 		return nil, err
 	}

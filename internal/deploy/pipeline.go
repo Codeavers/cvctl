@@ -332,6 +332,16 @@ func (d *Deployer) cvctlSecrets(path string) map[string]string {
 	}
 	out := map[string]string{}
 	for k, v := range m {
+		if strings.HasPrefix(k, "CVCTL_BACKUP_") {
+			switch k {
+			case "CVCTL_BACKUP_EXT_BUCKET", "CVCTL_BACKUP_EXT_ENDPOINT", "CVCTL_BACKUP_EXT_REGION":
+			default:
+				if len(v) >= 8 {
+					out[k] = v
+				}
+			}
+			continue
+		}
 		if !strings.HasPrefix(k, "CVCTL_SVC_") {
 			continue
 		}
@@ -742,6 +752,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	finalRoutePath := filepath.Join(d.traefikDir(), inst+".yml")
 
 	secrets := withSecrets(withSecrets(resEnv.Values, cvSecrets), d.backupSecrets())
+	backupTarget := render.BackupTargetFor(d.Backup, dec)
 	appEnvBytes := instance.FormatEnv(resEnv.Values)
 	stagingOverrideBytes, err := d.renderOverride(p, dec, cat, render.Options{
 		InstanceDir: instDir,
@@ -749,7 +760,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		AppEnvPath:  stagingAppEnvPath,
 
 		BackupEnvDir: stagingDir,
-		Backup:       d.Backup,
+		Backup:       backupTarget,
 	})
 	if err != nil {
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("render staging override failed: %v", err), secrets)
@@ -758,7 +769,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		InstanceDir: instDir,
 		Edge:        d.edge(),
 		AppEnvPath:  finalAppEnvPath,
-		Backup:      d.Backup,
+		Backup:      backupTarget,
 	})
 	if err != nil {
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("render final override failed: %v", err), secrets)
@@ -784,7 +795,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 		return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("write staging override failed: %v", err), secrets)
 	}
-	backupEnvs := render.BackupEnvs(p, dec, cat, render.Options{Backup: d.Backup})
+	backupEnvs := render.BackupEnvs(p, dec, cat, render.Options{Backup: backupTarget})
 	for svc, env := range backupEnvs {
 		path := render.BackupEnvPath(stagingDir, svc)
 		if err := fsys.WriteFile(path, instance.FormatEnv(env), 0o640, deployOwner); err != nil {
@@ -843,6 +854,10 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
 	}
 	if err := d.ensureNetworks(ctx, inst, p, dec); err != nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
+	}
+	if err := d.provisionBackupUser(ctx, inst, p, dec, backupTarget); err != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
 	}
@@ -1148,6 +1163,16 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 
 	return res, errors.Join(errs...)
+}
+
+// provisionBackupUser creates the instance's silo user and attaches the silo
+// to the instance's backup network, when the instance backs up a local
+// service: the same condition under which ensureNetworks creates that network.
+func (d *Deployer) provisionBackupUser(ctx context.Context, inst string, p *contract.Project, dec *instance.Decisions, t *render.BackupTarget) error {
+	if t == nil || len(backup.Targets(p, dec)) == 0 {
+		return nil
+	}
+	return backup.ProvisionUser(ctx, d.Run, t, inst)
 }
 
 // backupSecrets lists the backup credential values so error text redacts them.

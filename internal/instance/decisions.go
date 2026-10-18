@@ -27,6 +27,9 @@ type ServiceDecision struct {
 	// BackupGenMax is the highest generation ever used so it is never reused.
 	BackupGen    int
 	BackupGenMax int
+	// BackupKeyGen is the first generation (WAL-G) or restic repository
+	// index encrypted with the instance's own keys; older ones use the host's.
+	BackupKeyGen int
 	Creds        kinds.Credentials
 	External     map[string]string
 }
@@ -41,7 +44,23 @@ type Decisions struct {
 	Services    map[string]ServiceDecision
 	Domains     map[string]string
 	Digests     map[string]string
+	Backup      BackupDecision
 }
+
+// BackupDecision is the instance's own backup identity: S3 credentials on the
+// host silo (user bk-<inst>) and encryption keys. Ext, when set, points the
+// backups at the instance's own external bucket (fields bucket, endpoint,
+// region, access_key, secret_key).
+type BackupDecision struct {
+	AccessKey      string
+	SecretKey      string
+	LibsodiumKey   string
+	ResticPassword string
+	Ext            map[string]string
+}
+
+// HasKeys reports whether the instance has its own encryption keys.
+func (b BackupDecision) HasKeys() bool { return b.LibsodiumKey != "" && b.ResticPassword != "" }
 
 const (
 	keyInstance = "CVCTL_INSTANCE"
@@ -54,6 +73,12 @@ const (
 	domPrefix   = "CVCTL_DOMAIN_"
 	digPrefix   = "CVCTL_DIGEST_"
 	extInfix    = "_EXT_"
+
+	keyBackupAccess    = "CVCTL_BACKUP_ACCESS_KEY"
+	keyBackupSecret    = "CVCTL_BACKUP_SECRET_KEY"
+	keyBackupLibsodium = "CVCTL_BACKUP_LIBSODIUM_KEY"
+	keyBackupRestic    = "CVCTL_BACKUP_RESTIC_PASSWORD"
+	backupExtPrefix    = "CVCTL_BACKUP_EXT_"
 )
 
 func readErr(path string, err error) error {
@@ -90,6 +115,20 @@ func Read(path string, p *contract.Project) (*Decisions, error) {
 		Services:    map[string]ServiceDecision{},
 		Domains:     map[string]string{},
 		Digests:     map[string]string{},
+		Backup: BackupDecision{
+			AccessKey:      m[keyBackupAccess],
+			SecretKey:      m[keyBackupSecret],
+			LibsodiumKey:   m[keyBackupLibsodium],
+			ResticPassword: m[keyBackupRestic],
+		},
+	}
+	for k, v := range m {
+		if f, ok := strings.CutPrefix(k, backupExtPrefix); ok && f != "" {
+			if d.Backup.Ext == nil {
+				d.Backup.Ext = map[string]string{}
+			}
+			d.Backup.Ext[strings.ToLower(f)] = v
+		}
 	}
 	for _, a := range p.Apps {
 		n := contract.Normalize(a.Name)
@@ -128,6 +167,8 @@ func Read(path string, p *contract.Project) (*Decisions, error) {
 				sd.BackupGen = AtoiNonNeg(v)
 			case rest == "BACKUP_GEN_MAX":
 				sd.BackupGenMax = AtoiNonNeg(v)
+			case rest == "BACKUP_KEY_GEN":
+				sd.BackupKeyGen = AtoiNonNeg(v)
 			case rest == "USER":
 				sd.Creds.User = v
 			case rest == "PASSWORD":
@@ -206,6 +247,9 @@ func (d *Decisions) Entries() map[string]string {
 		if s.BackupGenMax > 0 {
 			set(pre+"BACKUP_GEN_MAX", strconv.Itoa(s.BackupGenMax))
 		}
+		if s.BackupKeyGen > 0 {
+			set(pre+"BACKUP_KEY_GEN", strconv.Itoa(s.BackupKeyGen))
+		}
 		set(pre+"USER", s.Creds.User)
 		set(pre+"PASSWORD", s.Creds.Password)
 		set(pre+"DB", s.Creds.DB)
@@ -214,6 +258,13 @@ func (d *Decisions) Entries() map[string]string {
 		for f, v := range s.External {
 			set(pre+"EXT_"+contract.Normalize(f), v)
 		}
+	}
+	set(keyBackupAccess, d.Backup.AccessKey)
+	set(keyBackupSecret, d.Backup.SecretKey)
+	set(keyBackupLibsodium, d.Backup.LibsodiumKey)
+	set(keyBackupRestic, d.Backup.ResticPassword)
+	for f, v := range d.Backup.Ext {
+		set(backupExtPrefix+contract.Normalize(f), v)
 	}
 	for name, v := range d.Domains {
 		set(domPrefix+contract.Normalize(name), v)

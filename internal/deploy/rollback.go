@@ -68,11 +68,12 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 	finalOverridePath := filepath.Join(instDir, "compose.cvctl.yml")
 	finalAppEnvPath := filepath.Join(instDir, "app.env")
 	finalRoutePath := filepath.Join(d.traefikDir(), inst+".yml")
+	backupTarget := render.BackupTargetFor(d.Backup, dec)
 	renderOpts := render.Options{
 		InstanceDir: instDir,
 		Edge:        d.edge(),
 		AppEnvPath:  finalAppEnvPath,
-		Backup:      d.Backup,
+		Backup:      backupTarget,
 	}
 
 	overrideBytes, err := d.renderOverride(p, dec, cat, renderOpts)
@@ -118,6 +119,9 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 		}
 	}
 	if err := d.ensureNetworks(ctx, inst, p, dec); err != nil {
+		return err
+	}
+	if err := d.provisionBackupUser(ctx, inst, p, dec, backupTarget); err != nil {
 		return err
 	}
 	if err := finalCompose.Up(ctx); err != nil {
