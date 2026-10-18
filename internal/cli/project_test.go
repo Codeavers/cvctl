@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/notify"
@@ -69,7 +70,6 @@ services:
         limits:
           memory: 256M
   db:
-    image: postgres:16
     labels:
       cvctl.kind: postgres
       cvctl.version: "16"
@@ -550,12 +550,13 @@ func (cliFakeData) BucketGenerations(context.Context, string, string) (int, int,
 func (cliFakeData) BaseBackup(context.Context, string, string) error {
 	return nil
 }
+func (cliFakeData) BackupService(context.Context, string, string) error { return nil }
 
 type cliNoopCompose struct{}
 
-func (cliNoopCompose) Config(context.Context) error           { return nil }
-func (cliNoopCompose) Pull(context.Context, ...string) error  { return nil }
-func (cliNoopCompose) UpData(context.Context, []string) error { return nil }
+func (cliNoopCompose) Config(context.Context) error                          { return nil }
+func (cliNoopCompose) Pull(context.Context, ...string) error                 { return nil }
+func (cliNoopCompose) UpData(context.Context, []string, time.Duration) error { return nil }
 func (cliNoopCompose) ExecScript(context.Context, string, string) (sys.Result, error) {
 	return sys.Result{}, nil
 }
@@ -594,7 +595,10 @@ func setupRestoreDeployFailure(t *testing.T) {
 	}
 	osfs := sys.NewOSFS()
 	stateRoot := filepath.Join(tmp, "state")
+	netRun := &systest.Runner{}
+	netRun.OnPrefix("docker network", sys.Result{})
 	deployer := &deploy.Deployer{
+		Run:        netRun,
 		DeployRoot: tmp,
 		TraefikDir: filepath.Join(tmp, "traefik"),
 		StateRoot:  stateRoot,

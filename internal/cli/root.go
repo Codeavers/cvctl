@@ -28,6 +28,7 @@ func NewRoot(version string) *cobra.Command {
 	})
 	root.AddCommand(newVersionCmd(version))
 	root.AddCommand(newLintCmd())
+	root.AddCommand(newPublishCmd())
 	root.AddCommand(newRenderCmd())
 	root.AddCommand(newInitCmd())
 	root.AddCommand(newNotifyCmd())

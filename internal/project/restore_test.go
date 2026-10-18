@@ -26,6 +26,7 @@ type fakeData struct {
 	store        *state.Store
 	log          *[]string
 	restoreErr   error
+	backupErr    error
 	pushErr      error
 	afterRestore func()
 	removeErr    error
@@ -67,6 +68,11 @@ func (f *fakeData) RemoveVolume(_ context.Context, volume string) error {
 func (f *fakeData) BaseBackup(_ context.Context, _, svc string) error {
 	*f.log = append(*f.log, "push "+svc)
 	return f.pushErr
+}
+
+func (f *fakeData) BackupService(_ context.Context, _, svc string) error {
+	*f.log = append(*f.log, "backup "+svc)
+	return f.backupErr
 }
 
 const restoreEnvBase = `CVCTL_INSTANCE=demo-dev
@@ -121,7 +127,10 @@ func newRestoreRig(t *testing.T, envBody string) *restoreRig {
 	store := state.NewStore(osfs, stateRoot)
 	log := &[]string{}
 	cat := testCatalog(t)
+	netRun := &systest.Runner{}
+	netRun.OnPrefix("docker network", sys.Result{})
 	deployer := &deploy.Deployer{
+		Run:        netRun,
 		Backup:     &render.BackupTarget{Host: "h1", Endpoint: "http://s3", Bucket: "bk", Region: "r", AccessKey: "ak-ACCESS-0000", SecretKey: "sk-SECRET-0000", LibsodiumKey: "lib-KEY-00000"},
 		DeployRoot: tmp,
 		TraefikDir: filepath.Join(tmp, "traefik"),
@@ -181,7 +190,9 @@ func TestRestoreOrderOfOperations(t *testing.T) {
 		t.Fatalf("res: %+v", res)
 	}
 	raw, _ := os.ReadFile(filepath.Join(rig.instDir, "cvctl.env"))
-	for _, w := range []string{"CVCTL_SVC_DB_BACKUP_GEN=4", "CVCTL_SVC_DB_BACKUP_GEN_MAX=4", "CVCTL_INFRA_URL=", "CVCTL_SVC_DB_PASSWORD=existingpass123456789012345678"} {
+	// The bundle predates per-instance keys: the new generation is the first
+	// one the instance's own key encrypts.
+	for _, w := range []string{"CVCTL_SVC_DB_BACKUP_GEN=4", "CVCTL_SVC_DB_BACKUP_GEN_MAX=4", "CVCTL_SVC_DB_BACKUP_KEY_GEN=4", "CVCTL_BACKUP_LIBSODIUM_KEY=", "CVCTL_BACKUP_SECRET_KEY=", "CVCTL_INFRA_URL=", "CVCTL_SVC_DB_PASSWORD=existingpass123456789012345678"} {
 		if !strings.Contains(string(raw), w) {
 			t.Fatalf("cvctl.env missing %q:\n%s", w, raw)
 		}
@@ -232,7 +243,7 @@ func TestRestoreRequiresImportedSecrets(t *testing.T) {
 func TestRestoreValidatesInstanceFirst(t *testing.T) {
 	rig := newRestoreRig(t, restoreEnvBase)
 	_, err := Restore(context.Background(), rig.env, "../etc-dev", RestoreOptions{})
-	if codeOf(t, err) != "E_PROJECT_NAME_INVALID" {
+	if codeOf(t, err) != "E_INSTANCE_NAME" {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -441,7 +452,7 @@ func TestUpdateStripsCredentialsFromRecordedURL(t *testing.T) {
 	if strings.Contains(string(raw), "ghp_SECRET") || !strings.Contains(string(raw), "CVCTL_INFRA_URL=https://github.com/org/demo-infra.git") {
 		t.Fatalf("cvctl.env:\n%s", raw)
 	}
-	if len(res.Warnings) != 1 || strings.Contains(res.Warnings[0], "ghp_SECRET") {
+	if len(res.Warnings) == 0 || res.Warnings[0] != strippedURLWarning || strings.Contains(strings.Join(res.Warnings, " "), "ghp_SECRET") {
 		t.Fatalf("warnings: %v", res.Warnings)
 	}
 }
@@ -466,7 +477,7 @@ func TestAddStripsCredentialsFromStoredURL(t *testing.T) {
 	if strings.Contains(string(raw), "ghp_SECRET") || !strings.Contains(string(raw), "CVCTL_INFRA_URL=https://github.com/org/repo-infra.git") {
 		t.Fatalf("cvctl.env:\n%s", raw)
 	}
-	if len(res.Warnings) != 1 || strings.Contains(res.Warnings[0], "ghp_SECRET") {
+	if len(res.Warnings) == 0 || res.Warnings[0] != strippedURLWarning || strings.Contains(strings.Join(res.Warnings, " "), "ghp_SECRET") {
 		t.Fatalf("warnings: %v", res.Warnings)
 	}
 }

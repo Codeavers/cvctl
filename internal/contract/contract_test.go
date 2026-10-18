@@ -1,11 +1,13 @@
 package contract
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codeavers/cvctl/internal/envspec"
 	"github.com/codeavers/cvctl/internal/output"
@@ -27,6 +29,7 @@ func TestValidateFixtures(t *testing.T) {
 		"unknown-kind":           "E_CONTRACT_UNKNOWN_KIND",
 		"bad-version":            "E_CONTRACT_KIND_VERSION",
 		"collision":              "E_CONTRACT_NAME_COLLISION",
+		"reserved-backup":        "E_CONTRACT_NAME_RESERVED",
 		"empty-http":             "E_CONTRACT_NO_HEALTH",
 		"bad-expose":             "E_CONTRACT_EXPOSE_INVALID",
 		"depends-data":           "E_CONTRACT_DEPENDS_ON_DATA",
@@ -53,15 +56,21 @@ func TestValidateFixtures(t *testing.T) {
 	for name, want := range cases {
 		t.Run(name, func(t *testing.T) {
 			dir := filepath.Join("testdata", name)
+			var issues []output.Issue
 			p, err := Load(dir, cat)
-			if err != nil {
+			var ie *output.IssuesError
+			if errors.As(err, &ie) {
+				// The raw allowlist rejects before compose-go loads the file.
+				issues = ie.Issues
+			} else if err != nil {
 				t.Fatal(err)
+			} else {
+				spec, err := envspec.Load(filepath.Join(dir, "env.spec.yml"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				issues = Validate(p, cat, spec)
 			}
-			spec, err := envspec.Load(filepath.Join(dir, "env.spec.yml"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			issues := Validate(p, cat, spec)
 			if want == "" {
 				if len(issues) != 0 {
 					t.Fatalf("unexpected issues: %+v", issues)
@@ -308,5 +317,74 @@ func TestS3SpecValidation(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected E_CONTRACT_SPEC_SERVICE_VAR for S3_PUBLIC_URL_PRESCRIPTIONS, got %+v", issues)
+	}
+}
+
+func TestHookTimeoutValidation(t *testing.T) {
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load("testdata/valid", cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for timeout, bad := range map[string]bool{"": false, "20m": false, "2h": false, "2h1m": true, "0s": true, "-5m": true, "soon": true} {
+		p.X.Hooks.PreDeploy[0].Timeout = timeout
+		found := false
+		for _, iss := range Validate(p, cat, nil) {
+			if iss.Code == "E_CONTRACT_HOOK_TIMEOUT" {
+				found = true
+			}
+		}
+		if found != bad {
+			t.Errorf("timeout %q: E_CONTRACT_HOOK_TIMEOUT = %v, want %v", timeout, found, bad)
+		}
+	}
+}
+
+func TestServiceNameValidation(t *testing.T) {
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, bad := range map[string]bool{"a--api": true, "api": false, "main-db": false, "main_db": false, "a-b_c1": false, "-api": true, "api-": true, "a__b": true, "API": true, "a.b": true} {
+		p, err := Load("testdata/valid", cat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.Compose.Services[name] = p.Compose.Services["api"]
+		found := false
+		for _, iss := range Validate(p, cat, nil) {
+			if iss.Code == "E_CONTRACT_SERVICE_NAME" && iss.Service == name {
+				found = true
+			}
+		}
+		if found != bad {
+			t.Errorf("service %q: E_CONTRACT_SERVICE_NAME = %v, want %v", name, found, bad)
+		}
+	}
+}
+
+func TestHealthTimeoutCap(t *testing.T) {
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load("testdata/valid", cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for d, bad := range map[time.Duration]bool{0: false, 30 * time.Second: false, 10 * time.Minute: false, 10*time.Minute + time.Second: true} {
+		p.X.Health.Timeout = d
+		found := false
+		for _, iss := range Validate(p, cat, nil) {
+			if iss.Code == "E_CONTRACT_HEALTH_TIMEOUT" {
+				found = true
+			}
+		}
+		if found != bad {
+			t.Errorf("health timeout %s: E_CONTRACT_HEALTH_TIMEOUT = %v, want %v", d, found, bad)
+		}
 	}
 }

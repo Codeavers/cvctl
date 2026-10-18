@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
@@ -128,6 +129,14 @@ func newSetEnvCmd() *cobra.Command {
 					return err
 				}
 				val = ans
+			}
+
+			if strings.ContainsAny(val, "\r\n") {
+				return &output.Error{
+					Code:    "E_ENVSPEC_VALUE",
+					Message: fmt.Sprintf("var %s: value cannot contain newline or carriage return", key),
+					Hint:    "remove newline and carriage return characters from the value",
+				}
 			}
 
 			unlock, err := e.Store.Lock(inst)

@@ -15,6 +15,7 @@ import (
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/gitrepo"
 	"github.com/codeavers/cvctl/internal/hostcfg"
+	"github.com/codeavers/cvctl/internal/infraoci"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/registry"
@@ -43,6 +44,10 @@ type Deps struct {
 	Resolver registry.Resolver
 	Allowed  []string
 	Catalog  kinds.Catalog
+	// OCI authenticates contract artifact pulls of OCI sources.
+	OCI infraoci.Auth
+	// Cache holds the instance's validated contracts; nil disables it.
+	Cache *ContractCache
 }
 
 var (
@@ -91,12 +96,14 @@ func SourceDepsWithRoots(inst string, run sys.Runner, host *hostcfg.Config, secr
 	if secrets != nil {
 		token, _ = secrets.Get("registry_token")
 	}
-	resolver := registry.New(user, token, registry.InsecureHostsFromEnv())
+	resolver := registry.New(user, token, host.TokenHost(), registry.InsecureHostsFromEnv())
 
 	return Deps{
 		Repo:     repo,
 		Resolver: resolver,
 		Allowed:  AllowedRegistries(host),
+		OCI:      OCIAuth(host, secrets),
+		Cache:    NewContractCache(fsys, stateRoot, inst),
 	}
 }
 
@@ -231,37 +238,9 @@ func (s *ProdSource) Desired(ctx context.Context, d *instance.Decisions) (state.
 	if err != nil {
 		return state.Desired{}, err
 	}
-
-	envMap, err := godotenv.Unmarshal(string(data))
+	digests, err := prodDigests(data, p, "deploy/prod.env at "+commitShort(commit), "deploy/prod.env")
 	if err != nil {
-		return state.Desired{}, &output.Error{
-			Code:    "E_PROD_DIGEST_INVALID",
-			Message: fmt.Sprintf("cannot parse deploy/prod.env at %s: %v", commitShort(commit), err),
-			Hint:    "check deploy/prod.env syntax in the infra repo",
-		}
-	}
-
-	commit7 := commitShort(commit)
-	digests := make(map[string]string, len(apps))
-	for _, a := range apps {
-		key := "CVCTL_DIGEST_" + contract.Normalize(a.Name)
-		val, ok := envMap[key]
-		if !ok || strings.TrimSpace(val) == "" {
-			return state.Desired{}, &output.Error{
-				Code:    "E_PROD_DIGEST_MISSING",
-				Message: fmt.Sprintf("service %q missing digest in deploy/prod.env at %s", a.Name, commit7),
-				Hint:    fmt.Sprintf("add %s=sha256:... to deploy/prod.env in the infra repo", key),
-			}
-		}
-		val = strings.TrimSpace(val)
-		if !digestRe.MatchString(val) {
-			return state.Desired{}, &output.Error{
-				Code:    "E_PROD_DIGEST_INVALID",
-				Message: fmt.Sprintf("invalid digest for key %s: %q does not match sha256:<64 hex>", key, val),
-				Hint:    fmt.Sprintf("set %s to sha256:<64 hex> in deploy/prod.env", key),
-			}
-		}
-		digests[a.Name] = val
+		return state.Desired{}, err
 	}
 
 	return state.Desired{
@@ -270,10 +249,55 @@ func (s *ProdSource) Desired(ctx context.Context, d *instance.Decisions) (state.
 	}, nil
 }
 
+// prodDigests reads CVCTL_DIGEST_<N> for every app of p from a prod.env
+// file; where names it in errors and file in hints.
+func prodDigests(data []byte, p *contract.Project, where, file string) (map[string]string, error) {
+	envMap, err := godotenv.Unmarshal(string(data))
+	if err != nil {
+		return nil, &output.Error{
+			Code:    "E_PROD_DIGEST_INVALID",
+			Message: fmt.Sprintf("cannot parse %s: %v", where, err),
+			Hint:    fmt.Sprintf("check %s syntax in the infra repo", file),
+		}
+	}
+	digests := make(map[string]string, len(p.Apps))
+	for _, a := range p.Apps {
+		key := "CVCTL_DIGEST_" + contract.Normalize(a.Name)
+		val, ok := envMap[key]
+		if !ok || strings.TrimSpace(val) == "" {
+			return nil, &output.Error{
+				Code:    "E_PROD_DIGEST_MISSING",
+				Message: fmt.Sprintf("service %q missing digest in %s", a.Name, where),
+				Hint:    fmt.Sprintf("add %s=sha256:... to %s in the infra repo", key, file),
+			}
+		}
+		val = strings.TrimSpace(val)
+		if !digestRe.MatchString(val) {
+			return nil, &output.Error{
+				Code:    "E_PROD_DIGEST_INVALID",
+				Message: fmt.Sprintf("invalid digest for key %s: %q does not match sha256:<64 hex>", key, val),
+				Hint:    fmt.Sprintf("set %s to sha256:<64 hex> in %s", key, file),
+			}
+		}
+		digests[a.Name] = val
+	}
+	return digests, nil
+}
+
 // SourceFor selects the appropriate Source for decisions d.
 func SourceFor(d *instance.Decisions, deps Deps) Source {
 	if d == nil {
 		return invalidSource{env: ""}
+	}
+	if d.IsOCI() {
+		switch d.Env {
+		case "dev":
+			return &OCIDevSource{Auth: deps.OCI, Resolver: deps.Resolver, Allowed: deps.Allowed, Catalog: deps.Catalog, Cache: deps.Cache}
+		case "prod":
+			return &OCIProdSource{Auth: deps.OCI, Allowed: deps.Allowed, Catalog: deps.Catalog, Cache: deps.Cache}
+		default:
+			return invalidSource{env: d.Env}
+		}
 	}
 	switch d.Env {
 	case "dev":

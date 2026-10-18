@@ -41,6 +41,8 @@ type Kind struct {
 	Health            []string          `yaml:"health"`
 	RestoreCheck      string            `yaml:"restore_check"`
 	Buckets           bool              `yaml:"buckets"`
+	// CapAdd are the capabilities a service needs back after cap_drop: [ALL].
+	CapAdd []string `yaml:"cap_add"`
 }
 
 type Catalog map[string]Kind

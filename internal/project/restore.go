@@ -32,6 +32,9 @@ type DataRestorer interface {
 	RemoveVolume(ctx context.Context, volume string) error
 	// BaseBackup pushes a wal-g base backup of the running service.
 	BaseBackup(ctx context.Context, inst, svc string) error
+	// BackupService backs up one service now (wal-g base backup or restic
+	// snapshot) without recording it; the caller holds the instance lock.
+	BackupService(ctx context.Context, inst, svc string) error
 	// BucketGenerations returns the highest wal-g generation of svc holding
 	// any data and the highest holding a base backup (-1: none).
 	BucketGenerations(ctx context.Context, inst, svc string) (highestUsed, highestWithBase int, err error)
@@ -173,6 +176,9 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 		return nil, err
 	}
 	repoURL := opts.Repo
+	if repoURL == "" && rawEnv[keySource] == instance.SourceOCI && rawEnv[keyRef] != "" {
+		repoURL = ociScheme + rawEnv[keyRef]
+	}
 	if repoURL == "" {
 		repoURL = rawEnv[keyInfraURL]
 	}
@@ -186,6 +192,7 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 	if err := validateRepoURL(repoURL); err != nil {
 		return nil, err
 	}
+	isOCI := isOCIURL(repoURL)
 	branch := rawEnv["CVCTL_INFRA_BRANCH"]
 	if branch == "" {
 		branch = "develop"
@@ -238,22 +245,46 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 		return nil, rep.apply(err)
 	}
 
-	repo := e.repo(infraDir, keyPath)
+	var repo RepoLike
 	cloned = true
-	if err := repo.Clone(ctx, repoURL, branch); err != nil {
-		return fail(err)
+	// The source given by --repo is recorded, so the deploy below and the
+	// agent use it.
+	sourceUpdates := map[string]string{}
+	if isOCI {
+		ref := strings.TrimPrefix(repoURL, ociScheme)
+		if _, err := installOCI(ctx, e, instDir, ref, ociTrackTag(rawEnv["CVCTL_ENV"], rawEnv["CVCTL_TRACK_TAG"])); err != nil {
+			return fail(err)
+		}
+		if rawEnv[keySource] != instance.SourceOCI || rawEnv[keyRef] != ref {
+			sourceUpdates[keySource] = instance.SourceOCI
+			sourceUpdates[keyRef] = ref
+		}
+	} else {
+		repo = e.repo(infraDir, keyPath)
+		if err := repo.Clone(ctx, repoURL, branch); err != nil {
+			return fail(err)
+		}
+		if rawEnv[keySource] == instance.SourceOCI {
+			sourceUpdates[keySource] = instance.SourceGit
+		}
 	}
 	cat, err := e.catalog()
 	if err != nil {
 		return fail(err)
 	}
-	p, _, err := loadContractAndSpec(e.fs(), infraDir, cat)
+	p, _, err := loadContractAndSpec(e.fs(), contractDir(infraDir, rawEnv["CVCTL_INFRA_PATH"]), cat)
 	if err != nil {
 		return fail(err)
 	}
 	d, err := instance.Read(cvctlEnvPath, p)
 	if err != nil {
 		return fail(err)
+	}
+	if v, ok := sourceUpdates[keySource]; ok {
+		d.InfraSource = v
+		if isOCI {
+			d.InfraRef = sourceUpdates[keyRef]
+		}
 	}
 
 	targets := backup.Targets(p, d)
@@ -314,18 +345,43 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 	// rendered backup env point there, never at the generation restored from.
 	var walg []string
 	updates := map[string]string{}
+	for k, v := range sourceUpdates {
+		updates[k] = v
+	}
 	genUpdates = updates
+	// A bundle from before per-instance keys: the new generation (restic: a new
+	// repository) is the first one the instance's own keys encrypt.
+	newKeys, err := ensureBackupKeys(d)
+	if err != nil {
+		return fail(err)
+	}
+	if newKeys {
+		for k, v := range d.Entries() {
+			if strings.HasPrefix(k, "CVCTL_BACKUP_") {
+				updates[k] = v
+			}
+		}
+	}
 	for _, t := range targets {
+		sd := d.Services[t.Service]
+		pre := "CVCTL_SVC_" + contract.Normalize(t.Service) + "_BACKUP_"
 		if t.Strategy != backup.StrategyWalG {
+			if newKeys {
+				sd.BackupKeyGen = 1
+				d.Services[t.Service] = sd
+				updates[pre+"KEY_GEN"] = "1"
+			}
 			continue
 		}
-		sd := d.Services[t.Service]
 		next := max(sd.BackupGenMax, sd.BackupGen, usedGen[t.Service]) + 1
 		sd.BackupGen, sd.BackupGenMax = next, next
+		if newKeys {
+			sd.BackupKeyGen = next
+			updates[pre+"KEY_GEN"] = strconv.Itoa(next)
+		}
 		d.Services[t.Service] = sd
-		key := "CVCTL_SVC_" + contract.Normalize(t.Service) + "_BACKUP_GEN"
-		updates[key] = strconv.Itoa(next)
-		updates[key+"_MAX"] = strconv.Itoa(next)
+		updates[pre+"GEN"] = strconv.Itoa(next)
+		updates[pre+"GEN_MAX"] = strconv.Itoa(next)
 		walg = append(walg, t.Service)
 	}
 	if len(updates) > 0 {

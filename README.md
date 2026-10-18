@@ -2,12 +2,77 @@
 
 Pull-based deploy agent and CLI for Docker Compose on a single VPS.
 
-Status: plan 2 (host preparation). Commands available: `init`, `lint`, and `render`.
-The deploy agent arrives in later plans.
-
 Every command accepts `--json` and then prints exactly one JSON document.
 Exit codes: `0` ok, `1` validation or business error, `2` usage error.
 Every error and issue carries a stable `E_<AREA>_<CAUSE>` code and a `hint`.
+
+## Install from GHCR
+
+Release images are `FROM scratch` (no `cat`), so copy the binary out of a stopped container:
+
+```
+id=$(docker create ghcr.io/codeavers/cvctl:<v>); docker cp "$id":/cvctl ./cvctl; docker rm "$id"
+```
+
+Binaries and `sha256sums.txt` are also attached to each GitHub release. `docker login ghcr.io`
+first with the host token. `cvctl version` prints the embedded tag.
+
+## Project contract
+
+`compose.yml` is read for an allowlist of fields only and is never passed to `docker compose`;
+cvctl generates the compose file it runs. Unknown or unsafe fields fail with
+`E_CONTRACT_FIELD_FORBIDDEN`. `env.spec.yml` names and values are checked
+(`E_ENVSPEC_NAME`, `E_ENVSPEC_VALUE`). Run `cvctl lint <dir>` before publishing.
+
+Each instance gets its own networks, `<inst>_edge` (Traefik) and `<inst>_backup` (WAL-G and the
+backup user `bk-<inst>` with policy `cvctl-bk-<inst>`), so instances cannot reach each other.
+Edge aliases, routers and services are named `<inst>--<svc>`, so instance names cannot contain `--`
+(`E_INSTANCE_NAME`).
+
+## OCI source and publish
+
+A project can take its contract from an OCI artifact instead of git:
+
+```
+cvctl project add <name> oci://ghcr.io/<org>/<repo>-infra:develop
+cvctl publish ./infra ghcr.io/<org>/<repo>-infra:develop
+```
+
+`publish` runs the `lint` checks, then pushes `compose.yml`, `env.spec.yml` and, if present,
+`deploy/prod.env` (as `prod.env`) and prints the digest (`--json`: `{"ref":...,"digest":...}`).
+Credentials: `CVCTL_PUBLISH_TOKEN` or `GITHUB_TOKEN`, user `CVCTL_PUBLISH_USER` or `GITHUB_ACTOR`;
+the token goes only to the registry host of the ref. Failures use `E_PUBLISH`; a bad artifact on
+the host side is `E_INFRA_ARTIFACT`. Layers are capped at 1 MiB. Hosts in
+`CVCTL_INSECURE_REGISTRIES` use plain HTTP. A CI template is in
+[docs/ci/publish-contract.yml](docs/ci/publish-contract.yml); the cvctl package must grant read
+access to the project repository (Package settings, Manage Actions access).
+
+## Timeouts
+
+Defaults and `host.env` keys: fetch 2m (`CVCTL_TIMEOUT_FETCH`), pull 10m (`CVCTL_TIMEOUT_PULL`),
+each hook 15m (`CVCTL_TIMEOUT_HOOK`; `x-cvctl.hooks[].timeout` can only lower it), whole deploy
+45m (`CVCTL_TIMEOUT_DEPLOY`). Health waits use `x-cvctl.health.timeout` (at most 10m) plus 2m.
+Exceeding one fails with `E_TIMEOUT`. Fetch, pull and deploy timeouts are retried on the next
+cycle; a hook timeout fails that desired state until it changes.
+
+## Upgrading a host to v0.7
+
+Requires Docker Engine 28 or later (`E_DOCKER_TOO_OLD`). Instance names containing `--` must be
+renamed first: `E_INSTANCE_NAME`, and bundle import rejects them. Run, in this order:
+
+1. With the new binary, `cvctl lint` each instance's infra dir and fix and publish what it reports
+   (forbidden compose fields, service names that are not `^[a-z0-9]+([-_][a-z0-9]+)*$`).
+2. Check that the app images run without capabilities: no port below 1024, no setuid at start.
+3. Install the binary.
+4. `cvctl project update <inst>` for every instance: per-instance backup keys (the backup
+   generation is bumped, see Backup generations; failures are `E_BACKUP_PROVISION`), the
+   `<inst>_edge` and `<inst>_backup` networks, and connecting Traefik and the storage silo to them.
+5. `cvctl init` last: Traefik moves to `cvctl-edge-proxy` (`10.203.0.0/24`,
+   `E_TRAEFIK_EDGE_SUBNET` if it clashes) and the legacy `cvctl-edge` and `cvctl-backup` networks
+   are retired once nothing else uses them.
+6. `cvctl secrets export`, so the bundle holds the new keys.
+7. Registry logins other than the token host (`CVCTL_REGISTRY_HOST`, else the first
+   `CVCTL_REGISTRIES` host) are pruned automatically by the agent on start.
 
 ## init
 
@@ -27,7 +92,6 @@ sudo cvctl init --non-interactive --json
 See [docs/host-init.md](docs/host-init.md) for full step documentation, file permissions table,
 SSH try/confirm recovery flow, and non-interactive configuration.
 
-
 ## lint
 
 Validates `compose.yml` and `env.spec.yml` against the cvctl contract.
@@ -35,6 +99,10 @@ Validates `compose.yml` and `env.spec.yml` against the cvctl contract.
 ```
 cvctl lint examples/demo
 ```
+
+## publish
+
+See [OCI source and publish](#oci-source-and-publish).
 
 ## render
 
@@ -87,9 +155,8 @@ bucket, plus `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` and `S3_REGION`.
   local service with `cvctl.external: allowed` to external. Data is not copied; use `mc mirror`.
 - `--ext` values land in the shell history and the process list; prefer the interactive prompt
   for keys on a shared host.
-- An exposed silo joins the shared `cvctl-edge` network so Traefik can reach it: other instances'
-  exposed apps can reach its S3 API too (signed requests only; anonymous access stays limited to
-  `GetObject` on public buckets).
+- An exposed silo joins its instance's `<inst>_edge` network so Traefik can reach it; anonymous access stays
+  limited to `GetObject` on public buckets.
 
 Design: `docs/specs/2026-10-17-s3-buckets-design.md`.
 

@@ -17,7 +17,7 @@ import (
 	"github.com/codeavers/cvctl/kinds"
 )
 
-const cpBase = "docker compose -p app-prod --env-file /srv/deploy/app-prod/app.env -f /srv/deploy/app-prod/infra/compose.yml -f /srv/deploy/app-prod/compose.cvctl.yml"
+const cpBase = "docker compose -p app-prod --env-file /srv/deploy/app-prod/app.env -f /srv/deploy/app-prod/compose.cvctl.yml"
 const cp = cpBase + " "
 
 const probe = "docker ps -a --filter label=com.docker.compose.project=app-prod --filter label=com.docker.compose.service=db --format {{.State}}"
@@ -97,7 +97,7 @@ func TestRestoreHappyPathOrder(t *testing.T) {
 		"docker stop -t 120 " + recName,
 		"docker rm -f " + recName,
 		"APPLY",
-		cp + "up -d --wait db",
+		cp + "up -d --wait --wait-timeout 150 db",
 		cp + "exec -T -u postgres db pg_isready -U app -d appdb",
 		cp + "exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select 1",
 		cp + "exec -T -u postgres db wal-g backup-push /var/lib/postgresql/data",
@@ -311,7 +311,7 @@ func TestRestoreResticSnapshot(t *testing.T) {
 	if _, err := g.r.Restore(context.Background(), "app-prod", "files", "a1b2c3d4"); err != nil {
 		t.Fatal(err)
 	}
-	want := "docker run --rm --network cvctl-backup -v " + vol + ":/restore --env-file /srv/deploy/app-prod/restic-files.env restic/restic:0.19.1 restore a1b2c3d4:/data --target /restore"
+	want := "docker run --rm --network app-prod_backup -v " + vol + ":/restore --env-file /srv/deploy/app-prod/restic-files.env restic/restic:0.19.1 restore a1b2c3d4:/data --target /restore"
 	if g.index(want) < 0 {
 		t.Fatalf("missing %q in %v", want, g.calls())
 	}
@@ -455,7 +455,7 @@ func TestRestoreBackupPushFailureIsWarningNotRollback(t *testing.T) {
 
 func TestRestoreRollsBackWhenDataServiceDoesNotServe(t *testing.T) {
 	for name, fail := range map[string]string{
-		"wait":     cp + "up -d --wait db",
+		"wait":     cp + "up -d --wait --wait-timeout 150 db",
 		"isready":  cp + "exec -T -u postgres db pg_isready",
 		"select 1": cp + "exec -T -u postgres db psql -U app -d appdb -v ON_ERROR_STOP=1 -tA -c select 1",
 	} {
@@ -507,7 +507,7 @@ func TestVerifyScriptHasNoPersistedRecoverySettings(t *testing.T) {
 	if _, err := g.r.Verify(context.Background(), "app-prod", "db"); err != nil {
 		t.Fatal(err)
 	}
-	run := g.calls()[1]
+	run := g.calls()[2]
 	if strings.Contains(run, "postgresql.auto.conf") || !strings.Contains(run, `-c "restore_command=wal-g wal-fetch %f %p"`) || !strings.Contains(run, "-c recovery_target_action=promote") {
 		t.Fatalf("run:\n%s", run)
 	}

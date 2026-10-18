@@ -10,3 +10,4 @@ env:
 backup: none
 external: [url]
 health: ["CMD", "redis-cli", "-a", "{password}", "ping"]
+cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]

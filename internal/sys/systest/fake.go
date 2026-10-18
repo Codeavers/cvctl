@@ -193,6 +193,65 @@ func (f *FS) Remove(p string) error {
 	return nil
 }
 
+func (f *FS) Mkdir(p string, mode os.FileMode, o sys.Owner) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p = path.Clean(p)
+	if _, ok := f.m[p]; ok {
+		return &fs.PathError{Op: "mkdir", Path: p, Err: fs.ErrExist}
+	}
+	f.put(p, nil, mode, o, true)
+	return nil
+}
+
+func (f *FS) RemoveAll(p string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p = path.Clean(p)
+	for k := range f.m {
+		if k == p || strings.HasPrefix(k, p+"/") {
+			delete(f.m, k)
+		}
+	}
+	return nil
+}
+
+func (f *FS) Rename(oldp, newp string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	oldp, newp = path.Clean(oldp), path.Clean(newp)
+	if _, ok := f.m[oldp]; !ok {
+		return &fs.PathError{Op: "rename", Path: oldp, Err: fs.ErrNotExist}
+	}
+	if d, ok := f.m[newp]; ok && d.info.IsDir {
+		for k := range f.m {
+			if strings.HasPrefix(k, newp+"/") {
+				return &fs.PathError{Op: "rename", Path: newp, Err: syscall.ENOTEMPTY}
+			}
+		}
+	}
+	moved := map[string]*entry{}
+	for k, e := range f.m {
+		if k == oldp || strings.HasPrefix(k, oldp+"/") {
+			moved[newp+strings.TrimPrefix(k, oldp)] = e
+			delete(f.m, k)
+		}
+	}
+	for k, e := range moved {
+		f.m[k] = e
+	}
+	return nil
+}
+
+// MarkSymlink turns an existing entry into a symlink, for tests.
+func (f *FS) MarkSymlink(p string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.m[path.Clean(p)]; ok {
+		e.info.IsSymlink = true
+	}
+}
+
 type fakeDirEntry struct {
 	name  string
 	isDir bool

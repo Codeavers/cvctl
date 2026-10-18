@@ -30,12 +30,16 @@ func full() *Decisions {
 		Instance: "proj-dev", Env: "dev", InfraBranch: "develop", TrackTag: "dev",
 		InfraPath: ".", Strategy: "recreate",
 		Services: map[string]ServiceDecision{
-			"main-db": {Mode: "local", Version: "16", Creds: kinds.Credentials{User: "u", Password: "p\"w $x #y \\z\nline2 'q'", DB: "d"}},
+			"main-db": {Mode: "local", Version: "16", BackupGen: 3, BackupGenMax: 3, BackupKeyGen: 2, Creds: kinds.Credentials{User: "u", Password: "p\"w $x #y \\z\nline2 'q'", DB: "d"}},
 			"cache":   {Mode: "external", External: map[string]string{"url": "redis://h:6379/0?a=b#c"}},
 			"media":   {Mode: "external", External: map[string]string{"endpoint": "https://s3", "bucket": "b", "access_key": "ak", "secret_key": "sk", "region": "r"}},
 		},
 		Domains: map[string]string{"api": "api.example.com"},
 		Digests: map[string]string{"api": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		Backup: BackupDecision{
+			AccessKey: "bk-proj-dev", SecretKey: "s3cr3t", LibsodiumKey: "abcd", ResticPassword: "pw",
+			Ext: map[string]string{"bucket": "own", "access_key": "eak", "secret_key": "esk", "endpoint": "https://r2", "region": "auto"},
+		},
 	}
 }
 
@@ -240,11 +244,12 @@ func TestCheckInstance(t *testing.T) {
 		{"wrong env suffix", "proj-prod"},
 		{"no suffix", "proj"},
 		{"leading hyphen", "-dev"},
+		{"double hyphen", "proj--dev"},
 	} {
 		d := full()
 		d.Instance = tc.inst
 		is := Check(d, p, cat)
-		if len(is) != 1 || is[0].Code != "E_DECISION_INVALID" || is[0].Hint == "" {
+		if len(is) != 1 || is[0].Code != "E_INSTANCE_NAME" || is[0].Hint == "" {
 			t.Fatalf("%s: got %v", tc.name, is)
 		}
 	}
@@ -253,6 +258,22 @@ func TestCheckInstance(t *testing.T) {
 	is := Check(d, p, cat)
 	if len(is) != 1 || is[0].Code != "E_DECISION_MISSING" || !strings.Contains(is[0].Hint, "CVCTL_INSTANCE") {
 		t.Fatalf("empty: got %v", is)
+	}
+}
+
+func TestCheckDir(t *testing.T) {
+	d := &Decisions{Instance: "demo-dev"}
+	// Matching directory
+	if err := CheckDir(d, "/srv/deploy/demo-dev/cvctl.env"); err != nil {
+		t.Fatalf("expected nil for matching directory, got %v", err)
+	}
+	// Mismatching directory
+	err := CheckDir(d, "/srv/deploy/other-dev/cvctl.env")
+	if err == nil {
+		t.Fatal("expected error for mismatching directory, got nil")
+	}
+	if err.Code != "E_INSTANCE_MISMATCH" {
+		t.Fatalf("expected E_INSTANCE_MISMATCH, got %s: %v", err.Code, err)
 	}
 }
 
@@ -675,4 +696,67 @@ func TestCheckProdPublicLocalRule(t *testing.T) {
 	if is := Check(d, p, cat); len(is) != 0 {
 		t.Fatalf("prod with only private buckets should pass: %v", is)
 	}
+}
+
+func TestBackupKeysAreStoredUnderTheirKeys(t *testing.T) {
+	m := full().Entries()
+	for k, want := range map[string]string{
+		"CVCTL_BACKUP_ACCESS_KEY": "bk-proj-dev", "CVCTL_BACKUP_SECRET_KEY": "s3cr3t",
+		"CVCTL_BACKUP_LIBSODIUM_KEY": "abcd", "CVCTL_BACKUP_RESTIC_PASSWORD": "pw",
+		"CVCTL_BACKUP_EXT_ACCESS_KEY": "eak", "CVCTL_BACKUP_EXT_BUCKET": "own",
+		"CVCTL_SVC_MAIN_DB_BACKUP_KEY_GEN": "2",
+	} {
+		if m[k] != want {
+			t.Errorf("%s = %q, want %q", k, m[k], want)
+		}
+	}
+}
+
+func TestInfraSourceRoundTrip(t *testing.T) {
+	p, _ := load(t)
+	path := filepath.Join(t.TempDir(), "cvctl.env")
+	d := full()
+	d.InfraSource, d.InfraRef = SourceOCI, "ghcr.io/org/proj-infra"
+	if err := Write(path, d); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), "CVCTL_INFRA_SOURCE=oci\n") || !strings.Contains(string(raw), "CVCTL_INFRA_REF=ghcr.io/org/proj-infra\n") {
+		t.Fatalf("cvctl.env:\n%s", raw)
+	}
+	got, err := Read(path, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.IsOCI() || got.InfraRef != d.InfraRef {
+		t.Fatalf("read back %q %q", got.InfraSource, got.InfraRef)
+	}
+
+	g := full()
+	g.InfraSource = SourceGit
+	if _, ok := g.Entries()["CVCTL_INFRA_SOURCE"]; ok {
+		t.Fatal("git is the default and must not be written")
+	}
+}
+
+func TestCheckInfraSource(t *testing.T) {
+	p, cat := load(t)
+	d := full()
+	d.InfraSource = SourceOCI
+	if !hasCode(Check(d, p, cat), "E_DECISION_MISSING") {
+		t.Fatal("oci without CVCTL_INFRA_REF must be rejected")
+	}
+	d.InfraSource = "svn"
+	if !hasCode(Check(d, p, cat), "E_DECISION_INVALID") {
+		t.Fatal("unknown infra source must be rejected")
+	}
+}
+
+func hasCode(is []output.Issue, code string) bool {
+	for _, i := range is {
+		if i.Code == code {
+			return true
+		}
+	}
+	return false
 }

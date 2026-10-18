@@ -51,7 +51,7 @@ func TestTempNamesCarryARandomSuffix(t *testing.T) {
 	for range 2 {
 		g.run.Calls = nil
 		_, _ = g.r.Verify(context.Background(), "app-prod", "db")
-		names = append(names, strings.TrimPrefix(g.calls()[0], "docker volume create "))
+		names = append(names, strings.TrimPrefix(g.calls()[1], "docker volume create "))
 	}
 	re := regexp.MustCompile(`^cvctl-verify-app-prod-db-1767323045-[0-9a-f]{8}$`)
 	if !re.MatchString(names[0]) || !re.MatchString(names[1]) || names[0] == names[1] {

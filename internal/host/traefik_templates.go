@@ -141,14 +141,20 @@ type traefikComposeConfig struct {
 }
 
 type traefikComposeService struct {
-	ContainerName string                    `yaml:"container_name,omitempty"`
-	Image         string                    `yaml:"image"`
-	Restart       string                    `yaml:"restart"`
-	Ports         []string                  `yaml:"ports"`
-	EnvFile       []string                  `yaml:"env_file,omitempty"`
-	Volumes       []string                  `yaml:"volumes"`
-	Networks      []string                  `yaml:"networks"`
-	Healthcheck   traefikComposeHealthcheck `yaml:"healthcheck"`
+	ContainerName string                          `yaml:"container_name,omitempty"`
+	Image         string                          `yaml:"image"`
+	Restart       string                          `yaml:"restart"`
+	Ports         []string                        `yaml:"ports"`
+	EnvFile       []string                        `yaml:"env_file,omitempty"`
+	Volumes       []string                        `yaml:"volumes"`
+	Networks      map[string]traefikComposeAttach `yaml:"networks"`
+	Healthcheck   traefikComposeHealthcheck       `yaml:"healthcheck"`
+}
+
+// traefikComposeAttach pins the gateway endpoint: Docker publishes ports through
+// the highest gw_priority network, and trustedIPs only names the proxy gateway.
+type traefikComposeAttach struct {
+	GwPriority int `yaml:"gw_priority"`
 }
 
 type traefikComposeHealthcheck struct {
@@ -235,11 +241,10 @@ func renderTraefikStatic(cfg *hostcfg.Config) ([]byte, error) {
 		eps[EntryWeb] = traefikEntryPoint{
 			Address: ":80",
 			// The front proxy reaches Traefik through docker's port proxy, so the source
-			// is the gateway of the cvctl-edge network. Docker allocates it from any
-			// private range (172.16/12 first, then 192.168/16 on hosts with many
-			// networks), and only private addresses can reach the loopback-bound port.
+			// is the gateway of the fixed-subnet proxy network; trusting more would let
+			// any private-range peer forge X-Forwarded-For.
 			ForwardedHeaders: &traefikForwardedHeaders{
-				TrustedIPs: []string{"127.0.0.1/32", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"},
+				TrustedIPs: []string{"127.0.0.1/32", cfg.EdgeGateway() + "/32"},
 			},
 		}
 	}
@@ -342,14 +347,14 @@ func renderTraefikCompose(cfg *hostcfg.Config) ([]byte, error) {
 					"/etc/traefik/dynamic:/etc/traefik/dynamic:ro",
 					"cvctl-traefik-acme:/acme",
 				},
-				Networks: []string{EdgeNetwork},
+				Networks: map[string]traefikComposeAttach{ProxyNetwork: {GwPriority: 1000}},
 				Healthcheck: traefikComposeHealthcheck{
 					Test: []string{"CMD", "traefik", "healthcheck", "--ping"},
 				},
 			},
 		},
 		Networks: map[string]traefikComposeNetwork{
-			EdgeNetwork: {External: true},
+			ProxyNetwork: {External: true},
 		},
 		Volumes: map[string]map[string]any{
 			"cvctl-traefik-acme": {},

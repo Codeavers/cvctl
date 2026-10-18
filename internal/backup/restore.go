@@ -141,7 +141,7 @@ func restoreFailedErr(code, msg, hint string) *output.Error {
 	return &output.Error{Code: code, Message: msg, Hint: hint}
 }
 
-func (r *Runner) pickBackup(ctx context.Context, inst string, t Target, gen int, tgt restoreTarget) (string, error) {
+func (r *Runner) pickBackup(ctx context.Context, inst string, t Target, gen, keyGen int, tgt restoreTarget) (string, error) {
 	bound, ok := tgt.boundTime()
 	if !ok {
 		return "LATEST", nil
@@ -161,9 +161,12 @@ func (r *Runner) pickBackup(ctx context.Context, inst string, t Target, gen int,
 		}
 	}
 	if best == "" {
+		hint := fmt.Sprintf("pick a later target or check cvctl backup list; the target may predate the current backup generation (gen %d): older generations live under <prefix>/g<k> with k < %d and can be restored manually with wal-g", gen, gen)
+		if keyGen > 0 {
+			hint += fmt.Sprintf("; generations below %d are encrypted with the host key (/etc/cvctl/secrets/walg_libsodium_key)", keyGen)
+		}
 		return "", restoreFailedErr("E_RESTORE_NO_BACKUP",
-			fmt.Sprintf("no base backup of %s finished before %s", t.Service, bound.Format(time.RFC3339)),
-			fmt.Sprintf("pick a later target or check cvctl backup list; the target may predate the current backup generation (gen %d): older generations live under <prefix>/g<k> with k < %d and can be restored manually with wal-g", gen, gen))
+			fmt.Sprintf("no base backup of %s finished before %s", t.Service, bound.Format(time.RFC3339)), hint)
 	}
 	return best, nil
 }
@@ -322,7 +325,7 @@ func (r *Runner) flushWAL(ctx context.Context, inst, svc string, c kinds.Credent
 // verifyServing waits for the data service and proves it answers queries.
 func (r *Runner) verifyServing(ctx context.Context, inst, svc string, strategy string, c kinds.Credentials) error {
 	proj := r.Compose(inst)
-	if err := proj.UpData(ctx, []string{svc}); err != nil {
+	if err := proj.UpData(ctx, []string{svc}, 0); err != nil {
 		return err
 	}
 	if strategy != StrategyWalG {
@@ -381,6 +384,9 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 
 	p, d, err := r.Load(inst)
 	if err != nil {
+		return nil, err
+	}
+	if r, err = r.forInstance(ctx, inst, p, d); err != nil {
 		return nil, err
 	}
 	var target *Target
@@ -448,7 +454,7 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 	var backupName string
 	if target.Strategy == StrategyWalG {
 		// listing needs the running data container, so it precedes the stop
-		if backupName, err = r.pickBackup(ctx, inst, *target, d.Services[svc].BackupGen, tgt); err != nil {
+		if backupName, err = r.pickBackup(ctx, inst, *target, d.Services[svc].BackupGen, d.Services[svc].BackupKeyGen, tgt); err != nil {
 			return nil, err
 		}
 		// cvctl.env may lag the bucket (another host restored from a stale
@@ -656,11 +662,15 @@ func (r *Runner) walgRecover(ctx context.Context, inst, svc string, p *contract.
 	if err != nil {
 		return err
 	}
+	net, err := r.backupNet(ctx, inst)
+	if err != nil {
+		return err
+	}
 	name := r.tempName("restore", inst, svc)
 	defer r.cleanup(ctx, name, "")
 
 	args := []string{
-		"run", "-d", "--name", name, "--network", backupNetwork,
+		"run", "-d", "--name", name, "--network", net,
 		"--env-file", render.BackupEnvPath(r.instanceDir(inst), svc),
 		"-v", volume + ":" + pgData,
 		"-e", "PGDATA=" + pgData,
@@ -722,14 +732,42 @@ func (r *Runner) resticRecover(ctx context.Context, inst, svc string, tgt restor
 	if tgt.kind == "snapshot" {
 		snap = tgt.name
 	}
-	envFile, err := r.writeResticEnv(inst, svc)
+	idx, err := r.resticRestoreRepo(ctx, inst, svc, snap)
+	if err != nil {
+		return err
+	}
+	envFile, err := r.writeResticEnv(inst, svc, idx)
 	if err != nil {
 		return err
 	}
 	// <snapshot>:/data restores the backed-up directory's content at the volume root
-	_, err = r.exec(ctx, r.docker("run", "--rm", "--network", backupNetwork, "-v", volume+":/restore",
+	net, err := r.backupNet(ctx, inst)
+	if err != nil {
+		return err
+	}
+	_, err = r.exec(ctx, r.docker("run", "--rm", "--network", net, "-v", volume+":/restore",
 		"--env-file", envFile, resticImage, "restore", snap+":/data", "--target", "/restore"))
 	return err
+}
+
+// resticRestoreRepo is the newest repository holding snap ("latest" or an id
+// prefix). A service moved to per-instance keys keeps its older snapshots in
+// the older repositories, encrypted with the host password.
+func (r *Runner) resticRestoreRepo(ctx context.Context, inst, svc, snap string) (int, error) {
+	cur := r.Host.ResticRepoIndex(svc)
+	t := Target{Service: svc, Strategy: StrategyVolume}
+	for i := cur; i > 0; i-- {
+		snaps, err := r.resticRepoList(ctx, inst, t, i, true)
+		if err != nil {
+			return 0, err
+		}
+		for _, s := range snaps {
+			if snap == "latest" || strings.HasPrefix(s.ID, snap) || strings.HasPrefix(snap, s.ID) {
+				return i, nil
+			}
+		}
+	}
+	return 0, nil
 }
 
 // CleanupVolume is an unused data volume of an instance.

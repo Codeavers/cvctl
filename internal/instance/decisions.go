@@ -27,6 +27,9 @@ type ServiceDecision struct {
 	// BackupGenMax is the highest generation ever used so it is never reused.
 	BackupGen    int
 	BackupGenMax int
+	// BackupKeyGen is the first generation (WAL-G) or restic repository
+	// index encrypted with the instance's own keys; older ones use the host's.
+	BackupKeyGen int
 	Creds        kinds.Credentials
 	External     map[string]string
 }
@@ -37,11 +40,29 @@ type Decisions struct {
 	InfraBranch string
 	TrackTag    string // dev only
 	InfraPath   string
+	InfraSource string // git | oci; empty means git
+	InfraRef    string // oci only: artifact repository host/repo, no tag
 	Strategy    string // recreate | blue-green
 	Services    map[string]ServiceDecision
 	Domains     map[string]string
 	Digests     map[string]string
+	Backup      BackupDecision
 }
+
+// BackupDecision is the instance's own backup identity: S3 credentials on the
+// host silo (user bk-<inst>) and encryption keys. Ext, when set, points the
+// backups at the instance's own external bucket (fields bucket, endpoint,
+// region, access_key, secret_key).
+type BackupDecision struct {
+	AccessKey      string
+	SecretKey      string
+	LibsodiumKey   string
+	ResticPassword string
+	Ext            map[string]string
+}
+
+// HasKeys reports whether the instance has its own encryption keys.
+func (b BackupDecision) HasKeys() bool { return b.LibsodiumKey != "" && b.ResticPassword != "" }
 
 const (
 	keyInstance = "CVCTL_INSTANCE"
@@ -49,12 +70,29 @@ const (
 	keyBranch   = "CVCTL_INFRA_BRANCH"
 	keyTrack    = "CVCTL_TRACK_TAG"
 	keyPath     = "CVCTL_INFRA_PATH"
+	keySource   = "CVCTL_INFRA_SOURCE"
+	keyRef      = "CVCTL_INFRA_REF"
 	keyStrategy = "CVCTL_STRATEGY"
 	svcPrefix   = "CVCTL_SVC_"
 	domPrefix   = "CVCTL_DOMAIN_"
 	digPrefix   = "CVCTL_DIGEST_"
 	extInfix    = "_EXT_"
+
+	keyBackupAccess    = "CVCTL_BACKUP_ACCESS_KEY"
+	keyBackupSecret    = "CVCTL_BACKUP_SECRET_KEY"
+	keyBackupLibsodium = "CVCTL_BACKUP_LIBSODIUM_KEY"
+	keyBackupRestic    = "CVCTL_BACKUP_RESTIC_PASSWORD"
+	backupExtPrefix    = "CVCTL_BACKUP_EXT_"
 )
+
+// Infra sources.
+const (
+	SourceGit = "git"
+	SourceOCI = "oci"
+)
+
+// IsOCI reports whether the contract comes from an OCI artifact.
+func (d *Decisions) IsOCI() bool { return d != nil && d.InfraSource == SourceOCI }
 
 func readErr(path string, err error) error {
 	return &output.Error{
@@ -86,10 +124,26 @@ func Read(path string, p *contract.Project) (*Decisions, error) {
 		InfraBranch: m[keyBranch],
 		TrackTag:    m[keyTrack],
 		InfraPath:   m[keyPath],
+		InfraSource: m[keySource],
+		InfraRef:    m[keyRef],
 		Strategy:    m[keyStrategy],
 		Services:    map[string]ServiceDecision{},
 		Domains:     map[string]string{},
 		Digests:     map[string]string{},
+		Backup: BackupDecision{
+			AccessKey:      m[keyBackupAccess],
+			SecretKey:      m[keyBackupSecret],
+			LibsodiumKey:   m[keyBackupLibsodium],
+			ResticPassword: m[keyBackupRestic],
+		},
+	}
+	for k, v := range m {
+		if f, ok := strings.CutPrefix(k, backupExtPrefix); ok && f != "" {
+			if d.Backup.Ext == nil {
+				d.Backup.Ext = map[string]string{}
+			}
+			d.Backup.Ext[strings.ToLower(f)] = v
+		}
 	}
 	for _, a := range p.Apps {
 		n := contract.Normalize(a.Name)
@@ -128,6 +182,8 @@ func Read(path string, p *contract.Project) (*Decisions, error) {
 				sd.BackupGen = AtoiNonNeg(v)
 			case rest == "BACKUP_GEN_MAX":
 				sd.BackupGenMax = AtoiNonNeg(v)
+			case rest == "BACKUP_KEY_GEN":
+				sd.BackupKeyGen = AtoiNonNeg(v)
 			case rest == "USER":
 				sd.Creds.User = v
 			case rest == "PASSWORD":
@@ -194,6 +250,11 @@ func (d *Decisions) Entries() map[string]string {
 	set(keyBranch, d.InfraBranch)
 	set(keyTrack, d.TrackTag)
 	set(keyPath, d.InfraPath)
+	// git is the default, so git instances keep the file they had.
+	if d.InfraSource != SourceGit {
+		set(keySource, d.InfraSource)
+	}
+	set(keyRef, d.InfraRef)
 	set(keyStrategy, d.Strategy)
 	for name, s := range d.Services {
 		pre := svcPrefix + contract.Normalize(name) + "_"
@@ -206,6 +267,9 @@ func (d *Decisions) Entries() map[string]string {
 		if s.BackupGenMax > 0 {
 			set(pre+"BACKUP_GEN_MAX", strconv.Itoa(s.BackupGenMax))
 		}
+		if s.BackupKeyGen > 0 {
+			set(pre+"BACKUP_KEY_GEN", strconv.Itoa(s.BackupKeyGen))
+		}
 		set(pre+"USER", s.Creds.User)
 		set(pre+"PASSWORD", s.Creds.Password)
 		set(pre+"DB", s.Creds.DB)
@@ -214,6 +278,13 @@ func (d *Decisions) Entries() map[string]string {
 		for f, v := range s.External {
 			set(pre+"EXT_"+contract.Normalize(f), v)
 		}
+	}
+	set(keyBackupAccess, d.Backup.AccessKey)
+	set(keyBackupSecret, d.Backup.SecretKey)
+	set(keyBackupLibsodium, d.Backup.LibsodiumKey)
+	set(keyBackupRestic, d.Backup.ResticPassword)
+	for f, v := range d.Backup.Ext {
+		set(backupExtPrefix+contract.Normalize(f), v)
 	}
 	for name, v := range d.Domains {
 		set(domPrefix+contract.Normalize(name), v)
@@ -348,8 +419,9 @@ func contains(list []string, v string) bool {
 }
 
 var (
-	dnsLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
-	digestRe   = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	dnsLabelRe     = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+	instanceNameRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+	digestRe       = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	// identRe limits user and db names: they end up inside shell
 	// healthchecks (postgres uses CMD-SHELL with user and db).
 	identRe   = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
@@ -413,11 +485,11 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 	switch {
 	case d.Instance == "":
 		add("E_DECISION_MISSING", "", "instance is not set", "set CVCTL_INSTANCE to <project>-<env>")
-	case !dnsLabelRe.MatchString(d.Instance):
-		add("E_DECISION_INVALID", "", fmt.Sprintf("instance %q is not a DNS label", d.Instance),
-			"use lowercase letters, digits and hyphens, e.g. myproj-dev")
+	case !instanceNameRe.MatchString(d.Instance):
+		add("E_INSTANCE_NAME", "", fmt.Sprintf("instance %q is not a DNS label without '--'", d.Instance),
+			"use lowercase letters, digits and hyphens without '--', e.g. myproj-dev")
 	case (d.Env == "dev" || d.Env == "prod") && !strings.HasSuffix(d.Instance, "-"+d.Env):
-		add("E_DECISION_INVALID", "", fmt.Sprintf("instance %q does not end with -%s", d.Instance, d.Env),
+		add("E_INSTANCE_NAME", "", fmt.Sprintf("instance %q does not end with -%s", d.Instance, d.Env),
 			"name the instance <project>-"+d.Env)
 	}
 	switch d.Env {
@@ -426,6 +498,15 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 	case "dev", "prod":
 	default:
 		add("E_DECISION_INVALID", "", fmt.Sprintf("env %q is not valid", d.Env), "use dev or prod")
+	}
+	switch d.InfraSource {
+	case "", SourceGit:
+	case SourceOCI:
+		if d.InfraRef == "" {
+			add("E_DECISION_MISSING", "", "oci infra source has no artifact reference", "set CVCTL_INFRA_REF to host/repository")
+		}
+	default:
+		add("E_DECISION_INVALID", "", fmt.Sprintf("infra source %q is not valid", d.InfraSource), "use git or oci")
 	}
 	switch d.Strategy {
 	case "":
@@ -578,4 +659,21 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 	}
 	output.SortIssues(is)
 	return is
+}
+
+// CheckDir verifies that the instance name in Decisions matches the directory name of cvctl.env.
+func CheckDir(d *Decisions, cvctlEnvPath string) *output.Error {
+	dir := filepath.Base(filepath.Dir(cvctlEnvPath))
+	if d == nil || d.Instance != dir {
+		inst := ""
+		if d != nil {
+			inst = d.Instance
+		}
+		return &output.Error{
+			Code:    "E_INSTANCE_MISMATCH",
+			Message: fmt.Sprintf("instance name %q in %s does not match directory %q", inst, cvctlEnvPath, dir),
+			Hint:    "ensure CVCTL_INSTANCE matches the directory containing cvctl.env",
+		}
+	}
+	return nil
 }

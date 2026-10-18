@@ -79,7 +79,7 @@ func (b *boundCompose) Pull(_ context.Context, services ...string) error {
 	return b.fake.failPull
 }
 
-func (b *boundCompose) UpData(_ context.Context, services []string) error {
+func (b *boundCompose) UpData(_ context.Context, services []string, _ time.Duration) error {
 	b.fake.mu.Lock()
 	defer b.fake.mu.Unlock()
 	b.fake.calls = append(b.fake.calls, "updata:"+strings.Join(services, ","))
@@ -181,9 +181,10 @@ type testRig struct {
 }
 
 type fakeDeployRepo struct {
-	mu        sync.Mutex
-	checkouts []string
-	failAt    map[string]error
+	mu         sync.Mutex
+	checkouts  []string
+	failAt     map[string]error
+	onCheckout func(commit string)
 }
 
 func (r *fakeDeployRepo) Checkout(_ context.Context, commit string) error {
@@ -192,6 +193,9 @@ func (r *fakeDeployRepo) Checkout(_ context.Context, commit string) error {
 	r.checkouts = append(r.checkouts, commit)
 	if err, ok := r.failAt[commit]; ok {
 		return err
+	}
+	if r.onCheckout != nil {
+		r.onCheckout(commit)
 	}
 	return nil
 }
@@ -315,7 +319,10 @@ func setupTestRig(t *testing.T, envName, instName string) *testRig {
 
 	fixedNow := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 
+	netRun := &systest.Runner{}
+	netRun.OnPrefix("docker network", sys.Result{})
 	deployer := &Deployer{
+		Run:        netRun,
 		DeployRoot: deployRoot,
 		TraefikDir: traefikDir,
 		FS:         osFS,
@@ -1097,8 +1104,8 @@ func TestManualRollbackSetsPausedWantHash(t *testing.T) {
 	rig := setupTestRig(t, "dev", "demo-dev")
 	currCommit := "1111111111111111111111111111111111111111"
 	oldCommit := "0000000000000000000000000000000000000000"
-	currDesired := state.Desired{InfraCommit: currCommit, Digests: map[string]string{"api": "sha256:111"}}
-	oldDesired := state.Desired{InfraCommit: oldCommit, Digests: map[string]string{"api": "sha256:000"}}
+	currDesired := state.Desired{InfraCommit: currCommit, Digests: map[string]string{"api": "sha256:" + strings.Repeat("1", 64)}}
+	oldDesired := state.Desired{InfraCommit: oldCommit, Digests: map[string]string{"api": "sha256:" + strings.Repeat("0", 64)}}
 
 	st := &state.State{
 		Instance: "demo-dev",
@@ -2275,7 +2282,7 @@ func TestAutoRollbackSuccessSaveFailureStillNotifies(t *testing.T) {
 	fcfs := &failCountingFS{
 		FS:          rig.fs,
 		targetPath:  statePath,
-		failOnCount: 2, // 1st is DEPLOYING, 2nd is post-rollback save
+		failOnCount: 3, // 1st is DEPLOYING, 2nd the promoted marker, 3rd post-rollback save
 	}
 	rig.deployer.FS = fcfs
 	rig.deployer.Store = state.NewStore(fcfs, stateDir)
@@ -2522,7 +2529,7 @@ func TestDeploySuccessSaveFailureStillNotifies(t *testing.T) {
 	fcfs := &failCountingFS{
 		FS:          rig.fs,
 		targetPath:  filepath.Join(stateDir, "demo-dev", "state.json"),
-		failOnCount: 2, // 1st is DEPLOYING, 2nd is the success save
+		failOnCount: 3, // 1st is DEPLOYING, 2nd the promoted marker, 3rd the success save
 	}
 	rig.deployer.FS = fcfs
 	rig.deployer.Store = state.NewStore(fcfs, stateDir)
@@ -2773,8 +2780,8 @@ func testBackupTarget() *render.BackupTarget {
 func TestRollbackRewritesBackupEnv(t *testing.T) {
 	rig := setupTestRig(t, "dev", "demo-dev")
 	rig.deployer.Backup = testBackupTarget()
-	curr := state.Desired{InfraCommit: "1111111111111111111111111111111111111111", Digests: map[string]string{"api": "sha256:111"}}
-	prev := state.Desired{InfraCommit: "0000000000000000000000000000000000000000", Digests: map[string]string{"api": "sha256:000"}}
+	curr := state.Desired{InfraCommit: "1111111111111111111111111111111111111111", Digests: map[string]string{"api": "sha256:" + strings.Repeat("1", 64)}}
+	prev := state.Desired{InfraCommit: "0000000000000000000000000000000000000000", Digests: map[string]string{"api": "sha256:" + strings.Repeat("0", 64)}}
 	if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusOK, Current: &curr, Previous: &prev}); err != nil {
 		t.Fatal(err)
 	}

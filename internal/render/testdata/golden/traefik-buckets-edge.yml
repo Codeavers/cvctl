@@ -1,29 +1,29 @@
 http:
   routers:
-    proj-dev-api:
+    proj-dev--api:
       entryPoints:
         - websecure
       middlewares:
         - cvctl-default@file
       rule: Host(`api.example.com`)
-      service: proj-dev-api
+      service: proj-dev--api
       tls:
         certResolver: le
-    proj-dev-media:
+    proj-dev--media:
       entryPoints:
         - websecure
       middlewares:
         - cvctl-default@file
       rule: Host(`media.example.com`) && (Method(`GET`) || Method(`HEAD`)) && PathRegexp(`^/(products)/.+`)
-      service: proj-dev-media
+      service: proj-dev--media
       tls:
         certResolver: le
   services:
-    proj-dev-api:
+    proj-dev--api:
       loadBalancer:
         servers:
-          - url: http://proj-dev-api:3000
-    proj-dev-media:
+          - url: http://proj-dev--api:3000
+    proj-dev--media:
       loadBalancer:
         servers:
-          - url: http://proj-dev-media:9000
+          - url: http://proj-dev--media:9000

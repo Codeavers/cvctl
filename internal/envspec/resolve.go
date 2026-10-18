@@ -6,6 +6,7 @@ import (
 	"io"
 	"regexp"
 	"sort"
+	"strings"
 
 	"github.com/codeavers/cvctl/internal/output"
 )
@@ -211,6 +212,21 @@ func Resolve(s *Spec, in Input) (Result, error) {
 	for _, name := range templates {
 		if err := resolveTpl(name); err != nil {
 			return Result{}, err
+		}
+	}
+
+	sortedValKeys := make([]string, 0, len(values))
+	for k := range values {
+		sortedValKeys = append(sortedValKeys, k)
+	}
+	sort.Strings(sortedValKeys)
+	for _, k := range sortedValKeys {
+		if strings.ContainsAny(values[k], "\r\n") {
+			return Result{}, &output.Error{
+				Code:    "E_ENVSPEC_VALUE",
+				Message: fmt.Sprintf("var %s: value cannot contain newline or carriage return", k),
+				Hint:    "remove newline and carriage return characters from the value",
+			}
 		}
 	}
 

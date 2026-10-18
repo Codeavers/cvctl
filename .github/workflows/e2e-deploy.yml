@@ -9,18 +9,21 @@ on:
       - 'scripts/e2e/**'
       - '.github/workflows/e2e-deploy.yml'
 
+permissions:
+  contents: read
+
 jobs:
   e2e:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
 
       - name: Build cvctl
-        run: CGO_ENABLED=0 go build -o cvctl ./cmd/cvctl
+        run: CGO_ENABLED=0 go build -ldflags "-X main.version=dev-${{ github.sha }}" -o cvctl ./cmd/cvctl && go build -o rawpush ./scripts/e2e/rawpush
 
       - name: Build cvctl-postgres
         run: |
@@ -70,7 +73,7 @@ jobs:
 
       - name: Upload artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: e2e-deploy-artifacts
           path: /tmp/e2e-deploy-logs

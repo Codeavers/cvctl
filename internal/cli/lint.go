@@ -27,35 +27,9 @@ func newLintCmd() *cobra.Command {
 			if len(args) == 1 {
 				dir = args[0]
 			}
-			cat, err := kinds.Load()
+			p, err := lintDir(dir)
 			if err != nil {
 				return err
-			}
-			p, err := contract.Load(dir, cat)
-			if err != nil {
-				return err
-			}
-
-			var extra []output.Issue
-			specPath := filepath.Join(dir, "env.spec.yml")
-			var spec *envspec.Spec
-			if _, statErr := os.Stat(specPath); statErr != nil {
-				extra = append(extra, output.Issue{
-					Code:    "E_CONTRACT_NO_ENVSPEC",
-					Message: "env.spec.yml not found",
-					Hint:    "create env.spec.yml next to compose.yml declaring every variable the compose file references",
-				})
-			} else if spec, err = envspec.Load(specPath); err != nil {
-				var oe *output.Error
-				if !errors.As(err, &oe) {
-					return err
-				}
-				extra = append(extra, output.Issue{Code: oe.Code, Message: oe.Message, Hint: oe.Hint})
-			}
-			issues := append(contract.Validate(p, cat, spec), extra...)
-			output.SortIssues(issues)
-			if len(issues) > 0 {
-				return &output.IssuesError{Issues: issues}
 			}
 
 			res := map[string]int{"services": len(p.Apps), "data": len(p.Data)}
@@ -65,4 +39,40 @@ func newLintCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// lintDir runs the contract and env spec checks shared by lint and publish.
+func lintDir(dir string) (*contract.Project, error) {
+	cat, err := kinds.Load()
+	if err != nil {
+		return nil, err
+	}
+	p, err := contract.Load(dir, cat)
+	if err != nil {
+		return nil, err
+	}
+
+	var extra []output.Issue
+	specPath := filepath.Join(dir, "env.spec.yml")
+	var spec *envspec.Spec
+	if _, statErr := os.Stat(specPath); statErr != nil {
+		extra = append(extra, output.Issue{
+			Code:    "E_CONTRACT_NO_ENVSPEC",
+			Message: "env.spec.yml not found",
+			Hint:    "create env.spec.yml next to compose.yml declaring every variable the compose file references",
+		})
+	} else if spec, err = envspec.Load(specPath); err != nil {
+		var oe *output.Error
+		if !errors.As(err, &oe) {
+			return nil, err
+		}
+		extra = append(extra, output.Issue{Code: oe.Code, Message: oe.Message, Hint: oe.Hint})
+	}
+	issues := append(contract.Validate(p, cat, spec), extra...)
+	output.SortIssues(issues)
+	if len(issues) > 0 {
+		return nil, &output.IssuesError{Issues: issues}
+	}
+
+	return p, nil
 }

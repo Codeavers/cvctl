@@ -317,3 +317,47 @@ func TestRestoreLooksUpDeployOwnerBeforeWriting(t *testing.T) {
 		t.Fatalf("wrote %d paths", n)
 	}
 }
+
+func TestAllowedRejectsDoubleHyphen(t *testing.T) {
+	if Allowed("/srv/deploy/shop--prod/cvctl.env") {
+		t.Fatal("expected Allowed to reject path with double hyphen in instance name")
+	}
+	if !Allowed("/srv/deploy/shop-prod/cvctl.env") {
+		t.Fatal("expected Allowed to accept valid path")
+	}
+}
+
+func TestRoundTripKeepsInstanceBackupKeys(t *testing.T) {
+	src := seed(t)
+	env := "CVCTL_BACKUP_ACCESS_KEY=bk-shop-prod\nCVCTL_BACKUP_SECRET_KEY=s3cr3t\nCVCTL_BACKUP_LIBSODIUM_KEY=abcd\nCVCTL_BACKUP_RESTIC_PASSWORD=pw\nCVCTL_SVC_DB_BACKUP_KEY_GEN=3\n"
+	if err := src.WriteFile("/srv/deploy/shop-prod/cvctl.env", []byte(env), 0o640, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := src.WriteFile("/etc/cvctl/secrets/walg_libsodium_key", []byte("hostkey"), 0o640, sys.Owner{User: "root", Group: "deploy"}); err != nil {
+		t.Fatal(err)
+	}
+	entries, _, err := Collect(src, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := Encrypt(&buf, entries, "pass", false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Decrypt(&buf, "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := systest.NewFS()
+	if _, err := Restore(dst, "", got, false); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := dst.ReadFile("/srv/deploy/shop-prod/cvctl.env")
+	if string(b) != env {
+		t.Fatalf("cvctl.env changed:\n%s", b)
+	}
+	// Old generations stay readable: the host key travels too.
+	if k, _ := dst.ReadFile("/etc/cvctl/secrets/walg_libsodium_key"); string(k) != "hostkey" {
+		t.Fatalf("host key: %q", k)
+	}
+}

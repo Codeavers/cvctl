@@ -70,7 +70,7 @@ func TestRestoreFreshResticOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := g.calls()
-	want := "docker run --rm --network cvctl-backup -v " + vol + ":/restore --env-file /srv/deploy/app-prod/restic-files.env restic/restic:0.19.1 restore latest:/data --target /restore"
+	want := "docker run --rm --network app-prod_backup -v " + vol + ":/restore --env-file /srv/deploy/app-prod/restic-files.env restic/restic:0.19.1 restore latest:/data --target /restore"
 	if g.index(want) < 0 || g.index("docker volume create "+vol) > g.index(want) {
 		t.Fatalf("calls: %v", calls)
 	}
@@ -101,7 +101,7 @@ func TestRestoreFreshRemovesOnlyItsOwnVolumeOnFailure(t *testing.T) {
 	p, d, _ = g.r.Load("app-prod")
 	vol := "app-prod_files-data"
 	g.run.On("docker volume inspect "+vol, sys.Result{ExitCode: 1})
-	g.run.OnErrorPrefix("docker run --rm --network cvctl-backup -v "+vol, errors.New("restic failed"))
+	g.run.OnErrorPrefix("docker run --rm --network app-prod_backup -v "+vol, errors.New("restic failed"))
 	if err := g.r.RestoreFresh(context.Background(), "app-prod", "files", p, d, vol); err == nil {
 		t.Fatal("expected failure")
 	}

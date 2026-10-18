@@ -37,7 +37,7 @@ Group=deploy
 ExecStart=/usr/local/bin/cvctl agent
 Restart=always
 RestartSec=10
-` + agentSandboxDirectives + `TimeoutStopSec=300
+` + agentSandboxDirectives + `TimeoutStopSec=420
 
 [Install]
 WantedBy=multi-user.target

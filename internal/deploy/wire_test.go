@@ -70,7 +70,6 @@ func TestWire(t *testing.T) {
 		"compose",
 		"-p", inst,
 		"--env-file", envFile,
-		"-f", filepath.Join(instDir, "infra", "server", "compose.yml"),
 		"-f", override,
 		"config", "-q",
 	}
@@ -108,7 +107,7 @@ x-cvctl:
 
 	run := &systest.Runner{}
 	psOut := `[{"Service":"web","Name":"myapp-dev-web-1","State":"running","Health":"healthy"}]`
-	run.On("docker compose -p myapp-dev --env-file "+filepath.Join(instDir, "app.env")+" -f "+filepath.Join(serverDir, "compose.yml")+" -f "+filepath.Join(instDir, "compose.cvctl.yml")+" ps --format json", sys.Result{Stdout: []byte(psOut), ExitCode: 0})
+	run.On("docker compose -p myapp-dev --env-file "+filepath.Join(instDir, "app.env")+" -f "+filepath.Join(instDir, "compose.cvctl.yml")+" ps --format json", sys.Result{Stdout: []byte(psOut), ExitCode: 0})
 
 	inspectOut := `{"myapp_dev_app":{"IPAddress":"127.0.0.1"}}`
 	run.On("docker inspect -f {{json .NetworkSettings.Networks}} myapp-dev-web-1", sys.Result{Stdout: []byte(inspectOut), ExitCode: 0})
@@ -182,13 +181,13 @@ func TestBackupTargetFrom(t *testing.T) {
 	_ = cfg.Set("S3_BUCKET", "b")
 
 	got := deploy.BackupTargetFrom(cfg, sec)
-	if got == nil || got.Endpoint != "http://ext:9000" || got.Region != "us-east-1" || got.Host != "h1" || got.ResticPassword != "rp" {
+	if got == nil || got.Endpoint != "http://ext:9000" || got.Region != "us-east-1" || got.Host != "h1" || got.ResticPassword != "rp" || got.Local {
 		t.Fatalf("fallback/default wrong: %+v", got)
 	}
 	_ = cfg.Set("S3_ENDPOINT_INTERNAL", "http://cvctl-storage:9000")
 	_ = cfg.Set("S3_REGION", "eu-west-1")
 	got = deploy.BackupTargetFrom(cfg, sec)
-	if got.Endpoint != "http://cvctl-storage:9000" || got.Region != "eu-west-1" {
+	if got.Endpoint != "http://cvctl-storage:9000" || got.Region != "eu-west-1" || !got.Local {
 		t.Fatalf("internal endpoint/region not used: %+v", got)
 	}
 	if deploy.BackupTargetFrom(nil, sec) != nil || deploy.BackupTargetFrom(cfg, nil) != nil {

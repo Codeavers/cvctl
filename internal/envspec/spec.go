@@ -6,12 +6,16 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/codeavers/cvctl/internal/output"
 )
+
+var varNameRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 
 const defaultRandomLength = 48
 
@@ -95,6 +99,15 @@ func Load(path string) (*Spec, error) {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	for _, name := range names {
+		if !varNameRe.MatchString(name) || strings.HasPrefix(name, "COMPOSE_") || strings.HasPrefix(name, "DOCKER_") {
+			return nil, &output.Error{
+				Code:    "E_ENVSPEC_NAME",
+				Message: fmt.Sprintf("invalid variable name %q: must match ^[A-Z_][A-Z0-9_]*$ and not start with COMPOSE_ or DOCKER_", name),
+				Hint:    "use uppercase letters, digits and underscores, and avoid COMPOSE_ or DOCKER_ prefixes",
+			}
+		}
+	}
 	s := Spec{Vars: make(map[string]Var, len(raw.Vars))}
 	for _, name := range names {
 		node := raw.Vars[name]

@@ -20,6 +20,7 @@ import (
 	"github.com/codeavers/cvctl/internal/project"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
+	"github.com/codeavers/cvctl/internal/sys/systest"
 	"github.com/codeavers/cvctl/kinds"
 )
 
@@ -63,9 +64,9 @@ type opsStubCompose struct {
 	lastSvc    string
 }
 
-func (c *opsStubCompose) Config(_ context.Context) error             { return nil }
-func (c *opsStubCompose) Pull(_ context.Context, _ ...string) error  { return nil }
-func (c *opsStubCompose) UpData(_ context.Context, _ []string) error { return nil }
+func (c *opsStubCompose) Config(_ context.Context) error                              { return nil }
+func (c *opsStubCompose) Pull(_ context.Context, _ ...string) error                   { return nil }
+func (c *opsStubCompose) UpData(_ context.Context, _ []string, _ time.Duration) error { return nil }
 func (c *opsStubCompose) ExecScript(_ context.Context, _, _ string) (sys.Result, error) {
 	return sys.Result{}, nil
 }
@@ -137,7 +138,10 @@ func setupOpsFixture(t *testing.T, inst string) (string, *OpsEnv) {
 	}
 
 	hcfg := &hostcfg.Config{Registries: "ghcr.io/codeavers"}
+	netRun := &systest.Runner{}
+	netRun.OnPrefix("docker network", sys.Result{})
 	dep := &deploy.Deployer{
+		Run:        netRun,
 		DeployRoot: tmp,
 		TraefikDir: filepath.Join(tmp, "traefik"),
 		FS:         sys.NewOSFS(),
@@ -454,6 +458,16 @@ func TestSetEnv(t *testing.T) {
 	}
 	if !strings.Contains(out, "E_APPENV_READ") {
 		t.Errorf("expected E_APPENV_READ, got %s", out)
+	}
+
+	// 5. Value with newline rejected with E_ENVSPEC_VALUE
+	_ = os.WriteFile(appEnvPath, []byte("EXISTING=foo\n"), 0o640)
+	code, out, _ = run(t, "set-env", "myapp-dev", "SOME_KEY", "bad\nvalue", "--json")
+	if code == 0 {
+		t.Fatalf("expected error on value with newline")
+	}
+	if !strings.Contains(out, "E_ENVSPEC_VALUE") {
+		t.Errorf("expected E_ENVSPEC_VALUE, got %s", out)
 	}
 }
 
@@ -1001,13 +1015,13 @@ services:
         limits:
           memory: 256M
   media:
-    image: minio/minio:RELEASE.2024-10-13T13-33-44Z
     labels:
       cvctl.kind: s3
-      cvctl.version: "2024"
+      cvctl.version: "RELEASE.2026-09-16T00-00-00Z"
       cvctl.env: S3
       cvctl.expose: "9000"
       cvctl.backup: none
+      cvctl.external: allowed
 x-cvctl:
   health:
     service: web
@@ -1048,7 +1062,7 @@ func writeStatusInstance(t *testing.T, tmp, inst, envName, mode string) {
 		Services: map[string]instance.ServiceDecision{
 			"media": {
 				Mode:    mode,
-				Version: "2024",
+				Version: "RELEASE.2026-09-16T00-00-00Z",
 				Creds: kinds.Credentials{
 					User:        "media",
 					Password:    "mediapassword1234567890123456",
@@ -1062,6 +1076,9 @@ func writeStatusInstance(t *testing.T, tmp, inst, envName, mode string) {
 					"access_key": "extkey",
 					"secret_key": "extsecret",
 					"bucket":     "extbucket",
+
+					"bucket_assets": "ext-assets", "bucket_products": "ext-products", "bucket_private": "ext-private",
+					"public_url_assets": "https://assets.example.com", "public_url_products": "https://products.example.com",
 				},
 			},
 		},
@@ -1268,10 +1285,17 @@ func TestStatusUnreadableInstanceSkipped(t *testing.T) {
 	if !slices.Contains(res.Data.Warnings, goodWarn) {
 		t.Fatalf("expected good-dev warning in warnings: %v", res.Data.Warnings)
 	}
+	// An instance that cannot be loaded is reported, not skipped silently.
+	var sawBad, sawBadContract bool
 	for _, w := range res.Data.Warnings {
-		if strings.Contains(w, "bad-bucket") || strings.Contains(w, "bad-dev") || strings.Contains(w, "badcontract-dev") {
-			t.Fatalf("unexpected warning for bad instances: %s", w)
+		if strings.Contains(w, "bad-bucket") {
+			t.Fatalf("orphans of an unreadable instance must not be reported: %s", w)
 		}
+		sawBad = sawBad || strings.HasPrefix(w, "bad-dev: ")
+		sawBadContract = sawBadContract || strings.HasPrefix(w, "badcontract-dev: ")
+	}
+	if !sawBad || !sawBadContract {
+		t.Fatalf("expected load warnings for bad-dev and badcontract-dev: %v", res.Data.Warnings)
 	}
 
 	// Calling status directly on unreadable instances also succeeds and skips s3 warnings
@@ -1282,5 +1306,123 @@ func TestStatusUnreadableInstanceSkipped(t *testing.T) {
 	code, out, errb = run(t, "status", "badcontract-dev", "--json")
 	if code != 0 {
 		t.Fatalf("expected json exit 0 for badcontract-dev, got %d out=%s err=%s", code, out, errb)
+	}
+}
+
+func TestStatusWarnsHostS3CredentialsForBackups(t *testing.T) {
+	tmp, env := setupOpsFixture(t, "demo-dev")
+	writeStatusInstance(t, tmp, "demo-dev", "dev", "local")
+	compose := strings.Replace(statusS3Compose, "cvctl.backup: none", "cvctl.backup: volume", 1)
+	if err := os.WriteFile(filepath.Join(tmp, "demo-dev", "infra", "compose.yml"), []byte(compose), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env.Host = &hostcfg.Config{Storage: "s3"}
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+
+	const want = "demo-dev: backups use the host S3 credentials; any instance can delete them; per-instance backup credentials (--ext backup.*) can only be set at project add"
+	code, out, errb := run(t, "status")
+	if code != 0 || !strings.Contains(out, "warning: "+want) {
+		t.Fatalf("code=%d out=%s err=%s", code, out, errb)
+	}
+
+	envPath := filepath.Join(tmp, "demo-dev", "cvctl.env")
+	raw, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = append(raw, []byte("CVCTL_BACKUP_EXT_ACCESS_KEY=ownkey\nCVCTL_BACKUP_EXT_SECRET_KEY=ownsecret\n")...)
+	if err := os.WriteFile(envPath, raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	const keysWarn = "demo-dev: backups use the host keys; run cvctl project update demo-dev"
+	if code, out, _ := run(t, "status"); code != 0 || strings.Contains(out, want) || !strings.Contains(out, "warning: "+keysWarn) {
+		t.Fatalf("per-instance credentials must silence the warning: code=%d out=%s", code, out)
+	}
+	raw = append(raw, []byte("CVCTL_BACKUP_LIBSODIUM_KEY=abcd\nCVCTL_BACKUP_RESTIC_PASSWORD=pw\n")...)
+	if err := os.WriteFile(envPath, raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, _ := run(t, "status"); code != 0 || strings.Contains(out, keysWarn) {
+		t.Fatalf("instance keys must silence the keys warning: code=%d out=%s", code, out)
+	}
+}
+
+func TestStatusWarnsHostKeysOnLocalStorage(t *testing.T) {
+	tmp, env := setupOpsFixture(t, "demo-dev")
+	writeStatusInstance(t, tmp, "demo-dev", "dev", "local")
+	compose := strings.Replace(statusS3Compose, "cvctl.backup: none", "cvctl.backup: volume", 1)
+	if err := os.WriteFile(filepath.Join(tmp, "demo-dev", "infra", "compose.yml"), []byte(compose), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env.Host = &hostcfg.Config{Storage: "local"}
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+	code, out, _ := run(t, "status")
+	if code != 0 || !strings.Contains(out, "warning: demo-dev: backups use the host keys; run cvctl project update demo-dev") || strings.Contains(out, "host S3 credentials") {
+		t.Fatalf("code=%d out=%s", code, out)
+	}
+}
+
+// copyingRepo serves a fixed contract and writes it into infra/ on checkout.
+type copyingRepo struct {
+	*opsStubRepo
+	dst string
+}
+
+func (r *copyingRepo) Checkout(_ context.Context, _ string) error {
+	b, err := os.ReadFile(filepath.Join(r.infraSource, "compose.yml"))
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(r.dst, "compose.yml"), b, 0o644)
+}
+
+// A contract in infra/ that fails rules added later must not block deploying
+// a fixed one.
+func TestDeployRejectedOnDiskContractPicksUpFix(t *testing.T) {
+	_, env := setupOpsFixture(t, "myapp-dev")
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+
+	infraDir := filepath.Join(env.deployRoot(), "myapp-dev", "infra")
+	good := t.TempDir()
+	writeCLIInfra(t, good)
+	b, err := os.ReadFile(filepath.Join(infraDir, "compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := strings.Replace(string(b), "services:\n", "services:\n  evil:\n    image: ghcr.io/codeavers/evil\n    privileged: true\n    labels: { cvctl.role: worker }\n", 1)
+	if bad == string(b) {
+		t.Fatal("fixture compose has no services: line")
+	}
+	if err := os.WriteFile(filepath.Join(infraDir, "compose.yml"), []byte(bad), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repo := &copyingRepo{opsStubRepo: &opsStubRepo{infraSource: good}, dst: infraDir}
+	env.RepoFactory = func(dir, keyPath string) project.RepoLike { return repo }
+	env.Deployer.Repo = func(string) deploy.CheckoutAPI { return repo }
+
+	code, out, errb := run(t, "deploy", "myapp-dev", "--json")
+	if code != 0 {
+		t.Fatalf("code %d out=%s err=%s", code, out, errb)
+	}
+	var res struct {
+		Data struct {
+			Status   string   `json:"status"`
+			Warnings []string `json:"warnings"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("unmarshal: %v out=%s", err, out)
+	}
+	if res.Data.Status != "OK" || len(res.Data.Warnings) != 1 || !strings.Contains(res.Data.Warnings[0], "E_CONTRACT_FIELD_FORBIDDEN") {
+		t.Fatalf("data = %+v", res.Data)
+	}
+	if after, _ := os.ReadFile(filepath.Join(infraDir, "compose.yml")); strings.Contains(string(after), "privileged") {
+		t.Fatal("infra/ still holds the rejected contract")
 	}
 }

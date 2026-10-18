@@ -7,33 +7,39 @@ import (
 	"path/filepath"
 
 	"github.com/codeavers/cvctl/internal/output"
+	"github.com/codeavers/cvctl/internal/render"
 	"github.com/codeavers/cvctl/internal/sys"
 )
 
 // resticExitNoRepo is restic's exit code for a repository that does not exist.
 const resticExitNoRepo = 10
 
+// backupNet makes sure the instance's backup network exists (internal with the
+// host silo, with egress for external storage): backup
+// containers run from the host CLI, before or without a compose up.
+func (r *Runner) backupNet(ctx context.Context, inst string) (string, error) {
+	name := render.NetworkBackup(inst)
+	if err := sys.EnsureNetwork(ctx, r.Run, name, r.Host != nil && r.Host.Local); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
 func (r *Runner) resticEnvPath(inst, svc string) string {
 	return filepath.Join(r.instanceDir(inst), "restic-"+svc+".env")
 }
 
 // writeResticEnv keeps the secrets out of argv: docker reads them from the file.
-func (r *Runner) writeResticEnv(inst, svc string) (string, error) {
-	if r.Host.ResticPassword == "" {
+func (r *Runner) writeResticEnv(inst, svc string, idx int) (string, error) {
+	env := r.Host.ResticEnv(inst, svc, idx)
+	if env["RESTIC_PASSWORD"] == "" {
 		return "", &output.Error{
 			Code:    "E_BACKUP_NOT_CONFIGURED",
 			Message: "restic_password is not set",
 			Hint:    "create /etc/cvctl/secrets/restic_password (run cvctl init)",
 		}
 	}
-	b := r.Host
-	body := envFileBody(map[string]string{
-		"RESTIC_REPOSITORY":     "s3:" + b.Endpoint + "/" + b.Bucket + "/" + b.Host + "/" + inst + "/" + svc,
-		"RESTIC_PASSWORD":       b.ResticPassword,
-		"AWS_ACCESS_KEY_ID":     b.AccessKey,
-		"AWS_SECRET_ACCESS_KEY": b.SecretKey,
-		"AWS_DEFAULT_REGION":    b.Region,
-	})
+	body := envFileBody(env)
 	path := r.resticEnvPath(inst, svc)
 	if err := r.FS.WriteFile(path, body, 0o640, deployOwner); err != nil {
 		return "", &output.Error{
@@ -45,8 +51,8 @@ func (r *Runner) writeResticEnv(inst, svc string) (string, error) {
 	return path, nil
 }
 
-func (r *Runner) resticCmd(envFile, volume string, args ...string) sys.Cmd {
-	a := []string{"run", "--rm", "--network", backupNetwork}
+func (r *Runner) resticCmd(inst, envFile, volume string, args ...string) sys.Cmd {
+	a := []string{"run", "--rm", "--network", render.NetworkBackup(inst)}
 	if volume != "" {
 		a = append(a, "-v", volume+":/data:ro")
 	}
@@ -55,22 +61,25 @@ func (r *Runner) resticCmd(envFile, volume string, args ...string) sys.Cmd {
 }
 
 func (r *Runner) resticBackup(ctx context.Context, inst string, t Target) error {
-	envFile, err := r.writeResticEnv(inst, t.Service)
+	envFile, err := r.writeResticEnv(inst, t.Service, r.Host.ResticRepoIndex(t.Service))
 	if err != nil {
 		return err
 	}
-	if err := r.resticInit(ctx, envFile); err != nil {
+	if _, err := r.backupNet(ctx, inst); err != nil {
 		return err
 	}
-	if _, err := r.exec(ctx, r.resticCmd(envFile, t.Volume, "backup", "/data", "--host", r.Host.Host, "--tag", inst)); err != nil {
+	if err := r.resticInit(ctx, inst, envFile); err != nil {
 		return err
 	}
-	_, err = r.exec(ctx, r.resticCmd(envFile, "", "forget", "--keep-daily", "7", "--keep-weekly", "4", "--prune"))
+	if _, err := r.exec(ctx, r.resticCmd(inst, envFile, t.Volume, "backup", "/data", "--host", r.Host.Host, "--tag", inst)); err != nil {
+		return err
+	}
+	_, err = r.exec(ctx, r.resticCmd(inst, envFile, "", "forget", "--keep-daily", "7", "--keep-weekly", "4", "--prune"))
 	return err
 }
 
-func (r *Runner) resticInit(ctx context.Context, envFile string) error {
-	cmd := r.resticCmd(envFile, "", "snapshots", "--json")
+func (r *Runner) resticInit(ctx context.Context, inst, envFile string) error {
+	cmd := r.resticCmd(inst, envFile, "", "snapshots", "--json")
 	res, err := r.Run.Run(ctx, cmd)
 	if err == nil && res.ExitCode == 0 {
 		return nil
@@ -78,18 +87,50 @@ func (r *Runner) resticInit(ctx context.Context, envFile string) error {
 	if err != nil || res.ExitCode != resticExitNoRepo {
 		return r.cmdFailed(cmd, res, err)
 	}
-	_, err = r.exec(ctx, r.resticCmd(envFile, "", "init"))
+	_, err = r.exec(ctx, r.resticCmd(inst, envFile, "", "init"))
 	return err
 }
 
+// resticList lists the snapshots of the current repository and, after a move
+// to per-instance keys, of the older ones, tagged with their repository.
 func (r *Runner) resticList(ctx context.Context, inst string, t Target) ([]Snapshot, error) {
-	envFile, err := r.writeResticEnv(inst, t.Service)
+	cur := r.Host.ResticRepoIndex(t.Service)
+	var out []Snapshot
+	for i := cur; i >= 0; i-- {
+		snaps, err := r.resticRepoList(ctx, inst, t, i, cur > 0)
+		if err != nil {
+			return nil, err
+		}
+		if i < cur {
+			for k := range snaps {
+				snaps[k].Repo = fmt.Sprintf("r%d", i)
+			}
+		}
+		out = append(out, snaps...)
+	}
+	if out == nil {
+		out = []Snapshot{}
+	}
+	return out, nil
+}
+
+// resticRepoList lists repository idx; a missing repository is empty when
+// missingOK (a moved service's new repository before its first backup).
+func (r *Runner) resticRepoList(ctx context.Context, inst string, t Target, idx int, missingOK bool) ([]Snapshot, error) {
+	envFile, err := r.writeResticEnv(inst, t.Service, idx)
 	if err != nil {
 		return nil, err
 	}
-	res, err := r.exec(ctx, r.resticCmd(envFile, "", "snapshots", "--json"))
-	if err != nil {
+	if _, err := r.backupNet(ctx, inst); err != nil {
 		return nil, err
+	}
+	cmd := r.resticCmd(inst, envFile, "", "snapshots", "--json")
+	res, err := r.Run.Run(ctx, cmd)
+	if err == nil && res.ExitCode == resticExitNoRepo && missingOK {
+		return nil, nil
+	}
+	if err != nil || res.ExitCode != 0 {
+		return nil, r.cmdFailed(cmd, res, err)
 	}
 	var raw []struct {
 		ShortID string `json:"short_id"`

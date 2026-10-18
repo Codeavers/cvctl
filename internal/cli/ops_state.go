@@ -122,13 +122,8 @@ func newStatusCmd() *cobra.Command {
 				}
 
 				commitStr := "-"
-				if st != nil && st.Current != nil && st.Current.InfraCommit != "" {
-					c := st.Current.InfraCommit
-					if len(c) > 7 {
-						commitStr = c[:7]
-					} else {
-						commitStr = c
-					}
+				if st != nil && st.Current != nil && (st.Current.InfraCommit != "" || st.Current.InfraDigest != "") {
+					commitStr = deploy.RevShort(*st.Current)
 				}
 
 				ageStr := "-"
@@ -275,19 +270,12 @@ func newLogsCmd() *cobra.Command {
 				}
 				logsOut = out
 			} else {
-				cvctlEnvPath := filepath.Join(e.deployRoot(), inst, "cvctl.env")
-				d0, _ := instance.Read(cvctlEnvPath, &contract.Project{})
-				infraPath := "."
-				if d0 != nil && d0.InfraPath != "" {
-					infraPath = d0.InfraPath
-				}
 				p := compose.Project{
-					Run:       e.runner(),
-					Instance:  inst,
-					Dir:       filepath.Join(e.deployRoot(), inst),
-					InfraPath: infraPath,
-					Override:  overridePath,
-					EnvFile:   appEnvPath,
+					Run:      e.runner(),
+					Instance: inst,
+					Dir:      filepath.Join(e.deployRoot(), inst),
+					Override: overridePath,
+					EnvFile:  appEnvPath,
 				}
 				out, err := p.Logs(cmd.Context(), service, tail)
 				if err != nil {
@@ -357,7 +345,16 @@ func (e *OpsEnv) s3Warnings(instances []string) []string {
 	for _, inst := range instances {
 		p, d, err := loader(inst)
 		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: %v", inst, err))
 			continue
+		}
+		if len(backup.Targets(p, d)) > 0 {
+			if !d.Backup.HasKeys() {
+				warnings = append(warnings, fmt.Sprintf("%s: backups use the host keys; run cvctl project update %s", inst, inst))
+			}
+			if e.Host != nil && e.Host.Storage == "s3" && (d.Backup.Ext["access_key"] == "" || d.Backup.Ext["secret_key"] == "") {
+				warnings = append(warnings, fmt.Sprintf("%s: backups use the host S3 credentials; any instance can delete them; per-instance backup credentials (--ext backup.*) can only be set at project add", inst))
+			}
 		}
 		for _, ds := range p.Data {
 			sd := d.Services[ds.Name]

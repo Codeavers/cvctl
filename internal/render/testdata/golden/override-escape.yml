@@ -1,0 +1,115 @@
+networks:
+  app: {}
+  data:
+    internal: true
+  edge:
+    external: true
+    name: proj-dev_edge
+services:
+  api:
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    env_file:
+      - /x/app.env
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+    image: ghcr.io/org/project-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    labels:
+      cvctl.expose: "3000"
+      cvctl.role: app
+    networks:
+      app: {}
+      data: {}
+      edge:
+        aliases:
+          - proj-dev--api
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+  cache:
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
+    cap_drop:
+      - ALL
+    command:
+      - redis-server
+      - --requirepass
+      - rp
+      - --appendonly
+      - "yes"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - -a
+        - rp
+        - ping
+    image: redis:7-alpine
+    labels:
+      cvctl.env: REDIS
+      cvctl.external: allowed
+      cvctl.kind: redis
+    networks:
+      - data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - cache-data:/data
+  main-db:
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
+    cap_drop:
+      - ALL
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    environment:
+      PGDATABASE: d
+      PGHOST: /var/run/postgresql
+      PGUSER: u
+      POSTGRES_DB: d
+      POSTGRES_PASSWORD: a$$b
+      POSTGRES_USER: u
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U u -d d
+    image: ghcr.io/codeavers/cvctl-postgres:16
+    labels:
+      cvctl.env: DATABASE
+      cvctl.kind: postgres
+      cvctl.version: "16"
+    networks:
+      - data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - main-db-data:/var/lib/postgresql/data
+volumes:
+  cache-data:
+    name: proj-dev_cache-data
+  main-db-data:
+    name: proj-dev_main-db-data

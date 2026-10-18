@@ -19,9 +19,14 @@ import (
 
 // Wire sets up the production Compose, Health, and Repo factories on the Deployer.
 func Wire(d *Deployer, run sys.Runner) {
+	d.Run = run
 	d.Allowed = AllowedRegistries(d.Host)
 	if d.Backup == nil {
 		d.Backup = BackupTargetFrom(d.Host, d.Secrets)
+	}
+
+	if d.Contracts == nil {
+		d.Contracts = OCIFetcher(OCIAuth(d.Host, d.Secrets))
 	}
 
 	d.Repo = func(inst string) CheckoutAPI {
@@ -48,14 +53,12 @@ func Wire(d *Deployer, run sys.Runner) {
 
 	d.Compose = func(inst, override, envFile string) ComposeAPI {
 		instDir := filepath.Join(d.deployRoot(), inst)
-		infraPath := readInfraPath(d.FS, d.deployRoot(), inst)
 		return &compose.Project{
-			Run:       run,
-			Instance:  inst,
-			Dir:       instDir,
-			InfraPath: infraPath,
-			Override:  override,
-			EnvFile:   envFile,
+			Run:      run,
+			Instance: inst,
+			Dir:      instDir,
+			Override: override,
+			EnvFile:  envFile,
 		}
 	}
 
@@ -87,12 +90,11 @@ func Wire(d *Deployer, run sys.Runner) {
 
 		port := p.HealthPort()
 		proj := compose.Project{
-			Run:       run,
-			Instance:  inst,
-			Dir:       instDir,
-			InfraPath: infraPath,
-			Override:  override,
-			EnvFile:   filepath.Join(instDir, "app.env"),
+			Run:      run,
+			Instance: inst,
+			Dir:      instDir,
+			Override: override,
+			EnvFile:  filepath.Join(instDir, "app.env"),
 		}
 		return compose.Health(ctx, run, proj, p.X.Health, port, nil)
 	}
@@ -102,10 +104,9 @@ func Wire(d *Deployer, run sys.Runner) {
 // override and app env paths.
 func (d *Deployer) ComposeProject(run sys.Runner, inst string) *compose.Project {
 	return &compose.Project{
-		Run:       run,
-		Instance:  inst,
-		Dir:       filepath.Join(d.deployRoot(), inst),
-		InfraPath: readInfraPath(d.FS, d.deployRoot(), inst),
+		Run:      run,
+		Instance: inst,
+		Dir:      filepath.Join(d.deployRoot(), inst),
 	}
 }
 
@@ -152,5 +153,6 @@ func BackupTargetFrom(cfg *hostcfg.Config, sec *hostcfg.Secrets) *render.BackupT
 	return &render.BackupTarget{
 		Host: cfg.HostName, Endpoint: endpoint, Bucket: cfg.S3Bucket, Region: region,
 		AccessKey: ak, SecretKey: sk, LibsodiumKey: key, ResticPassword: pass,
+		Local: cfg.Storage != "s3" && cfg.S3EndpointInternal != "",
 	}
 }

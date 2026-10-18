@@ -36,7 +36,7 @@ var deployOwner = sys.Owner{User: "deployer", Group: "deploy"}
 type ComposeAPI interface {
 	Config(ctx context.Context) error
 	Pull(ctx context.Context, services ...string) error
-	UpData(ctx context.Context, services []string) error
+	UpData(ctx context.Context, services []string, waitTimeout time.Duration) error
 	RunHook(ctx context.Context, service, script string) (sys.Result, error)
 	ExecScript(ctx context.Context, service, script string) (sys.Result, error)
 	Up(ctx context.Context) error
@@ -89,6 +89,10 @@ type Deployer struct {
 	Catalog    kinds.Catalog
 	Clock      func() time.Time
 	Health     func(ctx context.Context, inst, override string) error
+	// Run executes the docker network commands; Wire sets it.
+	Run sys.Runner
+	// Contracts pulls the contract artifact of OCI-sourced instances.
+	Contracts ContractFetcher
 	// Allowed lists permitted image registries. Nil disables the post-checkout
 	// image check; Wire sets it (non-nil) from the host configuration.
 	Allowed []string
@@ -98,6 +102,48 @@ type Deployer struct {
 	RenderOverride func(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o render.Options) ([]byte, error)
 	RenderTraefik  func(p *contract.Project, d *instance.Decisions, o render.Options) ([]byte, error)
 	ProbeS3        func(ctx context.Context, c objstore.Config, b []objstore.BucketCheck) error
+}
+
+// traefikContainer is the host proxy container; it joins each instance's edge
+// network after the instance is up.
+const traefikContainer = "cvctl-traefik"
+
+// ensureNetworks creates the external networks the generated override refers
+// to. The backup network exists only when a local service is backed up, the
+// same condition the override uses to declare it.
+func (d *Deployer) ensureNetworks(ctx context.Context, inst string, p *contract.Project, dec *instance.Decisions) error {
+	if d.Run == nil {
+		return errNoRunner()
+	}
+	if err := sys.EnsureNetwork(ctx, d.Run, render.NetworkEdge(inst), false); err != nil {
+		return err
+	}
+	if d.Backup == nil {
+		return nil
+	}
+	for _, ds := range p.Data {
+		if dec.Services[ds.Name].Mode == "local" && (ds.Backup == "wal-g" || ds.Backup == "volume") {
+			// Internal only with the host silo: external storage (R2, S3) is
+			// reached over the internet, so the network needs egress.
+			return sys.EnsureNetwork(ctx, d.Run, render.NetworkBackup(inst), d.Backup.Local)
+		}
+	}
+	return nil
+}
+
+func errNoRunner() error {
+	return &output.Error{
+		Code:    "E_DEPLOY_MISCONFIGURED",
+		Message: "deployer misconfigured: no command runner",
+		Hint:    "deployer has no command runner",
+	}
+}
+
+func (d *Deployer) connectTraefik(ctx context.Context, inst string) error {
+	if d.Run == nil {
+		return errNoRunner()
+	}
+	return sys.ConnectNetwork(ctx, d.Run, render.NetworkEdge(inst), traefikContainer)
 }
 
 func (d *Deployer) deployRoot() string {
@@ -290,6 +336,16 @@ func (d *Deployer) cvctlSecrets(path string) map[string]string {
 	}
 	out := map[string]string{}
 	for k, v := range m {
+		if strings.HasPrefix(k, "CVCTL_BACKUP_") {
+			switch k {
+			case "CVCTL_BACKUP_EXT_BUCKET", "CVCTL_BACKUP_EXT_ENDPOINT", "CVCTL_BACKUP_EXT_REGION":
+			default:
+				if len(v) >= 8 {
+					out[k] = v
+				}
+			}
+			continue
+		}
 		if !strings.HasPrefix(k, "CVCTL_SVC_") {
 			continue
 		}
@@ -315,7 +371,76 @@ func lastLines(text string, n int) string {
 	return strings.Join(lines[len(lines)-n:], "\n")
 }
 
+type rollbackKey struct{}
+
+// rollbackInfo carries what a rollback needs from DeployLocked to interrupted.
+type rollbackInfo struct {
+	env    map[string]string
+	absent bool
+	cap    time.Duration
+}
+
+// rollbackCap bounds a rollback run after the deploy context is gone: the
+// health timeout plus 2 minutes, at least 5 minutes.
+func rollbackCap(p *contract.Project) time.Duration {
+	h := p.X.Health.Timeout
+	if h <= 0 {
+		h = 30 * time.Second
+	}
+	return max(h+2*time.Minute, 5*time.Minute)
+}
+
+// waitTimeout is the --wait-timeout of up --wait: health timeout plus 2 minutes.
+func waitTimeout(p *contract.Project) time.Duration {
+	h := p.X.Health.Timeout
+	if h <= 0 {
+		h = 30 * time.Second
+	}
+	return h + 2*time.Minute
+}
+
+// interrupted returns an instance whose deploy was cancelled (shutdown) to its
+// last stable status and records "interrupted". It is not a failure: nothing is
+// notified and the same desired state is retried. After promotion the previous
+// release is restored first, on a context that outlives the cancellation.
+func (d *Deployer) interrupted(ctx context.Context, inst string, st *state.State, want state.Desired, deployID, actor string, now time.Time) (Result, error) {
+	if st.Promoted && hasInfra(st.Current) {
+		rb, _ := ctx.Value(rollbackKey{}).(*rollbackInfo)
+		if rb == nil {
+			rb = &rollbackInfo{cap: 5 * time.Minute}
+		}
+		rbCtx, cancel := withStepTimeout(context.WithoutCancel(ctx), rb.cap, "rollback")
+		defer cancel()
+		target := *st.Current
+		if err := d.swapOrRestore(rbCtx, inst, &target, st.Current, rb.env, rb.absent); err != nil {
+			detail := stepErrText(rbCtx, err)
+			st.Status = state.StatusFailed
+			st.Promoted = false
+			st.RollbackFailed = true
+			st.FailedHash = ""
+			st.UpdatedAt = now
+			var errs []error
+			if serr := d.Store.Save(st); serr != nil {
+				errs = append(errs, serr)
+			}
+			if aerr := d.Store.Append(inst, state.Event{
+				ID: deployID, At: now, Kind: "rollback", From: st.Current, To: &want,
+				Result: "rollback_failed", Detail: "shutdown after promotion; rollback failed: " + detail, Actor: actor,
+			}); aerr != nil {
+				errs = append(errs, aerr)
+			}
+			return Result{Status: state.StatusFailed, ID: deployID, Detail: "rollback failed: " + detail}, errors.Join(errs...)
+		}
+		st.Promoted = false
+	}
+	err := d.Store.Interrupt(st, &want, deployID, actor, "deploy interrupted by shutdown; will retry", now)
+	return Result{Status: st.Status, ID: deployID, Detail: "deploy interrupted"}, err
+}
+
 func (d *Deployer) failPermanent(ctx context.Context, inst string, st *state.State, want state.Desired, deployID, actor string, now time.Time, errText string, envVals map[string]string) (Result, error) {
+	if cancelled(ctx) && st.Status == state.StatusDeploying {
+		return d.interrupted(ctx, inst, st, want, deployID, actor, now)
+	}
 	redacted := redact(errText, envVals)
 	st.Status = state.StatusFailed
 	st.FailedHash = want.Hash()
@@ -351,6 +476,9 @@ func (d *Deployer) failPermanent(ctx context.Context, inst string, st *state.Sta
 }
 
 func (d *Deployer) failTransient(ctx context.Context, inst string, st *state.State, want state.Desired, deployID, actor string, now time.Time, errText string, envVals map[string]string) (Result, error) {
+	if cancelled(ctx) && st.Status == state.StatusDeploying {
+		return d.interrupted(ctx, inst, st, want, deployID, actor, now)
+	}
 	redacted := redact(errText, envVals)
 	detail := strings.TrimRight(redacted, ".")
 	if !strings.HasSuffix(detail, "will retry next cycle") {
@@ -398,10 +526,10 @@ func (d *Deployer) handlePromoteFailure(ctx context.Context, inst string, st *st
 	d.cleanupStaging(stagingDir, stagingOverride, stagingAppEnv, stagingRoute)
 	restoreMsg := ""
 	if st.Current != nil {
-		if rErr := d.executeSwap(ctx, inst, st.Current, existingEnv, appEnvAbsent); rErr != nil {
-			restoreMsg = fmt.Sprintf("; restore to %s failed: %v", commitShort(st.Current.InfraCommit), rErr)
+		if rErr := d.swapOrRestore(ctx, inst, st.Current, st.Current, existingEnv, appEnvAbsent); rErr != nil {
+			restoreMsg = fmt.Sprintf("; restore to %s failed: %v", RevShort(*st.Current), rErr)
 		} else {
-			restoreMsg = fmt.Sprintf("; restored to %s", commitShort(st.Current.InfraCommit))
+			restoreMsg = fmt.Sprintf("; restored to %s", RevShort(*st.Current))
 		}
 	}
 	return d.failPermanent(ctx, inst, st, want, deployID, actor, now, failedMsg+restoreMsg, resEnvVals)
@@ -441,6 +569,10 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	if d.Compose == nil || d.Health == nil {
 		return Result{}, misconfiguredErr()
 	}
+	ctx, cancelDeploy := withStepTimeout(ctx, d.Host.TimeoutDeploy(), "deploy")
+	defer cancelDeploy()
+	rb := &rollbackInfo{}
+	ctx = context.WithValue(ctx, rollbackKey{}, rb)
 
 	// Step 1: load state (the instance lock is held by the caller)
 	st, err := d.Store.Load(inst)
@@ -525,36 +657,41 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		}
 	}
 
-	// Step 2: Checkout want.InfraCommit, load contract, spec, decisions, Validate + Check
+	// Step 2: Checkout want (commit or contract digest), load contract, spec, decisions, Validate + Check
 	promoted := false
 	defer func() {
-		if !promoted && st.Current != nil && st.Current.InfraCommit != "" {
-			if r := d.repo(inst); r != nil {
-				if rErr := r.Checkout(ctx, st.Current.InfraCommit); rErr != nil {
-					errMsg := fmt.Sprintf("restore checkout failed: %v", rErr)
-					if res.Detail != "" {
-						res.Detail += "; " + errMsg
-					} else {
-						res.Detail = errMsg
-					}
+		if !promoted && hasInfra(st.Current) {
+			// The restore must also run after a cancel or timeout of ctx.
+			rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+			defer rcancel()
+			if rErr := d.checkout(rctx, inst, *st.Current); rErr != nil {
+				errMsg := fmt.Sprintf("restore checkout failed: %v", rErr)
+				if res.Detail != "" {
+					res.Detail += "; " + errMsg
+				} else {
+					res.Detail = errMsg
 				}
 			}
 		}
 	}()
 
-	if r := d.repo(inst); r != nil {
-		if err := r.Checkout(ctx, want.InfraCommit); err != nil {
-			return Result{}, err
-		}
-	}
-
 	instDir := filepath.Join(d.deployRoot(), inst)
 	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
 
 	cvSecrets := d.cvctlSecrets(cvctlEnvPath)
+	if err := d.checkout(ctx, inst, want); err != nil {
+		var ice *invalidContractError
+		if errors.As(err, &ice) {
+			return d.failPermanent(ctx, inst, st, want, deployID, actor, now, ice.Error(), cvSecrets)
+		}
+		return Result{}, err
+	}
 	d0, err := instance.Read(cvctlEnvPath, &contract.Project{})
 	if err != nil {
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("cannot read %s: %v", cvctlEnvPath, err), cvSecrets)
+	}
+	if err := instance.CheckDir(d0, cvctlEnvPath); err != nil {
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), cvSecrets)
 	}
 	infraPath := d0.InfraPath
 	if infraPath == "" {
@@ -569,12 +706,15 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 
 	p, err := contract.Load(infraDir, cat)
 	if err != nil {
-		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), cvSecrets)
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, instance.WrapLoadErr(err).Error(), cvSecrets)
 	}
 
 	dec, err := instance.Read(cvctlEnvPath, p)
 	if err != nil {
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("cannot read %s: %v", cvctlEnvPath, err), cvSecrets)
+	}
+	if err := instance.CheckDir(dec, cvctlEnvPath); err != nil {
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), cvSecrets)
 	}
 	if dec.InfraPath == "" {
 		dec.InfraPath = "."
@@ -679,6 +819,9 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 
 	st.Blocked = nil
+	if st.Status != state.StatusDeploying {
+		st.PriorStatus = st.Status
+	}
 	st.Status = state.StatusDeploying
 	st.UpdatedAt = now
 	if err := d.Store.Save(st); err != nil {
@@ -694,6 +837,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	finalRoutePath := filepath.Join(d.traefikDir(), inst+".yml")
 
 	secrets := withSecrets(withSecrets(resEnv.Values, cvSecrets), d.backupSecrets())
+	backupTarget := render.BackupTargetFor(d.Backup, dec)
 	appEnvBytes := instance.FormatEnv(resEnv.Values)
 	stagingOverrideBytes, err := d.renderOverride(p, dec, cat, render.Options{
 		InstanceDir: instDir,
@@ -701,7 +845,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		AppEnvPath:  stagingAppEnvPath,
 
 		BackupEnvDir: stagingDir,
-		Backup:       d.Backup,
+		Backup:       backupTarget,
 	})
 	if err != nil {
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("render staging override failed: %v", err), secrets)
@@ -710,7 +854,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		InstanceDir: instDir,
 		Edge:        d.edge(),
 		AppEnvPath:  finalAppEnvPath,
-		Backup:      d.Backup,
+		Backup:      backupTarget,
 	})
 	if err != nil {
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("render final override failed: %v", err), secrets)
@@ -736,7 +880,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 		return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("write staging override failed: %v", err), secrets)
 	}
-	backupEnvs := render.BackupEnvs(p, dec, cat, render.Options{Backup: d.Backup})
+	backupEnvs := render.BackupEnvs(p, dec, cat, render.Options{Backup: backupTarget})
 	for svc, env := range backupEnvs {
 		path := render.BackupEnvPath(stagingDir, svc)
 		if err := fsys.WriteFile(path, instance.FormatEnv(env), 0o640, deployOwner); err != nil {
@@ -790,13 +934,32 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		}
 	}
 
-	if err := stagingCompose.Pull(ctx, appServices...); err != nil {
+	if cancelled(ctx) {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
+		return d.interrupted(ctx, inst, st, want, deployID, actor, now)
 	}
-	if err := stagingCompose.UpData(ctx, localDataServices); err != nil {
+	pullCtx, pullCancel := withStepTimeout(ctx, d.Host.TimeoutPull(), "pull")
+	pullErr := stagingCompose.Pull(pullCtx, appServices...)
+	pullText := ""
+	if pullErr != nil {
+		pullText = stepErrText(pullCtx, pullErr)
+	}
+	pullCancel()
+	if pullErr != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, pullText, secrets)
+	}
+	if err := d.ensureNetworks(ctx, inst, p, dec); err != nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, stepErrText(ctx, err), secrets)
+	}
+	if err := d.provisionBackupUser(ctx, inst, p, dec, backupTarget); err != nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, stepErrText(ctx, err), secrets)
+	}
+	if err := stagingCompose.UpData(ctx, localDataServices, waitTimeout(p)); err != nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, stepErrText(ctx, err), secrets)
 	}
 
 	// Generated randoms are persisted before hooks run: a migration may already
@@ -818,22 +981,40 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		}
 	}
 
+	rb.env, rb.absent, rb.cap = rollbackEnv, rollbackEnvAbsent, rollbackCap(p)
+
 	// Step 6b: buckets and the scoped app user of local bucket services. It runs
 	// before the hooks because a migration may already write objects.
 	if err := d.provisionBuckets(ctx, stagingCompose, inst, p, dec, cat, secrets); err != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, stepErrText(ctx, err), secrets)
 	}
 	if err := d.probeExternalBuckets(ctx, inst, p, dec, cat, secrets); err != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
-		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, stepErrText(ctx, err), secrets)
 	}
 
 	// Step 7: Pre-deploy hooks
 	preHooksRan := false
 	for _, hook := range p.X.Hooks.PreDeploy {
+		if cancelled(ctx) {
+			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+			return d.interrupted(ctx, inst, st, want, deployID, actor, now)
+		}
 		preHooksRan = true
-		resHook, err := stagingCompose.RunHook(ctx, hook.Service, hook.Run)
+		hookCtx, hookCancel := withStepTimeout(ctx, d.hookTimeout(hook), "pre-deploy hook "+hook.Service)
+		resHook, err := stagingCompose.RunHook(hookCtx, hook.Service, hook.Run)
+		timeoutErr := TimeoutError(hookCtx)
+		hookCancel()
+		if timeoutErr != nil {
+			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+			if TimeoutError(ctx) != nil {
+				return d.failTransient(ctx, inst, st, want, deployID, actor, now, timeoutErr.Error(), secrets)
+			}
+			// The hook's own timeout is permanent for this desired state:
+			// retrying it would spend the agent's time on every tick.
+			return d.failPermanent(ctx, inst, st, want, deployID, actor, now, timeoutErr.Error(), secrets)
+		}
 		if err != nil || resHook.ExitCode != 0 {
 			d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 
@@ -847,6 +1028,19 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			redactedOut := lastLines(redact(rawOutput, secrets), 20)
 			return d.failPermanent(ctx, inst, st, want, deployID, actor, now, redactedOut, secrets)
 		}
+	}
+
+	if cancelled(ctx) {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.interrupted(ctx, inst, st, want, deployID, actor, now)
+	}
+
+	// From here files and containers may no longer match Current: a crash or
+	// shutdown must roll back (or, after a crash, force a redeploy).
+	st.Promoted = true
+	if err := d.Store.Save(st); err != nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("record promotion failed: %v", err), secrets)
 	}
 
 	// Step 8: Promote staging -> final (order: app.env -> backup envs -> route -> override)
@@ -877,6 +1071,12 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, "deployer misconfigured: Compose returned nil", secrets)
 	}
 	upErr := finalCompose.Up(ctx)
+	if upErr == nil {
+		// Traefik being unreachable says nothing about the new release: retry, do not roll back.
+		if err := d.connectTraefik(ctx, inst); err != nil {
+			return d.failTransient(ctx, inst, st, want, deployID, actor, now, stepErrText(ctx, err), secrets)
+		}
+	}
 
 	// Step 9: HealthCheck
 	var healthErr error
@@ -887,7 +1087,12 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	if upErr == nil && healthErr == nil {
 		// Post-deploy hooks
 		for _, hook := range p.X.Hooks.PostDeploy {
-			hRes, hErr := finalCompose.RunHook(ctx, hook.Service, hook.Run)
+			hookCtx, hookCancel := withStepTimeout(ctx, d.hookTimeout(hook), "post-deploy hook "+hook.Service)
+			hRes, hErr := finalCompose.RunHook(hookCtx, hook.Service, hook.Run)
+			if te := TimeoutError(hookCtx); te != nil {
+				hErr = te
+			}
+			hookCancel()
 			if hErr != nil || hRes.ExitCode != 0 {
 				rawHook := string(hRes.Stderr)
 				if strings.TrimSpace(rawHook) == "" {
@@ -906,12 +1111,12 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			}
 		}
 
-		okDetail := fmt.Sprintf("commit %s deployed", commitShort(want.InfraCommit))
+		okDetail := fmt.Sprintf("%s %s deployed", revWord(want), RevShort(want))
 		_ = d.notifier().Send(ctx, notify.Message{
 			Host:  d.hostName(),
 			Level: "info",
 			Title: fmt.Sprintf("%s deploy OK", inst),
-			Text:  fmt.Sprintf("commit %s deployed successfully", commitShort(want.InfraCommit)),
+			Text:  fmt.Sprintf("%s %s deployed successfully", revWord(want), RevShort(want)),
 		})
 
 		st.Previous = st.Current
@@ -926,6 +1131,8 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		var okErrs []error
 		if err := d.Store.Save(st); err != nil {
 			okErrs = append(okErrs, err)
+		} else {
+			d.pruneContracts(inst, st)
 		}
 		if err := d.Store.Append(inst, state.Event{
 			ID:     deployID,
@@ -948,9 +1155,21 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 
 	// Step 10: Rollback to st.Current
+	if cancelled(ctx) {
+		return d.interrupted(ctx, inst, st, want, deployID, actor, now)
+	}
+	// After a deploy timeout ctx is dead, but the rollback still has to run.
+	rbCtx := ctx
+	timeoutPrefix := ""
+	if te := TimeoutError(ctx); te != nil {
+		timeoutPrefix = te.Error() + "\n"
+		var rbCancel context.CancelFunc
+		rbCtx, rbCancel = withStepTimeout(context.WithoutCancel(ctx), rb.cap, "rollback")
+		defer rbCancel()
+	}
 	var logs string
 	if finalCompose != nil {
-		logs, _ = finalCompose.Logs(ctx, "", 20)
+		logs, _ = finalCompose.Logs(rbCtx, "", 20)
 	}
 	if strings.TrimSpace(logs) == "" {
 		if upErr != nil {
@@ -959,11 +1178,15 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			logs = healthErr.Error()
 		}
 	}
-	redactedLogs := lastLines(redact(logs, secrets), 20)
+	redactedLogs := lastLines(redact(timeoutPrefix+logs, secrets), 20)
 
-	if st.Current == nil || st.Current.InfraCommit == "" {
+	if !hasInfra(st.Current) {
 		st.Status = state.StatusFailed
 		st.FailedHash = want.Hash()
+		if timeoutPrefix != "" {
+			// A timeout is transient: retry instead of waiting for a new desired state.
+			st.FailedHash = ""
+		}
 		st.RollbackFailed = false
 		st.UpdatedAt = now
 		if err := d.Store.Save(st); err != nil {
@@ -997,10 +1220,13 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 
 	rollbackTarget := *st.Current
-	rollbackErr := d.executeSwap(ctx, inst, &rollbackTarget, rollbackEnv, false)
+	rollbackErr := d.swapOrRestore(rbCtx, inst, &rollbackTarget, st.Current, rollbackEnv, false)
 
 	st.Status = state.StatusFailed
 	st.FailedHash = want.Hash()
+	if timeoutPrefix != "" {
+		st.FailedHash = ""
+	}
 	st.UpdatedAt = now
 
 	if rollbackErr != nil {
@@ -1090,6 +1316,16 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 
 	return res, errors.Join(errs...)
+}
+
+// provisionBackupUser creates the instance's silo user and attaches the silo
+// to the instance's backup network, when the instance backs up a local
+// service: the same condition under which ensureNetworks creates that network.
+func (d *Deployer) provisionBackupUser(ctx context.Context, inst string, p *contract.Project, dec *instance.Decisions, t *render.BackupTarget) error {
+	if t == nil || len(backup.Targets(p, dec)) == 0 {
+		return nil
+	}
+	return backup.ProvisionUser(ctx, d.Run, t, inst)
 }
 
 // backupSecrets lists the backup credential values so error text redacts them.
@@ -1233,4 +1469,17 @@ func (d *Deployer) probeExternalBuckets(ctx context.Context, inst string, p *con
 		}
 	}
 	return nil
+}
+
+// hookTimeout is the hook's own timeout clamped to the host's
+// CVCTL_TIMEOUT_HOOK: a contract cannot buy more agent time than the host
+// allows.
+func (d *Deployer) hookTimeout(h contract.Hook) time.Duration {
+	host := d.Host.TimeoutHook()
+	if h.Timeout != "" {
+		if t, err := time.ParseDuration(h.Timeout); err == nil && t > 0 && t < host {
+			return t
+		}
+	}
+	return host
 }

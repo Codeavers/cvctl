@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/netip"
 	"os"
 	"path"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 
@@ -50,6 +52,8 @@ type Config struct {
 	TelegramThread     string
 	Registries         string
 	RegistryUser       string
+	RegistryHost       string
+	EdgeSubnet         string
 	vals               map[string]string
 	extra              map[string]string // host.env entries cvctl does not know; kept verbatim on Save
 }
@@ -65,6 +69,13 @@ func oneOf(vals ...string) func(string) error {
 		}
 		return fmt.Errorf("must be one of: %s", strings.Join(vals, ", "))
 	}
+}
+
+func validRegistryHost(v string) error {
+	if strings.ContainsAny(v, "/ \t\r\n") || strings.Contains(v, "://") {
+		return errors.New("must be a host or host:port without a scheme, path or spaces")
+	}
+	return nil
 }
 
 func validBool(v string) error { return oneOf("true", "false")(v) }
@@ -95,12 +106,113 @@ var validators = map[string]func(string) error{
 	"ACME_CHALLENGE":  oneOf("http", "route53", "cloudflare"),
 	"STORAGE":         oneOf("local", "s3"),
 	"NOTIFY":          oneOf("telegram", "none"),
+	"EDGE_SUBNET":     validEdgeSubnet,
+	"REGISTRY_HOST":   validRegistryHost,
+
+	"TIMEOUT_FETCH":  validTimeout,
+	"TIMEOUT_PULL":   validTimeout,
+	"TIMEOUT_HOOK":   validTimeout,
+	"TIMEOUT_DEPLOY": validTimeout,
+}
+
+// Default step timeouts, used when the CVCTL_TIMEOUT_* key is unset.
+const (
+	DefaultTimeoutFetch  = 2 * time.Minute
+	DefaultTimeoutPull   = 10 * time.Minute
+	DefaultTimeoutHook   = 15 * time.Minute
+	DefaultTimeoutDeploy = 45 * time.Minute
+)
+
+func validTimeout(v string) error {
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return errors.New("must be a positive Go duration such as 10m")
+	}
+	return nil
+}
+
+func (c *Config) timeout(key string, def time.Duration) time.Duration {
+	if c == nil {
+		return def
+	}
+	if d, err := time.ParseDuration(c.Get(key)); err == nil && d > 0 {
+		return d
+	}
+	return def
+}
+
+// TimeoutFetch bounds resolving digests and downloading the contract per instance.
+func (c *Config) TimeoutFetch() time.Duration {
+	return c.timeout("TIMEOUT_FETCH", DefaultTimeoutFetch)
+}
+
+// TimeoutPull bounds docker compose pull.
+func (c *Config) TimeoutPull() time.Duration { return c.timeout("TIMEOUT_PULL", DefaultTimeoutPull) }
+
+// TimeoutHook bounds each hook unless the contract sets its own.
+func (c *Config) TimeoutHook() time.Duration { return c.timeout("TIMEOUT_HOOK", DefaultTimeoutHook) }
+
+// TimeoutDeploy bounds one full instance deploy.
+func (c *Config) TimeoutDeploy() time.Duration {
+	return c.timeout("TIMEOUT_DEPLOY", DefaultTimeoutDeploy)
+}
+
+// DefaultEdgeSubnet is the proxy network subnet when CVCTL_EDGE_SUBNET is unset.
+const DefaultEdgeSubnet = "10.203.0.0/24"
+
+func validEdgeSubnet(v string) error {
+	p, err := netip.ParsePrefix(v)
+	if err != nil || !p.Addr().Is4() || !p.Addr().IsPrivate() {
+		return errors.New("must be a private IPv4 CIDR such as 10.203.0.0/24")
+	}
+	if p.Bits() < 16 || p.Bits() > 29 {
+		return errors.New("prefix length must be between /16 and /29")
+	}
+	if p != p.Masked() {
+		return fmt.Errorf("must be in canonical form (%s)", p.Masked())
+	}
+	return nil
+}
+
+// TokenHost is the only registry host that receives the registry token:
+// CVCTL_REGISTRY_HOST, else the host of the first CVCTL_REGISTRIES entry.
+func (c *Config) TokenHost() string {
+	if c == nil {
+		return ""
+	}
+	if c.RegistryHost != "" {
+		return c.RegistryHost
+	}
+	for _, r := range strings.Split(c.Registries, ",") {
+		if h := strings.TrimSpace(strings.SplitN(strings.TrimSpace(r), "/", 2)[0]); h != "" {
+			return h
+		}
+	}
+	return ""
+}
+
+// EdgeSubnetOrDefault returns the configured proxy subnet or the default.
+func (c *Config) EdgeSubnetOrDefault() string {
+	if c != nil && c.EdgeSubnet != "" {
+		return c.EdgeSubnet
+	}
+	return DefaultEdgeSubnet
+}
+
+// EdgeGateway is the first host address of the proxy subnet.
+func (c *Config) EdgeGateway() string {
+	p, err := netip.ParsePrefix(c.EdgeSubnetOrDefault())
+	if err != nil {
+		p = netip.MustParsePrefix(DefaultEdgeSubnet)
+	}
+	return p.Masked().Addr().Next().String()
 }
 
 var knownKeys = []string{
 	"HOST_NAME", "EDGE_MODE", "PROXY_PORT", "ADMIN_USER", "SSH_MANAGE", "FIREWALL_MANAGE",
 	"ACME_EMAIL", "ACME_CHALLENGE", "STORAGE", "S3_ENDPOINT", "S3_BUCKET", "S3_REGION", "S3_ENDPOINT_INTERNAL",
-	"NOTIFY", "TELEGRAM_CHAT_ID", "TELEGRAM_THREAD_ID", "REGISTRIES", "REGISTRY_USER",
+	"NOTIFY", "TELEGRAM_CHAT_ID", "TELEGRAM_THREAD_ID", "REGISTRIES", "REGISTRY_USER", "REGISTRY_HOST",
+	"EDGE_SUBNET", "TIMEOUT_FETCH", "TIMEOUT_PULL", "TIMEOUT_HOOK", "TIMEOUT_DEPLOY",
 }
 
 func invalid(key string, err error) error {
@@ -194,6 +306,10 @@ func (c *Config) sync(key, val string) {
 		c.Registries = val
 	case "REGISTRY_USER":
 		c.RegistryUser = val
+	case "REGISTRY_HOST":
+		c.RegistryHost = val
+	case "EDGE_SUBNET":
+		c.EdgeSubnet = val
 	}
 }
 

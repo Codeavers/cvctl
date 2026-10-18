@@ -105,3 +105,22 @@ func TestAgentReportJSONStructure(t *testing.T) {
 		t.Fatalf("unexpected JSON: %s", string(data))
 	}
 }
+
+func TestAgentRegistryLoginOnlyTokenHost(t *testing.T) {
+	run := &systest.Runner{}
+	run.On("docker login ghcr.io -u deployuser --password-stdin", sys.Result{ExitCode: 0})
+
+	hcfg := &hostcfg.Config{
+		Registries:   "ghcr.io/codeavers,registry.example.com/team",
+		RegistryUser: "deployuser",
+	}
+	sec := hostcfg.NewSecrets()
+	sec.Set("registry_token", "ghp_secrettoken")
+
+	var out bytes.Buffer
+	runAgentRegistryLogin(context.Background(), run, hcfg, sec, notify.NoopNotifier{}, &out)
+
+	if len(run.Calls) != 1 || run.Calls[0].String() != "docker login ghcr.io -u deployuser --password-stdin" {
+		t.Fatalf("expected a single login to the token host, got %v", run.Calls)
+	}
+}

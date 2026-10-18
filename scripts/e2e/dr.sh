@@ -64,27 +64,20 @@ objs_under() {
   mcx ls --recursive "ext/${BUCKET}/${HOST_NAME}/${INST}/db/$1" 2>/dev/null | wc -l
 }
 
-echo "=== 1. Build and push app image, create infra repo ==="
+echo "=== 1. Build and push app image, publish the contract ==="
 docker build -t localhost:5000/e2e/api:develop examples/e2e/app
 docker push localhost:5000/e2e/api:develop
-rm -rf /tmp/infra-work /tmp/infra.git
-mkdir -p /tmp/infra-work
-git -C /tmp/infra-work init -b develop
+INFRA_REF=localhost:5000/e2e/infra
+rm -rf /tmp/infra-work && mkdir -p /tmp/infra-work
 cp examples/e2e/compose.yml examples/e2e/env.spec.yml /tmp/infra-work/
-git -C /tmp/infra-work config user.name "cvctl-test"
-git -C /tmp/infra-work config user.email "test@example.com"
-git -C /tmp/infra-work add compose.yml env.spec.yml
-git -C /tmp/infra-work commit -m "initial infra"
-git clone --bare /tmp/infra-work /tmp/infra.git
-chmod -R a+rX /tmp/infra.git
-(cd /tmp && sudo -u deployer env HOME=/srv/deploy git config --global --add safe.directory /tmp/infra.git)
+cvctl publish /tmp/infra-work "$INFRA_REF:develop" --json | jq -e '.ok == true'
 
 echo "=== 2. project add, rows A and B, backup now, row C ==="
 # media runs external against ext-s3: pub is public (anonymous download), priv is private, and
 # pub2 is public by name only (no anonymous policy) to make the public-URL probe fail later.
 mcx mb --ignore-existing ext/cvctl-e2e-pub ext/cvctl-e2e-priv ext/cvctl-e2e-pub2 >/dev/null
 mcx anonymous set download ext/cvctl-e2e-pub >/dev/null
-add_res=$(cvctl project add file:///tmp/infra.git --name demo --env dev --non-interactive --set GREETING=hello --domain api=api.e2e.local \
+add_res=$(cvctl project add "oci://$INFRA_REF" --name demo --env dev --non-interactive --set GREETING=hello --domain api=api.e2e.local \
   --ext "media.endpoint=http://${S3_IP}:9000" --ext "media.access_key=${S3_ACCESS}" --ext "media.secret_key=${S3_SECRET}" \
   --ext media.region=us-east-1 --ext media.bucket_pub=cvctl-e2e-pub --ext media.bucket_priv=cvctl-e2e-priv \
   --ext "media.public_url_pub=http://${S3_IP}:9000/cvctl-e2e-pub" --json)
@@ -179,10 +172,19 @@ echo "$list" | jq -e '.data.snapshots | length >= 1'
 test "$(objs_under "g2/")" -gt 0
 echo "Assert 7: base backup under g2"
 test "$(cvctl status --json | jq -r --arg i "$INST" '.data.instances[] | select(.instance==$i) | .status')" = "OK"
-greeting=$(curl -sk --resolve api.e2e.local:443:127.0.0.1 https://api.e2e.local/health)
+greeting=$(curl -s -H 'Host: api.e2e.local' http://127.0.0.1:8081/health)
 echo "Health response: $greeting"
 test "$greeting" = "ok hello"
 echo "Assert 8: app healthy after restore"
+
+echo "=== 8b. Behind the proxy, Traefik trusts X-Forwarded-For only from the published port ==="
+via=$(curl -s -H 'Host: api.e2e.local' -H 'X-Forwarded-For: 203.0.113.7' http://127.0.0.1:8081/echo-xff)
+echo "XFF via the published port: $via"
+case "$via" in 203.0.113.7*) ;; *) echo "the front proxy's X-Forwarded-For was not kept"; false ;; esac
+inner=$(docker run --rm --network "${INST}_edge" curlimages/curl:8.10.1 -s -H 'Host: api.e2e.local' -H 'X-Forwarded-For: 203.0.113.7' http://cvctl-traefik/echo-xff)
+echo "XFF via a container on ${INST}_edge: $inner"
+case "$inner" in 203.0.113.7*) echo "Traefik trusted a container's X-Forwarded-For"; false ;; esac
+echo "Assert 8b: client IP kept through the proxy port; spoofed header from a container ignored"
 
 echo "=== 9. External buckets: probe passed, status warns, a broken public URL fails the deploy ==="
 cvctl status --json | jq -e '[.data.warnings[]? | select(contains("media is external"))] | length == 1'

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/instance"
@@ -14,12 +15,26 @@ import (
 	"github.com/codeavers/cvctl/internal/state"
 )
 
+// swapOrRestore runs executeSwap and, when it fails, checks out current again
+// so infra/ never stays at a revision that was not installed, as DeployLocked
+// does before promotion.
+func (d *Deployer) swapOrRestore(ctx context.Context, inst string, target, current *state.Desired, appEnv map[string]string, appEnvAbsent bool) error {
+	err := d.executeSwap(ctx, inst, target, appEnv, appEnvAbsent)
+	if err == nil || !hasInfra(current) {
+		return err
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	defer cancel()
+	if rErr := d.checkout(rctx, inst, *current); rErr != nil {
+		return fmt.Errorf("%w; restore checkout failed: %v", err, rErr)
+	}
+	return err
+}
+
 // executeSwap performs checkout, render, promotion, Up, and health check for target state.
 func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.Desired, appEnv map[string]string, appEnvAbsent bool) error {
-	if r := d.repo(inst); r != nil {
-		if err := r.Checkout(ctx, target.InfraCommit); err != nil {
-			return err
-		}
+	if err := d.checkout(ctx, inst, *target); err != nil {
+		return err
 	}
 
 	instDir := filepath.Join(d.deployRoot(), inst)
@@ -27,6 +42,9 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 
 	d0, err := instance.Read(cvctlEnvPath, &contract.Project{})
 	if err != nil {
+		return err
+	}
+	if err := instance.CheckDir(d0, cvctlEnvPath); err != nil {
 		return err
 	}
 	infraPath := d0.InfraPath
@@ -42,11 +60,14 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 
 	p, err := contract.Load(infraDir, cat)
 	if err != nil {
-		return err
+		return instance.WrapLoadErr(err)
 	}
 
 	dec, err := instance.Read(cvctlEnvPath, p)
 	if err != nil {
+		return err
+	}
+	if err := instance.CheckDir(dec, cvctlEnvPath); err != nil {
 		return err
 	}
 	if dec.InfraPath == "" {
@@ -58,15 +79,19 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 	for k, v := range target.Digests {
 		dec.Digests[k] = v
 	}
+	if err := instance.Verify(infraDir, p, dec, cat, true); err != nil {
+		return err
+	}
 
 	finalOverridePath := filepath.Join(instDir, "compose.cvctl.yml")
 	finalAppEnvPath := filepath.Join(instDir, "app.env")
 	finalRoutePath := filepath.Join(d.traefikDir(), inst+".yml")
+	backupTarget := render.BackupTargetFor(d.Backup, dec)
 	renderOpts := render.Options{
 		InstanceDir: instDir,
 		Edge:        d.edge(),
 		AppEnvPath:  finalAppEnvPath,
-		Backup:      d.Backup,
+		Backup:      backupTarget,
 	}
 
 	overrideBytes, err := d.renderOverride(p, dec, cat, renderOpts)
@@ -111,7 +136,16 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 			Hint:    "ensure Compose factory returns a valid ComposeAPI",
 		}
 	}
+	if err := d.ensureNetworks(ctx, inst, p, dec); err != nil {
+		return err
+	}
+	if err := d.provisionBackupUser(ctx, inst, p, dec, backupTarget); err != nil {
+		return err
+	}
 	if err := finalCompose.Up(ctx); err != nil {
+		return err
+	}
+	if err := d.connectTraefik(ctx, inst); err != nil {
 		return err
 	}
 	// The restored app.env may need buckets or policy grants that a later deploy
@@ -173,7 +207,7 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 		return Result{}, err
 	}
 
-	swapErr := d.executeSwap(ctx, inst, target, existingEnv, false)
+	swapErr := d.swapOrRestore(ctx, inst, target, st.Current, existingEnv, false)
 	if swapErr != nil {
 		st.Status = state.StatusFailed
 		st.RollbackFailed = true
@@ -228,6 +262,7 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 	if err := d.Store.Save(st); err != nil {
 		return Result{}, err
 	}
+	d.pruneContracts(inst, st)
 
 	if err := d.Store.Append(inst, state.Event{
 		ID:     deployID,

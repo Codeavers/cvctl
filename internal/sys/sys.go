@@ -66,4 +66,10 @@ type FS interface {
 	// Remove treats a missing path as success.
 	Remove(path string) error
 	ReadDir(path string) ([]os.DirEntry, error)
+	// Mkdir creates one directory and fails if path exists (a symlink is not followed).
+	Mkdir(path string, mode os.FileMode, o Owner) error
+	// Rename moves oldpath to newpath (a directory moves with its contents).
+	Rename(oldpath, newpath string) error
+	// RemoveAll deletes path and everything below it; a missing path is success.
+	RemoveAll(path string) error
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/hostcfg/hostcfgtest"
@@ -311,5 +312,71 @@ func TestNewConfigAndNewSecrets(t *testing.T) {
 	sec.Set("s3_access_key", "testkey")
 	if v, ok := sec.Get("s3_access_key"); !ok || v != "testkey" {
 		t.Fatalf("sec s3_access_key mismatch: got %q, ok=%v", v, ok)
+	}
+}
+
+func TestEdgeSubnetValidationAndGateway(t *testing.T) {
+	c := hostcfg.NewConfig()
+	if c.EdgeSubnetOrDefault() != "10.203.0.0/24" || c.EdgeGateway() != "10.203.0.1" {
+		t.Fatalf("defaults: %s %s", c.EdgeSubnetOrDefault(), c.EdgeGateway())
+	}
+	for _, bad := range []string{"nope", "10.0.0.1", "fd00::/64", "10.0.0.0/30", "8.8.8.0/24", "10.0.0.0/8", "172.30.4.9/22"} {
+		if err := c.Set("EDGE_SUBNET", bad); err == nil {
+			t.Fatalf("%q must be rejected", bad)
+		}
+	}
+	if err := c.Set("EDGE_SUBNET", "172.30.4.0/22"); err != nil {
+		t.Fatal(err)
+	}
+	if c.EdgeGateway() != "172.30.4.1" {
+		t.Fatalf("gateway = %s", c.EdgeGateway())
+	}
+}
+
+func TestTimeouts(t *testing.T) {
+	c := hostcfg.NewConfig()
+	if c.TimeoutFetch() != 2*time.Minute || c.TimeoutPull() != 10*time.Minute || c.TimeoutHook() != 15*time.Minute || c.TimeoutDeploy() != 45*time.Minute {
+		t.Fatal("defaults must be fetch 2m, pull 10m, hook 15m, deploy 45m")
+	}
+	var nilCfg *hostcfg.Config
+	if nilCfg.TimeoutDeploy() != 45*time.Minute {
+		t.Fatal("a nil config must give the defaults")
+	}
+	if err := c.Set("TIMEOUT_PULL", "90s"); err != nil || c.TimeoutPull() != 90*time.Second {
+		t.Fatalf("TIMEOUT_PULL not applied: %v", err)
+	}
+	for _, bad := range []string{"10", "abc", "0s", "-1m"} {
+		if err := c.Set("TIMEOUT_HOOK", bad); err == nil {
+			t.Errorf("TIMEOUT_HOOK=%q must be rejected", bad)
+		}
+	}
+}
+
+func TestTokenHost(t *testing.T) {
+	c := hostcfg.NewConfig()
+	if got := c.TokenHost(); got != "" {
+		t.Fatalf("empty config: %q", got)
+	}
+	_ = c.Set("REGISTRIES", " ghcr.io/codeavers , other.io/x")
+	if got := c.TokenHost(); got != "ghcr.io" {
+		t.Fatalf("default: %q", got)
+	}
+	if err := c.Set("REGISTRY_HOST", "other.io"); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.TokenHost(); got != "other.io" {
+		t.Fatalf("explicit: %q", got)
+	}
+}
+
+func TestRegistryHostValidation(t *testing.T) {
+	c := hostcfg.NewConfig()
+	for _, bad := range []string{"ghcr.io/x", "https://ghcr.io", "a b"} {
+		if err := c.Set("REGISTRY_HOST", bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	if err := c.Set("REGISTRY_HOST", "localhost:5000"); err != nil {
+		t.Fatal(err)
 	}
 }

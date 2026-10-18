@@ -25,6 +25,24 @@ func (osFS) Remove(path string) error {
 	return nil
 }
 
+func (osFS) Mkdir(path string, mode os.FileMode, o Owner) error {
+	uid, gid, err := resolveOwner(o)
+	if err != nil {
+		return err
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		return err
+	}
+	return chown(path, uid, gid)
+}
+
+func (osFS) Rename(oldpath, newpath string) error { return os.Rename(oldpath, newpath) }
+
+func (osFS) RemoveAll(path string) error { return os.RemoveAll(path) }
+
 func (osFS) ReadDir(path string) ([]os.DirEntry, error) {
 	return os.ReadDir(path)
 }

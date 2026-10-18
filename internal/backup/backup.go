@@ -31,7 +31,6 @@ const (
 	// pgData is the image default; the render step keeps PGDATA at the volume root.
 	pgData         = "/var/lib/postgresql/data"
 	resticImage    = "restic/restic:0.19.1"
-	backupNetwork  = "cvctl-backup"
 	dockerConfig   = "DOCKER_CONFIG=/var/lib/cvctl/docker"
 	walgRetain     = "7"
 	walgRetainDays = 7
@@ -75,6 +74,9 @@ func LoadInstance(deployRoot string, cat kinds.Catalog) Loader {
 		if err != nil {
 			return nil, nil, err
 		}
+		if err := instance.CheckDir(d0, envPath); err != nil {
+			return nil, nil, err
+		}
 		infra := d0.InfraPath
 		if infra == "" {
 			infra = "."
@@ -85,12 +87,19 @@ func LoadInstance(deployRoot string, cat kinds.Catalog) Loader {
 				return nil, nil, err
 			}
 		}
-		p, err := contract.Load(filepath.Join(deployRoot, inst, "infra", infra), c)
+		infraDir := filepath.Join(deployRoot, inst, "infra", infra)
+		p, err := contract.Load(infraDir, c)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, instance.WrapLoadErr(err)
 		}
 		d, err := instance.Read(envPath, p)
 		if err != nil {
+			return nil, nil, err
+		}
+		if err := instance.CheckDir(d, envPath); err != nil {
+			return nil, nil, err
+		}
+		if err := instance.Verify(infraDir, p, d, c, false); err != nil {
 			return nil, nil, err
 		}
 		return p, d, nil
@@ -112,6 +121,9 @@ type Snapshot struct {
 	Strategy string `json:"strategy"`
 	ID       string `json:"id"`
 	Time     string `json:"time"`
+	// Repo names an older restic repository (r<index>) the snapshot lives in;
+	// empty is the current one.
+	Repo string `json:"repo,omitempty"`
 }
 
 type Runner struct {
@@ -234,7 +246,7 @@ func (r *Runner) secrets() []string {
 		return nil
 	}
 	var out []string
-	for _, s := range []string{r.Host.AccessKey, r.Host.SecretKey, r.Host.LibsodiumKey, r.Host.ResticPassword} {
+	for _, s := range []string{r.Host.AccessKey, r.Host.SecretKey, r.Host.LibsodiumKey, r.Host.ResticPassword, r.Host.HostLibsodiumKey, r.Host.HostResticPassword} {
 		if len(s) >= 4 {
 			out = append(out, s)
 		}
@@ -278,21 +290,51 @@ func (r *Runner) exec(ctx context.Context, cmd sys.Cmd) (sys.Result, error) {
 	return res, nil
 }
 
-func (r *Runner) targets(inst, only string) ([]Target, error) {
+// forInstance returns a copy of r whose Host is inst's own backup target. On
+// the local silo it first attaches the silo to the instance's backup network
+// and makes sure the instance's backup user exists, so a backup or verify works
+// before the instance's first deploy with its own keys.
+func (r *Runner) forInstance(ctx context.Context, inst string, p *contract.Project, d *instance.Decisions) (*Runner, error) {
+	rr := *r
+	rr.Host = render.BackupTargetFor(r.Host, d)
+	if rr.Host == nil || !rr.Host.Local || len(Targets(p, d)) == 0 {
+		return &rr, nil
+	}
+	if _, err := rr.backupNet(ctx, inst); err != nil {
+		return nil, err
+	}
+	if userStep, err := provisionUser(ctx, rr.Run, rr.Host, inst); err != nil {
+		var oe *output.Error
+		if errors.As(err, &oe) {
+			oe.Message = rr.redact(oe.Message)
+			if userStep {
+				oe.Hint = "deploy the instance first: cvctl deploy " + inst
+			}
+		}
+		return nil, err
+	}
+	return &rr, nil
+}
+
+func (r *Runner) targets(ctx context.Context, inst, only string) (*Runner, []Target, error) {
 	p, d, err := r.Load(inst)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	rr, err := r.forInstance(ctx, inst, p, d)
+	if err != nil {
+		return nil, nil, err
 	}
 	all := Targets(p, d)
 	if only == "" {
-		return all, nil
+		return rr, all, nil
 	}
 	for _, t := range all {
 		if t.Service == only {
-			return []Target{t}, nil
+			return rr, []Target{t}, nil
 		}
 	}
-	return nil, &output.Error{
+	return nil, nil, &output.Error{
 		Code:    "E_BACKUP_NO_TARGET",
 		Message: fmt.Sprintf("service %q of %s has no backup (not a local data service with backups)", only, inst),
 		Hint:    "run cvctl backup list <instance> to see which services are backed up",
@@ -306,7 +348,7 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 	if r.Host == nil {
 		return nil, notConfigured()
 	}
-	ts, err := r.targets(inst, only)
+	r, ts, err := r.targets(ctx, inst, only)
 	if err != nil {
 		return nil, err
 	}
@@ -354,12 +396,32 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 	return results, nil
 }
 
+// BackupService backs up one target of inst without recording the outcome:
+// the caller holds the instance lock (project update right after moving the
+// instance to its own keys, so the new generation or repository is
+// restorable on its own).
+func (r *Runner) BackupService(ctx context.Context, inst, svc string) error {
+	if r.Host == nil {
+		return notConfigured()
+	}
+	r, ts, err := r.targets(ctx, inst, svc)
+	if err != nil {
+		return err
+	}
+	tctx, cancel := context.WithTimeout(ctx, backupTimeout)
+	defer cancel()
+	if ts[0].Strategy == StrategyWalG {
+		return r.walgBackup(tctx, inst, ts[0])
+	}
+	return r.resticBackup(tctx, inst, ts[0])
+}
+
 // List returns the backups of one service, or of every target when svc is empty.
 func (r *Runner) List(ctx context.Context, inst, svc string) ([]Snapshot, error) {
 	if r.Host == nil {
 		return nil, notConfigured()
 	}
-	ts, err := r.targets(inst, svc)
+	r, ts, err := r.targets(ctx, inst, svc)
 	if err != nil {
 		return nil, err
 	}

@@ -405,3 +405,16 @@ func TestDefaultStepsRegistration(t *testing.T) {
 		t.Errorf("step 2: got %s, want docker-daemon", steps[2].Name())
 	}
 }
+
+func TestDockerDaemonRejectsOldEngine(t *testing.T) {
+	for v, bad := range map[string]bool{"27.5.1": true, "28.0.0": false, "28.3.2": false, "29.1.0": false, "garbage": false} {
+		env, runner, _ := newDockerTestEnv()
+		runner.On("docker version --format {{.Server.Version}}", sys.Result{Stdout: []byte(v + "\n")})
+		_, err := DockerDaemonStep{}.Check(context.Background(), env)
+		var oe *output.Error
+		got := errors.As(err, &oe) && oe.Code == "E_DOCKER_TOO_OLD" && strings.Contains(oe.Hint, "28+")
+		if got != bad {
+			t.Errorf("version %s: E_DOCKER_TOO_OLD = %v, want %v (err %v)", v, got, bad, err)
+		}
+	}
+}

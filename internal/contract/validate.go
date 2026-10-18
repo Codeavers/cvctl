@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/codeavers/cvctl/internal/envspec"
 	"github.com/codeavers/cvctl/internal/output"
@@ -14,6 +15,14 @@ import (
 )
 
 var bucketNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}$`)
+
+// serviceNameRe forbids "--" and leading/trailing separators: compose
+// registers the service name as a DNS alias on every network, so a service
+// named "<inst>--<svc>" could capture another instance's edge alias.
+var serviceNameRe = regexp.MustCompile(`^[a-z0-9]+([-_][a-z0-9]+)*$`)
+
+// MaxHealthTimeout caps x-cvctl.health.timeout.
+const MaxHealthTimeout = 10 * time.Minute
 
 func exposedApp(p *Project, name string) bool {
 	for _, a := range p.Apps {
@@ -24,6 +33,9 @@ func exposedApp(p *Project, name string) bool {
 	return false
 }
 
+// MaxHookTimeout caps x-cvctl.hooks[].timeout.
+const MaxHookTimeout = 2 * time.Hour
+
 // Validate checks the contract rules. A nil spec skips the env checks (the
 // caller reports the missing or invalid spec itself). The result is sorted by
 // code, service, message so output is deterministic.
@@ -31,6 +43,10 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 	var out []output.Issue
 	add := func(code, svc, msg, hint string) {
 		out = append(out, output.Issue{Code: code, Service: svc, Message: msg, Hint: hint})
+	}
+
+	if len(p.RawCompose) > 0 {
+		out = append(out, CheckFields(p.RawCompose)...)
 	}
 
 	isApp := map[string]bool{}
@@ -56,6 +72,16 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 		}
 		seen[Normalize(name)] = name
 
+		if !serviceNameRe.MatchString(name) {
+			add("E_CONTRACT_SERVICE_NAME", name, fmt.Sprintf("service name %q must match ^[a-z0-9]+([-_][a-z0-9]+)*$", name),
+				"use lowercase letters and digits separated by single - or _ (no \"--\", no leading or trailing separator)")
+		}
+
+		if isData[name] && name == "backup" {
+			add("E_CONTRACT_NAME_RESERVED", name, "data service name backup is reserved",
+				"rename the service; `backup` is reserved for --ext backup.*")
+		}
+
 		if role := svc.Labels[LabelRole]; role != "" && role != "app" && role != "worker" {
 			add("E_CONTRACT_ROLE_INVALID", name, fmt.Sprintf("%s %q is not app or worker", LabelRole, role),
 				fmt.Sprintf("set %s to app or worker", LabelRole))
@@ -67,10 +93,6 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 		if svc.Labels[LabelRole] == "" && svc.Labels[LabelKind] == "" {
 			add("E_CONTRACT_NO_ROLE", name, "service has neither cvctl.role nor cvctl.kind",
 				fmt.Sprintf("add label %s: app|worker, or %s: <kind>", LabelRole, LabelKind))
-		}
-		if len(svc.Ports) > 0 {
-			add("E_CONTRACT_PORTS_PUBLISHED", name, "service publishes host ports",
-				"remove ports: and use expose: so the proxy reaches it over the docker network")
 		}
 		if isApp[name] {
 			if svc.Image == "" {
@@ -199,11 +221,22 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 		}
 	}
 
+	if p.X.Health.Timeout > MaxHealthTimeout {
+		add("E_CONTRACT_HEALTH_TIMEOUT", p.X.Health.Service, fmt.Sprintf("x-cvctl.health.timeout %s exceeds %s", p.X.Health.Timeout, MaxHealthTimeout),
+			"use a duration of at most 10m")
+	}
+
 	for _, hooks := range [][]Hook{p.X.Hooks.PreDeploy, p.X.Hooks.PostDeploy} {
 		for _, h := range hooks {
 			if !isApp[h.Service] {
 				add("E_CONTRACT_HOOK_SERVICE", h.Service, fmt.Sprintf("hook service %q is not an app service", h.Service),
 					"point the hook at a service labelled cvctl.role")
+			}
+			if h.Timeout != "" {
+				if d, err := time.ParseDuration(h.Timeout); err != nil || d <= 0 || d > MaxHookTimeout {
+					add("E_CONTRACT_HOOK_TIMEOUT", h.Service, fmt.Sprintf("hook timeout %q must be a Go duration above 0 and at most %s", h.Timeout, MaxHookTimeout),
+						"use a duration such as 10m")
+				}
 			}
 		}
 	}

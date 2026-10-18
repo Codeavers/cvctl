@@ -36,43 +36,39 @@ var runAgentRegistryLogin = func(ctx context.Context, run sys.Runner, hcfg *host
 	if !ok || token == "" {
 		return
 	}
-	if hcfg == nil || hcfg.Registries == "" {
+	if hcfg == nil {
 		return
 	}
 
-	seen := make(map[string]bool)
-	for _, r := range strings.Split(hcfg.Registries, ",") {
-		s := strings.TrimSpace(r)
-		if s == "" {
-			continue
+	host := hcfg.TokenHost()
+	if host == "" {
+		return
+	}
+	fsys := sys.NewOSFS()
+	err := registry.LoginWithFS(ctx, run, fsys, host, hcfg.RegistryUser, token)
+	if err == nil {
+		err = registry.PruneAuths(fsys, host)
+	}
+	if err != nil {
+		errReason := fmt.Sprintf("registry login failed for %s: %v", host, err)
+		logEntry := agent.DecisionLog{
+			TS:       time.Now().UTC().Format(time.RFC3339),
+			Instance: "",
+			Action:   "error",
+			Reason:   errReason,
 		}
-		host := strings.Split(s, "/")[0]
-		if host == "" || seen[host] {
-			continue
-		}
-		seen[host] = true
+		_ = json.NewEncoder(out).Encode(logEntry)
 
-		if err := registry.LoginWithFS(ctx, run, sys.NewOSFS(), host, hcfg.RegistryUser, token); err != nil {
-			errReason := fmt.Sprintf("registry login failed for %s: %v", host, err)
-			logEntry := agent.DecisionLog{
-				TS:       time.Now().UTC().Format(time.RFC3339),
-				Instance: "",
-				Action:   "error",
-				Reason:   errReason,
-			}
-			_ = json.NewEncoder(out).Encode(logEntry)
-
-			hostName := hcfg.HostName
-			if hostName == "" {
-				hostName, _ = os.Hostname()
-			}
-			_ = notif.Send(ctx, notify.Message{
-				Host:  hostName,
-				Level: "warn",
-				Title: "registry login failed",
-				Text:  errReason,
-			})
+		hostName := hcfg.HostName
+		if hostName == "" {
+			hostName, _ = os.Hostname()
 		}
+		_ = notif.Send(ctx, notify.Message{
+			Host:  hostName,
+			Level: "warn",
+			Title: "registry login failed",
+			Text:  errReason,
+		})
 	}
 }
 

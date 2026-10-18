@@ -2,6 +2,7 @@ package registry_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -129,7 +130,7 @@ func TestDigestResolves(t *testing.T) {
 	defer srv.Close()
 
 	host := srv.Listener.Addr().String()
-	res := registry.New("cvctl", "test-token", []string{host})
+	res := registry.New("cvctl", "test-token", host, []string{host})
 
 	ctx := context.Background()
 	digest, err := res.Digest(ctx, host+"/myrepo/app", "v1.0.0")
@@ -154,7 +155,7 @@ func TestDigestErrorNoToken(t *testing.T) {
 	defer srv.Close()
 
 	host := srv.Listener.Addr().String()
-	res := registry.New("myuser", secretToken, []string{host})
+	res := registry.New("myuser", secretToken, host, []string{host})
 
 	ctx := context.Background()
 	_, err := res.Digest(ctx, host+"/myrepo/app", "latest")
@@ -189,7 +190,7 @@ func TestDigestErrorNoToken(t *testing.T) {
 
 func TestDigestErrorUnreachableRegistry(t *testing.T) {
 	host := "127.0.0.1:1"
-	res := registry.New("cvctl", "token", []string{host})
+	res := registry.New("cvctl", "token", host, []string{host})
 	_, err := res.Digest(context.Background(), host+"/repo/app", "v1")
 	if err == nil {
 		t.Fatalf("expected error for unreachable registry, got nil")
@@ -324,5 +325,92 @@ func TestLoginWithFSLeavesConfigAloneWhenNotRoot(t *testing.T) {
 	}
 	if fi, _ := fsys.Stat(cfg); fi.User != "root" || fi.Mode != 0o644 {
 		t.Fatalf("config.json should be untouched: %+v", fi)
+	}
+}
+
+func TestSameHost(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"GHCR.io", "ghcr.io", true},
+		{"https://ghcr.io", "ghcr.io", true},
+		{"localhost:5000", "localhost:5001", false},
+		{"reg.io", "reg.io:5000", false},
+		{"", "", false},
+		{"docker.io", "index.docker.io", true},
+	} {
+		if got := registry.SameHost(tc.a, tc.b); got != tc.want {
+			t.Errorf("SameHost(%q,%q)=%v", tc.a, tc.b, got)
+		}
+	}
+}
+
+func TestDigestTokenOnlyToTokenHost(t *testing.T) {
+	var auths []string
+	mk := func() string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			auths = append(auths, r.Host+"|"+r.Header.Get("Authorization"))
+			if r.URL.Path == "/v2/" {
+				return
+			}
+			w.Header().Set("Docker-Content-Digest", "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+			w.Header().Set("Content-Type", "application/vnd.docker.distribution.manifest.v2+json")
+			w.Header().Set("Content-Length", "1024")
+		}))
+		t.Cleanup(srv.Close)
+		return srv.Listener.Addr().String()
+	}
+	tokenHost, other := mk(), mk()
+	res := registry.New("u", "secret", tokenHost, []string{tokenHost, other})
+	ctx := context.Background()
+	if _, err := res.Digest(ctx, other+"/a/b", "v1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range auths {
+		if strings.Contains(a, "|Basic") {
+			t.Fatalf("token sent to non-token host: %s", a)
+		}
+	}
+	auths = nil
+	if _, err := res.Digest(ctx, tokenHost+"/a/b", "v1"); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, a := range auths {
+		found = found || strings.Contains(a, "|Basic")
+	}
+	if !found {
+		t.Fatal("token host got no Basic auth")
+	}
+}
+
+func TestPruneAuthsKeepsOnlyTokenHost(t *testing.T) {
+	fsys := systest.NewFS()
+	const cfg = "/var/lib/cvctl/docker/config.json"
+	in := `{"auths":{"ghcr.io":{"auth":"a"},"https://index.docker.io/v1/":{"auth":"b"},"old.example.com":{"auth":"c"}},"credsStore":"x","HttpHeaders":{"User-Agent":"y"}}`
+	if err := fsys.WriteFile(cfg, []byte(in), 0o644, sys.Owner{User: "root", Group: "root"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.PruneAuths(fsys, "GHCR.io"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := fsys.ReadFile(cfg)
+	var doc struct {
+		Auths       map[string]json.RawMessage `json:"auths"`
+		CredsStore  string                     `json:"credsStore"`
+		HTTPHeaders map[string]string          `json:"HttpHeaders"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Auths) != 1 || doc.Auths["ghcr.io"] == nil || doc.CredsStore != "x" || doc.HTTPHeaders["User-Agent"] != "y" {
+		t.Fatalf("config = %s", data)
+	}
+	if fi, err := fsys.Stat(cfg); err != nil || fi.User != "deployer" || fi.Group != "deploy" || fi.Mode != 0o600 {
+		t.Fatalf("owner/mode: %+v %v", fi, err)
+	}
+	if err := registry.PruneAuths(systest.NewFS(), "ghcr.io"); err != nil {
+		t.Fatalf("missing config: %v", err)
 	}
 }
