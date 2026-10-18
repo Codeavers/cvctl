@@ -690,7 +690,7 @@ func TestTraefikBehindProxyItem7Requirements(t *testing.T) {
 	if !ok || webEp.ForwardedHeaders == nil {
 		t.Fatalf("expected web entrypoint with forwardedHeaders, got %+v", webEp)
 	}
-	wantIPs := []string{"127.0.0.1/32", "172.16.0.0/12"}
+	wantIPs := []string{"127.0.0.1/32", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
 	if !slices.Equal(webEp.ForwardedHeaders.TrustedIPs, wantIPs) {
 		t.Fatalf("trustedIPs: got %v, want %v", webEp.ForwardedHeaders.TrustedIPs, wantIPs)
 	}
