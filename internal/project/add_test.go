@@ -1,6 +1,7 @@
 package project
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -619,7 +620,7 @@ vars:
 		},
 	}
 
-	res, err := Update(context.Background(), e, inst)
+	res, err := Update(context.Background(), e, inst, UpdateOptions{})
 	if err != nil {
 		t.Fatalf("Update failed: %v", err)
 	}
@@ -923,7 +924,7 @@ func TestUpdatePathTraversalAndValidation(t *testing.T) {
 		StateRoot:  "/var/lib/cvctl",
 	}
 
-	_, err := Update(context.Background(), e, "../x")
+	_, err := Update(context.Background(), e, "../x", UpdateOptions{})
 	if err == nil {
 		t.Fatal("expected error for Update('../x'), got nil")
 	}
@@ -1187,7 +1188,7 @@ CVCTL_DOMAIN_WEB=web.example.com
 		RepoFactory: func(_, _ string) RepoLike { return stub },
 	}
 
-	_, err := Update(context.Background(), e, inst)
+	_, err := Update(context.Background(), e, inst, UpdateOptions{})
 	if err == nil {
 		t.Fatal("expected error for malformed app.env, got nil")
 	}
@@ -1228,7 +1229,7 @@ vars:
 	e.Prompt = prompter
 	e.Interactive = true
 
-	_, err = Update(context.Background(), e, inst)
+	_, err = Update(context.Background(), e, inst, UpdateOptions{})
 	if err != nil {
 		t.Fatalf("Update failed: %v", err)
 	}
@@ -1284,7 +1285,7 @@ CVCTL_DOMAIN_WEB=web.example.com
 		RepoFactory: func(_, _ string) RepoLike { return stub },
 	}
 
-	_, err := Update(context.Background(), e, inst)
+	_, err := Update(context.Background(), e, inst, UpdateOptions{})
 	if err == nil {
 		t.Fatal("expected error for malformed app.env, got nil")
 	}
@@ -1565,6 +1566,10 @@ type noopCompose struct{}
 func (noopCompose) Config(context.Context) error           { return nil }
 func (noopCompose) Pull(context.Context, ...string) error  { return nil }
 func (noopCompose) UpData(context.Context, []string) error { return nil }
+func (noopCompose) ExecScript(context.Context, string, string) (sys.Result, error) {
+	return sys.Result{}, nil
+}
+
 func (noopCompose) RunHook(context.Context, string, string) (sys.Result, error) {
 	return sys.Result{}, nil
 }
@@ -1675,7 +1680,7 @@ x-cvctl:`, 1)
 func TestUpdateFetchesChecksOutAndAsksOnlyForNewService(t *testing.T) {
 	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
 
-	res, err := Update(context.Background(), rig.env, "demo-dev")
+	res, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{})
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -1704,7 +1709,7 @@ func TestUpdateHoldsInstanceLockDuringDeploy(t *testing.T) {
 			t.Error("instance lock must be held while Update fetches")
 		}
 	}
-	if _, err := Update(context.Background(), rig.env, "demo-dev"); err != nil {
+	if _, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 	unlock, err := rig.store.Lock("demo-dev")
@@ -1716,7 +1721,7 @@ func TestUpdateHoldsInstanceLockDuringDeploy(t *testing.T) {
 
 func TestUpdatePreservesUnknownCvctlEnvKeys(t *testing.T) {
 	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
-	if _, err := Update(context.Background(), rig.env, "demo-dev"); err != nil {
+	if _, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 	raw, err := os.ReadFile(filepath.Join(rig.instDir, "cvctl.env"))
@@ -1727,5 +1732,946 @@ func TestUpdatePreservesUnknownCvctlEnvKeys(t *testing.T) {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("cvctl.env missing %q:\n%s", want, raw)
 		}
+	}
+}
+
+const testS3Compose = `
+services:
+  web:
+    image: ghcr.io/codeavers/web:develop
+    labels:
+      cvctl.role: app
+      cvctl.expose: "3000"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+  media:
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    labels:
+      cvctl.kind: s3
+      cvctl.env: S3
+      cvctl.external: allowed
+x-cvctl:
+  health:
+    service: web
+    http: /healthz
+`
+
+const testS3Spec = `
+vars:
+  S3_ENDPOINT:
+    source: service
+    service: media
+`
+
+const testS3BucketsCompose = `
+services:
+  web:
+    image: ghcr.io/codeavers/web:develop
+    labels:
+      cvctl.role: app
+      cvctl.expose: "3000"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+  media:
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    labels:
+      cvctl.kind: s3
+      cvctl.env: S3
+      cvctl.expose: "9000"
+      cvctl.external: allowed
+x-cvctl:
+  health:
+    service: web
+    http: /healthz
+  s3:
+    media:
+      buckets:
+        photos:
+          public: true
+        backups: {}
+`
+
+const testS3BucketsSpec = `
+vars:
+  S3_ENDPOINT:
+    source: service
+    service: media
+  S3_BUCKET_PHOTOS:
+    source: service
+    service: media
+  S3_PUBLIC_URL_PHOTOS:
+    source: service
+    service: media
+  S3_BUCKET_BACKUPS:
+    source: service
+    service: media
+`
+
+func TestAddLocalS3GeneratesAppCreds(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra")
+	writeTestInfra(t, infraDir, testS3Compose, testS3Spec)
+
+	fsys := sys.NewOSFS()
+	cat := testCatalog(t)
+	stub := &stubRepo{infraSource: infraDir}
+
+	e := &Env{
+		FS:          fsys,
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "state"),
+		Interactive: false,
+		Catalog:     cat,
+		RepoFactory: func(dir, _ string) RepoLike {
+			r := *stub
+			r.dir = dir
+			return &r
+		},
+	}
+
+	res, err := Add(context.Background(), e, "git@github.com:myorg/my-service-infra.git", AddOptions{
+		Domains: map[string]string{"web": "web.example.com"},
+	})
+	if err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	cvctlEnvPath := filepath.Join(tmp, "my-service-dev", "cvctl.env")
+	data, err := os.ReadFile(cvctlEnvPath)
+	if err != nil {
+		t.Fatalf("read cvctl.env: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "CVCTL_SVC_MEDIA_APP_USER=media-app") &&
+		!strings.Contains(content, `CVCTL_SVC_MEDIA_APP_USER="media-app"`) {
+		t.Errorf("expected CVCTL_SVC_MEDIA_APP_USER=media-app in cvctl.env, got:\n%s", content)
+	}
+
+	sd := res.Decisions.Services["media"]
+	if sd.Creds.AppUser != "media-app" {
+		t.Errorf("expected AppUser media-app, got %q", sd.Creds.AppUser)
+	}
+	if len(sd.Creds.AppPassword) != 32 {
+		t.Errorf("expected 32-char AppPassword, got %q", sd.Creds.AppPassword)
+	}
+	if !strings.Contains(content, sd.Creds.AppPassword) {
+		t.Errorf("expected cvctl.env to contain generated app password %q", sd.Creds.AppPassword)
+	}
+}
+
+func TestUpdateFillsAppCredsOnOldCvctlEnv(t *testing.T) {
+	tmp := t.TempDir()
+	inst := "my-service-dev"
+	instDir := filepath.Join(tmp, inst)
+	infraDir := filepath.Join(instDir, "infra")
+	cat := testCatalog(t)
+	stub := &stubRepo{}
+
+	oldCvctlEnv := `CVCTL_INSTANCE=my-service-dev
+CVCTL_ENV=dev
+CVCTL_INFRA_BRANCH=develop
+CVCTL_TRACK_TAG=develop
+CVCTL_INFRA_PATH=.
+CVCTL_STRATEGY=recreate
+CVCTL_SVC_MEDIA_MODE=local
+CVCTL_SVC_MEDIA_VERSION=RELEASE.2026-09-16T00-00-00Z
+CVCTL_SVC_MEDIA_USER=media
+CVCTL_SVC_MEDIA_PASSWORD=existingpass123456789012345678
+CVCTL_SVC_MEDIA_DB=media
+CVCTL_DOMAIN_WEB=web.example.com
+`
+	writeTestInfra(t, infraDir, testS3Compose, testS3Spec)
+	if err := os.WriteFile(filepath.Join(instDir, "cvctl.env"), []byte(oldCvctlEnv), 0o640); err != nil {
+		t.Fatalf("write cvctl.env: %v", err)
+	}
+
+	e := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "state"),
+		Interactive: false,
+		Catalog:     cat,
+		RepoFactory: func(_, _ string) RepoLike {
+			return stub
+		},
+	}
+
+	res, err := Update(context.Background(), e, inst, UpdateOptions{})
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	sd := res.Decisions.Services["media"]
+	if sd.Creds.Password != "existingpass123456789012345678" {
+		t.Errorf("expected existing password preserved, got %q", sd.Creds.Password)
+	}
+	if sd.Creds.AppUser != "media-app" {
+		t.Errorf("expected AppUser media-app, got %q", sd.Creds.AppUser)
+	}
+	if len(sd.Creds.AppPassword) != 32 {
+		t.Fatalf("expected 32-char AppPassword, got %q", sd.Creds.AppPassword)
+	}
+
+	// Re-run Update and assert AppPassword is never regenerated
+	res2, err := Update(context.Background(), e, inst, UpdateOptions{})
+	if err != nil {
+		t.Fatalf("second Update failed: %v", err)
+	}
+	if res2.Decisions.Services["media"].Creds.AppPassword != sd.Creds.AppPassword {
+		t.Errorf("app password was regenerated: got %q, want %q", res2.Decisions.Services["media"].Creds.AppPassword, sd.Creds.AppPassword)
+	}
+}
+
+func TestExternalPerBucketQuestionsDefaultsAndAskedOrder(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra")
+	writeTestInfra(t, infraDir, testS3BucketsCompose, testS3BucketsSpec)
+
+	cat := testCatalog(t)
+	stub := &stubRepo{infraSource: infraDir}
+
+	answers := map[string]string{
+		"data_media_mode":                  "external",
+		"data_media_ext_endpoint":          "https://s3.example.com",
+		"data_media_ext_access_key":        "ak123",
+		"data_media_ext_secret_key":        "sk123",
+		"data_media_ext_region":            "", // should default to "auto"
+		"data_media_ext_bucket_photos":     "", // should default to "photos"
+		"data_media_ext_public_url_photos": "https://cdn.example.com/photos",
+		"data_media_ext_bucket_backups":    "", // should default to "backups"
+		"domain_web":                       "web.example.com",
+	}
+	prompter := hostcfgtest.NewPrompter(t, answers)
+
+	e := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "state"),
+		Interactive: true,
+		Catalog:     cat,
+		Prompt:      prompter,
+		RepoFactory: func(dir, _ string) RepoLike {
+			r := *stub
+			r.dir = dir
+			return &r
+		},
+	}
+
+	res, err := Add(context.Background(), e, "git@github.com:myorg/my-service-infra.git", AddOptions{})
+	if err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	wantAsked := []string{
+		"data_media_mode",
+		"data_media_ext_endpoint",
+		"data_media_ext_access_key",
+		"data_media_ext_secret_key",
+		"data_media_ext_region",
+		"data_media_ext_bucket_backups",
+		"data_media_ext_bucket_photos",
+		"data_media_ext_public_url_photos",
+		"domain_web",
+	}
+	if !slices.Equal(prompter.Asked, wantAsked) {
+		t.Fatalf("prompter.Asked = %v, want %v", prompter.Asked, wantAsked)
+	}
+
+	ext := res.Decisions.Services["media"].External
+	if ext["region"] != "auto" {
+		t.Errorf("expected region auto, got %q", ext["region"])
+	}
+	if ext["bucket_photos"] != "photos" {
+		t.Errorf("expected bucket_photos photos, got %q", ext["bucket_photos"])
+	}
+	if ext["public_url_photos"] != "https://cdn.example.com/photos" {
+		t.Errorf("expected public_url_photos https://cdn.example.com/photos, got %q", ext["public_url_photos"])
+	}
+	if ext["bucket_backups"] != "backups" {
+		t.Errorf("expected bucket_backups backups, got %q", ext["bucket_backups"])
+	}
+}
+
+func TestAddExtNonInteractiveHappyPath(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra")
+	writeTestInfra(t, infraDir, testS3BucketsCompose, testS3BucketsSpec)
+
+	cat := testCatalog(t)
+	stub := &stubRepo{infraSource: infraDir}
+
+	e := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "state"),
+		Interactive: false,
+		Catalog:     cat,
+		RepoFactory: func(dir, _ string) RepoLike {
+			r := *stub
+			r.dir = dir
+			return &r
+		},
+	}
+
+	res, err := Add(context.Background(), e, "git@github.com:myorg/my-service-infra.git", AddOptions{
+		Env:     "prod",
+		Domains: map[string]string{"web": "web.example.com"},
+		Ext: map[string]map[string]string{
+			"media": {
+				"endpoint":          "https://s3.amazonaws.com",
+				"access_key":        "prod-ak",
+				"secret_key":        "prod-sk",
+				"public_url_photos": "https://cdn.example.com/photos",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	sd := res.Decisions.Services["media"]
+	if sd.Mode != "external" {
+		t.Fatalf("expected Mode external, got %q", sd.Mode)
+	}
+	if sd.External["endpoint"] != "https://s3.amazonaws.com" {
+		t.Errorf("expected endpoint https://s3.amazonaws.com, got %q", sd.External["endpoint"])
+	}
+	if sd.External["region"] != "auto" {
+		t.Errorf("expected region auto, got %q", sd.External["region"])
+	}
+	if sd.External["bucket_photos"] != "photos" {
+		t.Errorf("expected bucket_photos photos, got %q", sd.External["bucket_photos"])
+	}
+	if sd.External["public_url_photos"] != "https://cdn.example.com/photos" {
+		t.Errorf("expected public_url_photos https://cdn.example.com/photos, got %q", sd.External["public_url_photos"])
+	}
+	if sd.External["bucket_backups"] != "backups" {
+		t.Errorf("expected bucket_backups backups, got %q", sd.External["bucket_backups"])
+	}
+}
+
+func TestAddWithDomainMedia(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra")
+	writeTestInfra(t, infraDir, testS3BucketsCompose, testS3BucketsSpec)
+
+	cat := testCatalog(t)
+	stub := &stubRepo{infraSource: infraDir}
+
+	e := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "state"),
+		Interactive: false,
+		Catalog:     cat,
+		RepoFactory: func(dir, _ string) RepoLike {
+			r := *stub
+			r.dir = dir
+			return &r
+		},
+	}
+
+	res, err := Add(context.Background(), e, "git@github.com:myorg/my-service-infra.git", AddOptions{
+		Env: "dev",
+		Domains: map[string]string{
+			"web":   "web.example.com",
+			"media": "media.example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Add with --domain media failed: %v", err)
+	}
+
+	if res.Decisions.Domains["media"] != "media.example.com" {
+		t.Errorf("expected media domain media.example.com, got %q", res.Decisions.Domains["media"])
+	}
+
+	cvctlEnvPath := filepath.Join(tmp, "my-service-dev", "cvctl.env")
+	data, err := os.ReadFile(cvctlEnvPath)
+	if err != nil {
+		t.Fatalf("read cvctl.env: %v", err)
+	}
+	if !strings.Contains(string(data), "CVCTL_DOMAIN_MEDIA=media.example.com") {
+		t.Errorf("expected CVCTL_DOMAIN_MEDIA in cvctl.env, got:\n%s", string(data))
+	}
+}
+
+func TestAddProdPublicLocalRejectedNothingWritten(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra")
+	writeTestInfra(t, infraDir, testS3BucketsCompose, testS3BucketsSpec)
+
+	cat := testCatalog(t)
+	stub := &stubRepo{infraSource: infraDir}
+
+	answers := map[string]string{
+		"data_media_mode": "local",
+		"domain_web":      "web.example.com",
+		"domain_media":    "media.example.com",
+	}
+	prompter := hostcfgtest.NewPrompter(t, answers)
+
+	e := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "state"),
+		Interactive: true,
+		Catalog:     cat,
+		Prompt:      prompter,
+		RepoFactory: func(dir, _ string) RepoLike {
+			r := *stub
+			r.dir = dir
+			return &r
+		},
+	}
+
+	_, err := Add(context.Background(), e, "git@github.com:myorg/my-service-infra.git", AddOptions{
+		Env: "prod",
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	var issuesErr *output.IssuesError
+	if !errors.As(err, &issuesErr) {
+		t.Fatalf("expected *output.IssuesError, got %T: %v", err, err)
+	}
+	found := false
+	for _, iss := range issuesErr.Issues {
+		if iss.Code == "E_S3_PUBLIC_LOCAL_PROD" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected E_S3_PUBLIC_LOCAL_PROD issue, got: %+v", issuesErr.Issues)
+	}
+
+	// Verify nothing was written / instance directory was cleaned up
+	instDir := filepath.Join(tmp, "my-service-prod")
+	if _, statErr := os.Stat(instDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected instance dir %s to be cleaned up, stat: %v", instDir, statErr)
+	}
+}
+
+func TestProdDefaultModeIsExternal(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra")
+	writeTestInfra(t, infraDir, testS3BucketsCompose, testS3BucketsSpec)
+
+	cat := testCatalog(t)
+	stub := &stubRepo{infraSource: infraDir}
+
+	answers := map[string]string{
+		"data_media_mode":                  "", // accept default
+		"data_media_ext_endpoint":          "https://s3.example.com",
+		"data_media_ext_access_key":        "ak",
+		"data_media_ext_secret_key":        "sk",
+		"data_media_ext_region":            "",
+		"data_media_ext_bucket_photos":     "",
+		"data_media_ext_public_url_photos": "https://cdn.example.com/photos",
+		"data_media_ext_bucket_backups":    "",
+		"domain_web":                       "web.example.com",
+	}
+	prompter := hostcfgtest.NewPrompter(t, answers)
+
+	e := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "state"),
+		Interactive: true,
+		Catalog:     cat,
+		Prompt:      prompter,
+		RepoFactory: func(dir, _ string) RepoLike {
+			r := *stub
+			r.dir = dir
+			return &r
+		},
+	}
+
+	res, err := Add(context.Background(), e, "git@github.com:myorg/my-service-infra.git", AddOptions{
+		Env: "prod",
+	})
+	if err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	if res.Decisions.Services["media"].Mode != "external" {
+		t.Fatalf("expected Mode external, got %q", res.Decisions.Services["media"].Mode)
+	}
+}
+
+func TestAddNonInteractiveDevExtImpliesExternalMode(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra")
+	writeTestInfra(t, infraDir, testS3BucketsCompose, testS3BucketsSpec)
+
+	cat := testCatalog(t)
+	stub := &stubRepo{infraSource: infraDir}
+
+	e := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "state"),
+		Interactive: false,
+		Catalog:     cat,
+		RepoFactory: func(dir, _ string) RepoLike {
+			r := *stub
+			r.dir = dir
+			return &r
+		},
+	}
+
+	res, err := Add(context.Background(), e, "git@github.com:myorg/my-service-infra.git", AddOptions{
+		Env:     "dev",
+		Domains: map[string]string{"web": "web.example.com"},
+		Ext: map[string]map[string]string{
+			"media": {
+				"endpoint":          "https://s3.amazonaws.com",
+				"access_key":        "dev-ak",
+				"secret_key":        "dev-sk",
+				"public_url_photos": "https://cdn.example.com/photos",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	if res.Decisions.Services["media"].Mode != "external" {
+		t.Fatalf("expected Mode external, got %q", res.Decisions.Services["media"].Mode)
+	}
+
+	instDir := filepath.Join(tmp, "my-service-dev")
+	rawCvctl, err := os.ReadFile(filepath.Join(instDir, "cvctl.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rawCvctl), "CVCTL_SVC_MEDIA_MODE=external") {
+		t.Fatalf("expected CVCTL_SVC_MEDIA_MODE=external in cvctl.env, got:\n%s", string(rawCvctl))
+	}
+}
+
+func TestAddExtRejectsUnknownFieldNames(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra")
+	writeTestInfra(t, infraDir, testS3BucketsCompose, testS3BucketsSpec)
+
+	cat := testCatalog(t)
+	stub := &stubRepo{infraSource: infraDir}
+
+	newEnv := func() *Env {
+		return &Env{
+			FS:          sys.NewOSFS(),
+			DeployRoot:  tmp,
+			StateRoot:   filepath.Join(tmp, "state"),
+			Interactive: false,
+			Catalog:     cat,
+			RepoFactory: func(dir, _ string) RepoLike {
+				r := *stub
+				r.dir = dir
+				return &r
+			},
+		}
+	}
+
+	cases := []struct {
+		name      string
+		ext       map[string]map[string]string
+		wantField string
+	}{
+		{
+			name: "unknown field on kind",
+			ext: map[string]map[string]string{
+				"media": {"nonexistent_field": "secret123"},
+			},
+			wantField: "media.nonexistent_field",
+		},
+		{
+			name: "bucket field when buckets declared",
+			ext: map[string]map[string]string{
+				"media": {"bucket": "secretbucket"},
+			},
+			wantField: "media.bucket",
+		},
+		{
+			name: "public_url on private bucket",
+			ext: map[string]map[string]string{
+				"media": {"public_url_backups": "https://cdn.example.com"},
+			},
+			wantField: "media.public_url_backups",
+		},
+		{
+			name: "bucket on undeclared bucket",
+			ext: map[string]map[string]string{
+				"media": {"bucket_unknown": "my-bucket"},
+			},
+			wantField: "media.bucket_unknown",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv()
+			_, err := Add(context.Background(), e, "git@github.com:myorg/my-service-infra.git", AddOptions{
+				Env:     "dev",
+				Domains: map[string]string{"web": "web.example.com"},
+				Ext:     tc.ext,
+			})
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			var ue *output.UsageError
+			if !errors.As(err, &ue) {
+				t.Fatalf("expected *output.UsageError, got %T: %v", err, err)
+			}
+			var oe *output.Error
+			if !errors.As(ue.Err, &oe) {
+				t.Fatalf("expected *output.Error, got %T", ue.Err)
+			}
+			if oe.Code != "E_USAGE_EXT" {
+				t.Fatalf("expected code E_USAGE_EXT, got %q", oe.Code)
+			}
+			if !strings.Contains(oe.Message, tc.wantField) {
+				t.Fatalf("expected message to name %q, got: %s", tc.wantField, oe.Message)
+			}
+			// Assert values are absent from error message and hint
+			for _, fVals := range tc.ext {
+				for _, v := range fVals {
+					if strings.Contains(oe.Message, v) {
+						t.Fatalf("error message leaked ext value %q: %s", v, oe.Message)
+					}
+					if strings.Contains(oe.Hint, v) {
+						t.Fatalf("error hint leaked ext value %q: %s", v, oe.Hint)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestUpdateProdPublicLocalRejectedLeavesCvctlEnvByteIdentical(t *testing.T) {
+	tmp := t.TempDir()
+	inst := "my-service-prod"
+	instDir := filepath.Join(tmp, inst)
+	if err := os.MkdirAll(instDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	infraDir := filepath.Join(instDir, "infra")
+	cat := testCatalog(t)
+	stub := &stubRepo{}
+
+	existingCvctlEnv := `CVCTL_INSTANCE=my-service-prod
+CVCTL_ENV=prod
+CVCTL_INFRA_BRANCH=main
+CVCTL_TRACK_TAG=main
+CVCTL_INFRA_PATH=.
+CVCTL_STRATEGY=recreate
+CVCTL_SVC_MEDIA_MODE=local
+CVCTL_SVC_MEDIA_EXT_ENDPOINT=https://left.over.example.com
+CVCTL_SVC_MEDIA_EXT_BUCKET_PRODUCTS=leftover-products
+CVCTL_SVC_MEDIA_VERSION=RELEASE.2024-01-01T00-00-00Z
+CVCTL_SVC_MEDIA_USER=media
+CVCTL_SVC_MEDIA_PASSWORD=existingpass123456789012345678
+CVCTL_SVC_MEDIA_DB=media
+CVCTL_SVC_MEDIA_APP_USER=media-app
+CVCTL_SVC_MEDIA_APP_PASSWORD=existingapppass1234567890123456
+CVCTL_DOMAIN_WEB=web.example.com
+CVCTL_DOMAIN_MEDIA=media.example.com
+`
+	writeTestInfra(t, infraDir, testS3BucketsCompose, testS3BucketsSpec)
+	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
+	if err := os.WriteFile(cvctlEnvPath, []byte(existingCvctlEnv), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	appEnvPath := filepath.Join(instDir, "app.env")
+	if err := os.WriteFile(appEnvPath, []byte(""), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeBytes, err := os.ReadFile(cvctlEnvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "state"),
+		Interactive: false,
+		Catalog:     cat,
+		RepoFactory: func(_, _ string) RepoLike { return stub },
+	}
+
+	_, err = Update(context.Background(), e, inst, UpdateOptions{})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	var issuesErr *output.IssuesError
+	if !errors.As(err, &issuesErr) {
+		t.Fatalf("expected *output.IssuesError, got %T: %v", err, err)
+	}
+	found := false
+	for _, iss := range issuesErr.Issues {
+		if iss.Code == "E_S3_PUBLIC_LOCAL_PROD" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected E_S3_PUBLIC_LOCAL_PROD issue, got: %+v", issuesErr.Issues)
+	}
+
+	afterBytes, err := os.ReadFile(cvctlEnvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeBytes, afterBytes) {
+		t.Fatalf("expected cvctl.env to remain byte-identical, before:\n%s\nafter:\n%s", string(beforeBytes), string(afterBytes))
+	}
+}
+
+func TestUpdateNewlyDeclaredBucketAsksOnlyNewBucket(t *testing.T) {
+	tmp := t.TempDir()
+	inst := "my-service-dev"
+	instDir := filepath.Join(tmp, inst)
+	if err := os.MkdirAll(instDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	infraDir := filepath.Join(instDir, "infra")
+	cat := testCatalog(t)
+	stub := &stubRepo{}
+
+	existingCvctlEnv := `CVCTL_INSTANCE=my-service-dev
+CVCTL_ENV=dev
+CVCTL_INFRA_BRANCH=develop
+CVCTL_TRACK_TAG=develop
+CVCTL_INFRA_PATH=.
+CVCTL_STRATEGY=recreate
+CVCTL_SVC_MEDIA_MODE=external
+CVCTL_SVC_MEDIA_VERSION=RELEASE.2024-01-01T00-00-00Z
+CVCTL_SVC_MEDIA_EXT_ENDPOINT=https://s3.example.com
+CVCTL_SVC_MEDIA_EXT_REGION=auto
+CVCTL_SVC_MEDIA_EXT_ACCESS_KEY=ak
+CVCTL_SVC_MEDIA_EXT_SECRET_KEY=sk
+CVCTL_SVC_MEDIA_EXT_BUCKET_BACKUPS=my-backups
+CVCTL_DOMAIN_WEB=web.example.com
+`
+	writeTestInfra(t, infraDir, testS3BucketsCompose, testS3BucketsSpec)
+	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
+	if err := os.WriteFile(cvctlEnvPath, []byte(existingCvctlEnv), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	appEnvPath := filepath.Join(instDir, "app.env")
+	if err := os.WriteFile(appEnvPath, []byte(""), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	answers := map[string]string{
+		"data_media_ext_bucket_photos":     "new-photos-bucket",
+		"data_media_ext_public_url_photos": "https://cdn.example.com/photos",
+	}
+	prompter := hostcfgtest.NewPrompter(t, answers)
+
+	e := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "state"),
+		Interactive: true,
+		Catalog:     cat,
+		Prompt:      prompter,
+		RepoFactory: func(_, _ string) RepoLike { return stub },
+	}
+
+	res, err := Update(context.Background(), e, inst, UpdateOptions{})
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	wantAsked := []string{
+		"data_media_ext_bucket_photos",
+		"data_media_ext_public_url_photos",
+	}
+	if !slices.Equal(prompter.Asked, wantAsked) {
+		t.Fatalf("expected asked %v, got %v", wantAsked, prompter.Asked)
+	}
+
+	sd := res.Decisions.Services["media"]
+	if sd.External["bucket_photos"] != "new-photos-bucket" {
+		t.Errorf("expected bucket_photos new-photos-bucket, got %q", sd.External["bucket_photos"])
+	}
+	if sd.External["public_url_photos"] != "https://cdn.example.com/photos" {
+		t.Errorf("expected public_url_photos https://cdn.example.com/photos, got %q", sd.External["public_url_photos"])
+	}
+	if sd.External["bucket_backups"] != "my-backups" {
+		t.Errorf("expected bucket_backups my-backups preserved, got %q", sd.External["bucket_backups"])
+	}
+}
+
+func TestUpdateExtHappyPath(t *testing.T) {
+	tmp := t.TempDir()
+	inst := "my-service-dev"
+	instDir := filepath.Join(tmp, inst)
+	if err := os.MkdirAll(instDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	infraDir := filepath.Join(instDir, "infra")
+	cat := testCatalog(t)
+	stub := &stubRepo{}
+
+	existingCvctlEnv := `CVCTL_INSTANCE=my-service-dev
+CVCTL_ENV=dev
+CVCTL_INFRA_BRANCH=develop
+CVCTL_TRACK_TAG=develop
+CVCTL_INFRA_PATH=.
+CVCTL_STRATEGY=recreate
+CVCTL_SVC_MEDIA_MODE=external
+CVCTL_SVC_MEDIA_VERSION=RELEASE.2024-01-01T00-00-00Z
+CVCTL_SVC_MEDIA_EXT_ENDPOINT=https://s3.example.com
+CVCTL_SVC_MEDIA_EXT_REGION=auto
+CVCTL_SVC_MEDIA_EXT_ACCESS_KEY=ak
+CVCTL_SVC_MEDIA_EXT_SECRET_KEY=sk
+CVCTL_SVC_MEDIA_EXT_BUCKET_PHOTOS=photos
+CVCTL_SVC_MEDIA_EXT_PUBLIC_URL_PHOTOS=https://cdn.example.com/photos
+CVCTL_SVC_MEDIA_EXT_BUCKET_BACKUPS=backups
+CVCTL_DOMAIN_WEB=web.example.com
+`
+	writeTestInfra(t, infraDir, testS3BucketsCompose, testS3BucketsSpec)
+	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
+	if err := os.WriteFile(cvctlEnvPath, []byte(existingCvctlEnv), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	appEnvPath := filepath.Join(instDir, "app.env")
+	if err := os.WriteFile(appEnvPath, []byte(""), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	e := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "state"),
+		Interactive: false,
+		Catalog:     cat,
+		RepoFactory: func(_, _ string) RepoLike { return stub },
+	}
+
+	res, err := Update(context.Background(), e, inst, UpdateOptions{
+		Ext: map[string]map[string]string{
+			"media": {
+				"region": "eu-central-1",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	if res.Decisions.Services["media"].External["region"] != "eu-central-1" {
+		t.Fatalf("expected region eu-central-1, got %q", res.Decisions.Services["media"].External["region"])
+	}
+
+	rawCvctl, err := os.ReadFile(cvctlEnvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rawCvctl), "CVCTL_SVC_MEDIA_EXT_REGION=eu-central-1") {
+		t.Fatalf("expected updated region in cvctl.env, got:\n%s", string(rawCvctl))
+	}
+}
+
+// --ext moves a local service to external; with only some fields given, Check
+// rejects the result before anything is written.
+func TestUpdateExtSwitchesLocalToExternalAndChecksFields(t *testing.T) {
+	tmp := t.TempDir()
+	inst := "my-service-dev"
+	instDir := filepath.Join(tmp, inst)
+	if err := os.MkdirAll(instDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	infraDir := filepath.Join(instDir, "infra")
+	cat := testCatalog(t)
+	stub := &stubRepo{}
+
+	existingCvctlEnv := `CVCTL_INSTANCE=my-service-dev
+CVCTL_ENV=dev
+CVCTL_INFRA_BRANCH=develop
+CVCTL_TRACK_TAG=develop
+CVCTL_INFRA_PATH=.
+CVCTL_STRATEGY=recreate
+CVCTL_SVC_MEDIA_MODE=local
+CVCTL_SVC_MEDIA_VERSION=RELEASE.2024-01-01T00-00-00Z
+CVCTL_SVC_MEDIA_USER=media
+CVCTL_SVC_MEDIA_PASSWORD=existingpass123456789012345678
+CVCTL_SVC_MEDIA_DB=media
+CVCTL_SVC_MEDIA_APP_USER=media-app
+CVCTL_SVC_MEDIA_APP_PASSWORD=existingapppass1234567890123456
+CVCTL_DOMAIN_WEB=web.example.com
+CVCTL_DOMAIN_MEDIA=media.example.com
+`
+	writeTestInfra(t, infraDir, testS3BucketsCompose, testS3BucketsSpec)
+	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
+	if err := os.WriteFile(cvctlEnvPath, []byte(existingCvctlEnv), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	appEnvPath := filepath.Join(instDir, "app.env")
+	if err := os.WriteFile(appEnvPath, []byte(""), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeBytes, err := os.ReadFile(cvctlEnvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e := &Env{
+		FS:          sys.NewOSFS(),
+		DeployRoot:  tmp,
+		StateRoot:   filepath.Join(tmp, "state"),
+		Interactive: false,
+		Catalog:     cat,
+		RepoFactory: func(_, _ string) RepoLike { return stub },
+	}
+
+	_, err = Update(context.Background(), e, inst, UpdateOptions{
+		Ext: map[string]map[string]string{
+			"media": {
+				"region": "eu-central-1",
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	var ie *output.IssuesError
+	if !errors.As(err, &ie) {
+		t.Fatalf("expected *output.IssuesError, got %T: %v", err, err)
+	}
+	missingEndpoint := false
+	for _, is := range ie.Issues {
+		if is.Code == "E_DECISION_MISSING" && strings.Contains(is.Hint, "EXT_ENDPOINT") {
+			missingEndpoint = true
+		}
+	}
+	if !missingEndpoint {
+		t.Fatalf("expected a missing endpoint issue after switching to external, got %v", ie.Issues)
+	}
+
+	afterBytes, err := os.ReadFile(cvctlEnvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeBytes, afterBytes) {
+		t.Fatalf("expected cvctl.env to remain byte-identical, before:\n%s\nafter:\n%s", string(beforeBytes), string(afterBytes))
 	}
 }

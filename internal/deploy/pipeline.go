@@ -2,9 +2,11 @@ package deploy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -18,9 +20,11 @@ import (
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/notify"
+	"github.com/codeavers/cvctl/internal/objstore"
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/registry"
 	"github.com/codeavers/cvctl/internal/render"
+	"github.com/codeavers/cvctl/internal/s3prov"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/kinds"
@@ -34,6 +38,7 @@ type ComposeAPI interface {
 	Pull(ctx context.Context, services ...string) error
 	UpData(ctx context.Context, services []string) error
 	RunHook(ctx context.Context, service, script string) (sys.Result, error)
+	ExecScript(ctx context.Context, service, script string) (sys.Result, error)
 	Up(ctx context.Context) error
 	Logs(ctx context.Context, service string, tail int) (string, error)
 }
@@ -92,6 +97,7 @@ type Deployer struct {
 	Backup         *render.BackupTarget
 	RenderOverride func(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o render.Options) ([]byte, error)
 	RenderTraefik  func(p *contract.Project, d *instance.Decisions, o render.Options) ([]byte, error)
+	ProbeS3        func(ctx context.Context, c objstore.Config, b []objstore.BucketCheck) error
 }
 
 func (d *Deployer) deployRoot() string {
@@ -285,6 +291,11 @@ func (d *Deployer) cvctlSecrets(path string) map[string]string {
 	out := map[string]string{}
 	for k, v := range m {
 		if !strings.HasPrefix(k, "CVCTL_SVC_") {
+			continue
+		}
+		// Bucket names and public URLs are not secret, and an E_S3_PROBE naming
+		// the bucket is what makes it actionable.
+		if strings.Contains(k, "_EXT_BUCKET") || strings.Contains(k, "_EXT_PUBLIC_URL_") {
 			continue
 		}
 		if strings.HasSuffix(k, "_PASSWORD") || strings.Contains(k, "_EXT_") {
@@ -807,6 +818,17 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		}
 	}
 
+	// Step 6b: buckets and the scoped app user of local bucket services. It runs
+	// before the hooks because a migration may already write objects.
+	if err := d.provisionBuckets(ctx, stagingCompose, inst, p, dec, cat, secrets); err != nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
+	}
+	if err := d.probeExternalBuckets(ctx, inst, p, dec, cat, secrets); err != nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
+	}
+
 	// Step 7: Pre-deploy hooks
 	preHooksRan := false
 	for _, hook := range p.X.Hooks.PreDeploy {
@@ -1104,4 +1126,111 @@ func (d *Deployer) removeStaleBackupEnvs(instDir string, keep map[string]map[str
 			_ = fsys.Remove(filepath.Join(instDir, n))
 		}
 	}
+}
+
+// provisionBuckets runs the s3prov script in every local data service whose
+// kind supports buckets and records the buckets it finds but the contract no
+// longer declares in <state>/<inst>/s3-orphans.json.
+func (d *Deployer) provisionBuckets(ctx context.Context, c ComposeAPI, inst string, p *contract.Project, dec *instance.Decisions, cat kinds.Catalog, secrets map[string]string) error {
+	orphans := map[string][]string{}
+	for _, ds := range p.Data {
+		sd := dec.Services[ds.Name]
+		if sd.Mode != "local" || !cat[ds.Kind].Buckets {
+			continue
+		}
+		buckets := p.Buckets(ds.Name)
+		if len(buckets) == 0 {
+			buckets = []contract.Bucket{{Name: sd.Creds.DB}}
+		}
+		script := s3prov.Script(buckets, sd.Creds.AppUser, sd.Creds.AppPassword, s3prov.PolicyName)
+		res, err := c.ExecScript(ctx, ds.Name, script)
+		if err != nil {
+			detail := strings.TrimSpace(string(res.Stderr))
+			if detail == "" {
+				detail = err.Error()
+			}
+			redacted := lastLines(redact(detail, secrets), 20)
+			return &output.Error{
+				Code:    "E_S3_PROVISION",
+				Message: ds.Name + ": " + redacted,
+				Hint:    "check the " + ds.Name + " container: cvctl logs " + inst,
+			}
+		}
+		if o := s3prov.Orphans(res.Stdout, buckets); len(o) > 0 {
+			orphans[ds.Name] = o
+		}
+	}
+	path := filepath.Join(d.stateRoot(), inst, "s3-orphans.json")
+	if len(orphans) == 0 {
+		if err := d.fs().Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return orphansErr(path, err)
+		}
+		return nil
+	}
+	data, err := json.Marshal(orphans)
+	if err == nil {
+		err = d.fs().WriteFile(path, append(data, '\n'), 0o640, deployOwner)
+	}
+	if err != nil {
+		return orphansErr(path, err)
+	}
+	return nil
+}
+
+func orphansErr(path string, err error) error {
+	return &output.Error{
+		Code:    "E_S3_PROVISION",
+		Message: fmt.Sprintf("recording orphan buckets in %s: %v", path, err),
+		Hint:    "check the permissions of " + filepath.Dir(path),
+	}
+}
+
+func (d *Deployer) probeS3(ctx context.Context, c objstore.Config, b []objstore.BucketCheck) error {
+	if d.ProbeS3 != nil {
+		return d.ProbeS3(ctx, c, b)
+	}
+	hc := &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	return objstore.ProbeBuckets(ctx, c, b, hc)
+}
+
+func (d *Deployer) probeExternalBuckets(ctx context.Context, inst string, p *contract.Project, dec *instance.Decisions, cat kinds.Catalog, secrets map[string]string) error {
+	for _, ds := range p.Data {
+		sd := dec.Services[ds.Name]
+		if sd.Mode != "external" || !cat[ds.Kind].Buckets {
+			continue
+		}
+		cfg := objstore.Config{
+			Endpoint:  sd.External["endpoint"],
+			Region:    sd.External["region"],
+			AccessKey: sd.External["access_key"],
+			SecretKey: sd.External["secret_key"],
+		}
+		var checks []objstore.BucketCheck
+		buckets := p.Buckets(ds.Name)
+		if len(buckets) == 0 {
+			checks = append(checks, objstore.BucketCheck{
+				Name: sd.External["bucket"],
+			})
+		} else {
+			for _, b := range buckets {
+				low := strings.ToLower(b.Name)
+				check := objstore.BucketCheck{
+					Name: sd.External["bucket_"+low],
+				}
+				if b.Public {
+					check.PublicURL = sd.External["public_url_"+low]
+				}
+				checks = append(checks, check)
+			}
+		}
+		if err := d.probeS3(ctx, cfg, checks); err != nil {
+			return err
+		}
+	}
+	return nil
 }

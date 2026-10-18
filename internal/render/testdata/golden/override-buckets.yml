@@ -1,0 +1,48 @@
+networks:
+  app: {}
+  data:
+    internal: true
+  edge:
+    external: true
+    name: cvctl-edge
+services:
+  api:
+    env_file:
+      - /srv/inst/proj-dev/app.env
+    image: ghcr.io/org/project-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    networks:
+      app: {}
+      data: {}
+      edge:
+        aliases:
+          - proj-dev-api
+    restart: unless-stopped
+  media:
+    command:
+      - server
+      - /data
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    environment:
+      MINIO_ROOT_PASSWORD: rootpassword
+      MINIO_ROOT_USER: rootuser
+    healthcheck:
+      test:
+        - CMD
+        - mc
+        - ready
+        - local
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    networks:
+      data: {}
+      edge:
+        aliases:
+          - proj-dev-media
+    restart: unless-stopped
+    volumes:
+      - media-data:/data
+volumes:
+  media-data:
+    name: proj-dev_media-data

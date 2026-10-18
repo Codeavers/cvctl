@@ -63,6 +63,7 @@ jobs:
           docker logs cvctl-traefik > /tmp/e2e-deploy-logs/traefik.log 2>&1 || true
           docker logs registry > /tmp/e2e-deploy-logs/registry.log 2>&1 || true
           journalctl -u cvctl-agent --no-pager > /tmp/e2e-deploy-logs/agent.log 2>&1 || true
+          sudo sh -c 'cat /etc/traefik/dynamic/*.yml' > /tmp/e2e-deploy-logs/traefik-dynamic.yml 2>&1 || true
           for c in $(docker ps -a --filter "name=demo-dev" --format '{{.Names}}'); do
             docker logs "$c" > "/tmp/e2e-deploy-logs/$c.log" 2>&1 || true
           done

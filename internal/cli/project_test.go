@@ -16,6 +16,7 @@ import (
 
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/notify"
+	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/project"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/kinds"
@@ -385,6 +386,108 @@ func TestProjectUsageErrorsCarryCodes(t *testing.T) {
 	if code != 2 || !strings.Contains(out, "E_USAGE_DOMAIN") {
 		t.Fatalf("--domain: code %d out=%s", code, out)
 	}
+	code, out, _ = run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--ext", "NOEQUALS", "--json")
+	if code != 2 || !strings.Contains(out, "E_USAGE_EXT") {
+		t.Fatalf("--ext: code %d out=%s", code, out)
+	}
+}
+
+func TestProjectAddExtValidation(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra-source")
+	writeCLIInfra(t, infraDir)
+
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stub := &cliStubRepo{infraSource: infraDir}
+
+	oldEnv := newProjectEnv
+	t.Cleanup(func() { newProjectEnv = oldEnv })
+
+	newProjectEnv = func(o projectOpts) (*project.Env, error) {
+		return &project.Env{
+			FS:          sys.NewOSFS(),
+			DeployRoot:  tmp,
+			StateRoot:   filepath.Join(tmp, "state"),
+			Catalog:     cat,
+			Interactive: false,
+			RepoFactory: func(dir, _ string) project.RepoLike {
+				r := *stub
+				r.dir = dir
+				return &r
+			},
+		}, nil
+	}
+
+	// Unknown service gives exit 2 and E_PROJECT_UNKNOWN_SERVICE
+	code, out, _ := run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--ext", "unknown.region=auto", "--json")
+	if code != 2 || !strings.Contains(out, "E_PROJECT_UNKNOWN_SERVICE") {
+		t.Fatalf("expected exit 2 and E_PROJECT_UNKNOWN_SERVICE, got code %d out: %s", code, out)
+	}
+
+	// Service in local mode gives exit 2 and E_USAGE_INVALID
+	code, out, _ = run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--ext", "db.region=auto", "--json")
+	if code != 2 || !strings.Contains(out, "E_USAGE_INVALID") {
+		t.Fatalf("expected exit 2 and E_USAGE_INVALID, got code %d out: %s", code, out)
+	}
+}
+
+func TestParseExtSecretAbsentFromError(t *testing.T) {
+	// Secret value passed after "="
+	_, err := parseExt([]string{"secrettoken=SUPERSECRETVALUE123"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var ue *output.UsageError
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *output.UsageError, got %T", err)
+	}
+	var oe *output.Error
+	if !errors.As(ue.Err, &oe) {
+		t.Fatalf("expected *output.Error, got %T", ue.Err)
+	}
+	if oe.Code != "E_USAGE_EXT" {
+		t.Fatalf("expected code E_USAGE_EXT, got %q", oe.Code)
+	}
+	if strings.Contains(oe.Message, "SUPERSECRETVALUE123") {
+		t.Fatalf("error message echoes secret value: %s", oe.Message)
+	}
+	if strings.Contains(oe.Hint, "SUPERSECRETVALUE123") {
+		t.Fatalf("error hint echoes secret value: %s", oe.Hint)
+	}
+	if !strings.Contains(oe.Message, "secrettoken") {
+		t.Fatalf("expected target in error message, got: %s", oe.Message)
+	}
+
+	// Secret-like value without "="
+	_, err = parseExt([]string{"TOPSECRETTOKENWITHOUTPARAM"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.As(err, &ue) || !errors.As(ue.Err, &oe) {
+		t.Fatalf("expected UsageError with output.Error, got %v", err)
+	}
+	if oe.Code != "E_USAGE_EXT" {
+		t.Fatalf("expected code E_USAGE_EXT, got %q", oe.Code)
+	}
+	if strings.Contains(oe.Message, "TOPSECRETTOKENWITHOUTPARAM") {
+		t.Fatalf("error message echoes secret value: %s", oe.Message)
+	}
+	if strings.Contains(oe.Hint, "TOPSECRETTOKENWITHOUTPARAM") {
+		t.Fatalf("error hint echoes secret value: %s", oe.Hint)
+	}
+
+	// Also verify via CLI run
+	code, out, _ := run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--ext", "secrettoken=SUPERSECRETVALUE123", "--json")
+	if code != 2 {
+		t.Fatalf("expected code 2, got %d", code)
+	}
+	if strings.Contains(out, "SUPERSECRETVALUE123") {
+		t.Fatalf("CLI output echoed secret value: %s", out)
+	}
 }
 
 func TestSetEnvValueRequiredCode(t *testing.T) {
@@ -453,6 +556,9 @@ type cliNoopCompose struct{}
 func (cliNoopCompose) Config(context.Context) error           { return nil }
 func (cliNoopCompose) Pull(context.Context, ...string) error  { return nil }
 func (cliNoopCompose) UpData(context.Context, []string) error { return nil }
+func (cliNoopCompose) ExecScript(context.Context, string, string) (sys.Result, error) {
+	return sys.Result{}, nil
+}
 func (cliNoopCompose) RunHook(context.Context, string, string) (sys.Result, error) {
 	return sys.Result{}, nil
 }

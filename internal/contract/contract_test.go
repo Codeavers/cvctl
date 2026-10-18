@@ -1,11 +1,14 @@
 package contract
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/codeavers/cvctl/internal/envspec"
+	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/kinds"
 )
 
@@ -39,6 +42,13 @@ func TestValidateFixtures(t *testing.T) {
 		"spec-template-domain":   "E_CONTRACT_SPEC_TEMPLATE_REF",
 		"spec-template-var":      "E_CONTRACT_SPEC_TEMPLATE_REF",
 		"verify-service":         "E_CONTRACT_VERIFY_SERVICE",
+		"s3-valid":               "",
+		"s3-not-s3":              "E_CONTRACT_S3_NOT_S3",
+		"s3-bucket-name":         "E_CONTRACT_S3_BUCKET_NAME",
+		"s3-route-no-public":     "E_CONTRACT_S3_ROUTE_NO_PUBLIC",
+		"s3-public-no-route":     "E_CONTRACT_S3_PUBLIC_NO_ROUTE",
+		"expose-data-nobuckets":  "E_CONTRACT_EXPOSE_DATA",
+		"expose-data-badport":    "E_CONTRACT_EXPOSE_DATA",
 	}
 	for name, want := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -174,5 +184,129 @@ func TestContractHealthPort(t *testing.T) {
 		if issue.Code == "E_CONTRACT_HEALTH_PORT" {
 			t.Fatalf("unexpected E_CONTRACT_HEALTH_PORT when port is set: %+v", issue)
 		}
+	}
+}
+
+func TestS3Buckets(t *testing.T) {
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load("testdata/s3-valid", cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mediaDs *DataService
+	for i := range p.Data {
+		if p.Data[i].Name == "media" {
+			mediaDs = &p.Data[i]
+			break
+		}
+	}
+	if mediaDs == nil {
+		t.Fatal("media service not found in p.Data")
+	}
+	if mediaDs.ExposePort != 9000 {
+		t.Fatalf("ExposePort = %d, want 9000", mediaDs.ExposePort)
+	}
+
+	bks := p.Buckets("media")
+	if len(bks) != 2 {
+		t.Fatalf("Buckets(media) count = %d, want 2", len(bks))
+	}
+	if bks[0].Name != "prescriptions" || bks[0].Public {
+		t.Fatalf("first bucket = %+v, want prescriptions (private)", bks[0])
+	}
+	if bks[1].Name != "products" || !bks[1].Public {
+		t.Fatalf("second bucket = %+v, want products (public)", bks[1])
+	}
+
+	pub := p.PublicBuckets("media")
+	if len(pub) != 1 || pub[0].Name != "products" || !pub[0].Public {
+		t.Fatalf("PublicBuckets(media) = %+v, want [products]", pub)
+	}
+
+	if len(p.Buckets("nonexistent")) != 0 {
+		t.Fatalf("Buckets(nonexistent) = %+v, want empty", p.Buckets("nonexistent"))
+	}
+	if len(p.PublicBuckets("nonexistent")) != 0 {
+		t.Fatalf("PublicBuckets(nonexistent) = %+v, want empty", p.PublicBuckets("nonexistent"))
+	}
+}
+
+func TestS3ComposeInvalidShape(t *testing.T) {
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	composePath := filepath.Join(dir, "compose.yml")
+	badCompose := `x-cvctl:
+  s3: invalid
+services:
+  api:
+    image: ghcr.io/x/api:1
+    labels: { cvctl.role: app }
+`
+	if err := os.WriteFile(composePath, []byte(badCompose), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Load(dir, cat)
+	if err == nil {
+		t.Fatal("expected error for invalid s3 shape, got nil")
+	}
+	outErr, ok := err.(*output.Error)
+	if !ok || outErr.Code != "E_CONTRACT_COMPOSE_INVALID" {
+		t.Fatalf("want E_CONTRACT_COMPOSE_INVALID, got %v", err)
+	}
+}
+
+func TestS3SpecValidation(t *testing.T) {
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load("testdata/s3-valid", cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	baseVars := func() map[string]envspec.Var {
+		return map[string]envspec.Var{
+			"S3_ENDPOINT":             {Source: "service", Service: "media"},
+			"S3_BUCKET_PRODUCTS":      {Source: "service", Service: "media"},
+			"S3_PUBLIC_URL_PRODUCTS":  {Source: "service", Service: "media"},
+			"S3_BUCKET_PRESCRIPTIONS": {Source: "service", Service: "media"},
+		}
+	}
+
+	// S3_BUCKET is rejected when buckets are declared
+	varsWithBucket := baseVars()
+	varsWithBucket["S3_BUCKET"] = envspec.Var{Source: "service", Service: "media"}
+	issues := Validate(p, cat, &envspec.Spec{Vars: varsWithBucket})
+	var found bool
+	for _, issue := range issues {
+		if issue.Code == "E_CONTRACT_SPEC_SERVICE_VAR" && strings.Contains(issue.Message, "var S3_BUCKET ") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected E_CONTRACT_SPEC_SERVICE_VAR for S3_BUCKET when buckets are declared, got %+v", issues)
+	}
+
+	// S3_PUBLIC_URL_PRESCRIPTIONS is rejected (prescriptions is private)
+	varsWithPrivateURL := baseVars()
+	varsWithPrivateURL["S3_PUBLIC_URL_PRESCRIPTIONS"] = envspec.Var{Source: "service", Service: "media"}
+	issues = Validate(p, cat, &envspec.Spec{Vars: varsWithPrivateURL})
+	found = false
+	for _, issue := range issues {
+		if issue.Code == "E_CONTRACT_SPEC_SERVICE_VAR" && strings.Contains(issue.Message, "var S3_PUBLIC_URL_PRESCRIPTIONS ") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected E_CONTRACT_SPEC_SERVICE_VAR for S3_PUBLIC_URL_PRESCRIPTIONS, got %+v", issues)
 	}
 }

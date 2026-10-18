@@ -1,0 +1,32 @@
+x-cvctl:
+  health:
+    service: api
+    http: /health
+    port: 3000
+    timeout: 30s
+  s3:
+    media:
+      buckets:
+        products: { public: true }
+        prescriptions: {}
+
+services:
+  api:
+    image: ghcr.io/x/api:1
+    labels:
+      cvctl.role: app
+      cvctl.expose: "3000"
+    environment:
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET_PRODUCTS: ${S3_BUCKET_PRODUCTS}
+      S3_PUBLIC_URL_PRODUCTS: ${S3_PUBLIC_URL_PRODUCTS}
+      S3_BUCKET_PRESCRIPTIONS: ${S3_BUCKET_PRESCRIPTIONS}
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+  media:
+    labels:
+      cvctl.kind: s3
+      cvctl.env: S3
+      cvctl.expose: "9000"

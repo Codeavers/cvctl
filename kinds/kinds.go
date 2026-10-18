@@ -40,12 +40,14 @@ type Kind struct {
 	External          []string          `yaml:"external"`
 	Health            []string          `yaml:"health"`
 	RestoreCheck      string            `yaml:"restore_check"`
+	Buckets           bool              `yaml:"buckets"`
 }
 
 type Catalog map[string]Kind
 
 type Credentials struct {
-	User, Password, DB string
+	User, Password, DB   string
+	AppUser, AppPassword string
 }
 
 func Load() (Catalog, error) { return LoadFS(embedded) }
@@ -102,8 +104,10 @@ func validate(k Kind) error {
 	// quoting; kinds with shell health checks must not put it there.
 	if len(k.Health) > 0 && k.Health[0] == "CMD-SHELL" {
 		for _, e := range append(slices.Clone(k.Health), k.Command...) {
-			if strings.Contains(e, "{password}") {
-				return invalid(k.Name, "{password} must not appear in command or health when health uses CMD-SHELL")
+			for _, placeholder := range []string{"{password}", "{app_password}"} {
+				if strings.Contains(e, placeholder) {
+					return invalid(k.Name, fmt.Sprintf("%s must not appear in command or health when health uses CMD-SHELL", placeholder))
+				}
 			}
 		}
 	}
@@ -120,18 +124,24 @@ func invalid(name, msg string) *output.Error {
 
 // Substitute replaces placeholders literally, without escaping.
 func (k Kind) Substitute(s string, c Credentials) string {
-	return strings.NewReplacer("{user}", c.User, "{password}", c.Password, "{db}", c.DB).Replace(s)
+	return strings.NewReplacer(
+		"{user}", c.User, "{password}", c.Password, "{db}", c.DB,
+		"{app_user}", c.AppUser, "{app_password}", c.AppPassword,
+	).Replace(s)
 }
 
 func (k Kind) LocalVars(prefix, host string, c Credentials) map[string]string {
 	out := make(map[string]string, len(k.Env))
 	for key, tpl := range k.Env {
 		user, pass := c.User, c.Password
+		appUser, appPass := c.AppUser, c.AppPassword
 		if strings.Contains(tpl, "://") {
 			user, pass = escapeUserinfo(user), escapeUserinfo(pass)
+			appUser, appPass = escapeUserinfo(appUser), escapeUserinfo(appPass)
 		}
 		v := strings.NewReplacer(
 			"{user}", user, "{password}", pass, "{db}", c.DB,
+			"{app_user}", appUser, "{app_password}", appPass,
 			"{host}", host, "{port}", strconv.Itoa(k.Port),
 		).Replace(tpl)
 		out[prefix+"_"+strings.ToUpper(key)] = v
@@ -161,6 +171,15 @@ func (k Kind) ContainerEnvFor(c Credentials) map[string]string {
 		out[key] = k.Substitute(tpl, c)
 	}
 	return out
+}
+
+func (k Kind) UsesApp() bool {
+	for _, tpl := range k.Env {
+		if strings.Contains(tpl, "{app_user}") || strings.Contains(tpl, "{app_password}") {
+			return true
+		}
+	}
+	return false
 }
 
 func (k Kind) ImageFor(version string) (string, error) {

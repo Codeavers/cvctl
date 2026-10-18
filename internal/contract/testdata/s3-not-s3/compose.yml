@@ -1,0 +1,26 @@
+x-cvctl:
+  health:
+    service: api
+    http: /health
+    port: 3000
+    timeout: 30s
+  s3:
+    db:
+      buckets:
+        products: { public: true }
+
+services:
+  api:
+    image: ghcr.io/x/api:1
+    labels:
+      cvctl.role: app
+      cvctl.expose: "3000"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+  db:
+    labels:
+      cvctl.kind: postgres
+      cvctl.version: "16"
+      cvctl.env: DB

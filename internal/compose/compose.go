@@ -93,6 +93,18 @@ func (p Project) RunHook(ctx context.Context, service, script string) (sys.Resul
 	return res, nil
 }
 
+// ExecScript runs script with sh inside the running container of service. The
+// script goes on stdin so secrets it carries never appear in argv.
+func (p Project) ExecScript(ctx context.Context, service, script string) (sys.Result, error) {
+	cmd := p.Cmd("exec", "-T", service, "sh", "-s")
+	cmd.Stdin = []byte(script)
+	res, err := p.Run.Run(ctx, cmd)
+	if err != nil || res.ExitCode != 0 {
+		return res, p.composeErr(cmd, res, err)
+	}
+	return res, nil
+}
+
 func (p Project) Up(ctx context.Context) error {
 	cmd := p.Cmd("up", "-d", "--remove-orphans")
 	res, err := p.Run.Run(ctx, cmd)

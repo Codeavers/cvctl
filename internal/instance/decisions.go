@@ -4,6 +4,7 @@ package instance
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -100,6 +101,14 @@ func Read(path string, p *contract.Project) (*Decisions, error) {
 		}
 	}
 	for _, ds := range p.Data {
+		if ds.ExposePort != 0 {
+			n := contract.Normalize(ds.Name)
+			if v, ok := m[domPrefix+n]; ok {
+				d.Domains[ds.Name] = v
+			}
+		}
+	}
+	for _, ds := range p.Data {
 		pre := svcPrefix + contract.Normalize(ds.Name) + "_"
 		var sd ServiceDecision
 		found := false
@@ -125,11 +134,33 @@ func Read(path string, p *contract.Project) (*Decisions, error) {
 				sd.Creds.Password = v
 			case rest == "DB":
 				sd.Creds.DB = v
+			case rest == "APP_USER":
+				sd.Creds.AppUser = v
+			case rest == "APP_PASSWORD":
+				sd.Creds.AppPassword = v
 			case strings.HasPrefix(rest, extInfix[1:]):
 				if sd.External == nil {
 					sd.External = map[string]string{}
 				}
-				sd.External[strings.ToLower(strings.TrimPrefix(rest, extInfix[1:]))] = v
+				fieldUpper := strings.TrimPrefix(rest, extInfix[1:])
+				matched := false
+				for _, b := range p.Buckets(ds.Name) {
+					norm := contract.Normalize(b.Name)
+					low := strings.ToLower(b.Name)
+					if fieldUpper == "BUCKET_"+norm {
+						sd.External["bucket_"+low] = v
+						matched = true
+						break
+					}
+					if fieldUpper == "PUBLIC_URL_"+norm {
+						sd.External["public_url_"+low] = v
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					sd.External[strings.ToLower(fieldUpper)] = v
+				}
 			default:
 				continue
 			}
@@ -178,8 +209,10 @@ func (d *Decisions) Entries() map[string]string {
 		set(pre+"USER", s.Creds.User)
 		set(pre+"PASSWORD", s.Creds.Password)
 		set(pre+"DB", s.Creds.DB)
+		set(pre+"APP_USER", s.Creds.AppUser)
+		set(pre+"APP_PASSWORD", s.Creds.AppPassword)
 		for f, v := range s.External {
-			set(pre+"EXT_"+strings.ToUpper(f), v)
+			set(pre+"EXT_"+contract.Normalize(f), v)
 		}
 	}
 	for name, v := range d.Domains {
@@ -319,7 +352,11 @@ var (
 	digestRe   = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	// identRe limits user and db names: they end up inside shell
 	// healthchecks (postgres uses CMD-SHELL with user and db).
-	identRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+	identRe   = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+	appUserRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+	// S3 bucket naming without dots: what the provisioning script creates and
+	// what S3_BUCKET hands the app.
+	bucketNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
 	// volumeRe is docker's own volume-name rule.
 	volumeRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 )
@@ -336,6 +373,34 @@ func validHostname(h string) bool {
 		}
 	}
 	return true
+}
+
+func validPublicURL(raw string) bool {
+	if strings.HasSuffix(raw, "/") {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	if u.Hostname() == "" {
+		return false
+	}
+	// The value is a base the app and the probe append "/<key>" to.
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
+		return false
+	}
+	return true
+}
+
+func instName(d *Decisions) string {
+	if d.Instance == "" {
+		return "<inst>"
+	}
+	return d.Instance
 }
 
 // Check reports every gap or invalid value; issues are sorted so output is
@@ -396,6 +461,27 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 		kind := cat[ds.Kind]
 		switch s.Mode {
 		case "local":
+			if d.Env == "prod" && len(p.PublicBuckets(ds.Name)) > 0 {
+				inst := d.Instance
+				if inst == "" {
+					inst = "<inst>"
+				}
+				add("E_S3_PUBLIC_LOCAL_PROD", ds.Name, fmt.Sprintf("public bucket on local %s service is not allowed in prod", ds.Name),
+					fmt.Sprintf("switch %s to external storage: cvctl project update %s --ext %s.endpoint=<url> (the service needs cvctl.external: allowed)", ds.Name, inst, ds.Name))
+			}
+			if kind.Buckets && len(p.Buckets(ds.Name)) == 0 && s.Creds.DB != "" && !bucketNameRe.MatchString(s.Creds.DB) {
+				add("E_DECISION_INVALID", ds.Name, fmt.Sprintf("bucket name %q (from %sDB) is not a valid S3 bucket name", s.Creds.DB, pre),
+					"declare the buckets in x-cvctl.s3."+ds.Name+".buckets, or set "+pre+"DB to 3-63 lowercase letters, digits and hyphens")
+			}
+			if ds.ExposePort != 0 {
+				n := contract.Normalize(ds.Name)
+				if dom := d.Domains[ds.Name]; dom == "" {
+					add("E_DECISION_MISSING", ds.Name, "exposed service has no domain", "cvctl project update "+instName(d)+" (or set CVCTL_DOMAIN_"+n+")")
+				} else if !validHostname(dom) {
+					add("E_DECISION_INVALID", ds.Name, fmt.Sprintf("domain %q is not a valid hostname", dom),
+						"set CVCTL_DOMAIN_"+n+" to lowercase labels of letters, digits and hyphens separated by dots")
+				}
+			}
 			for _, f := range []struct{ name, ph, val string }{
 				{"USER", "{user}", s.Creds.User},
 				{"PASSWORD", "{password}", s.Creds.Password},
@@ -403,6 +489,20 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 			} {
 				if f.val == "" && kindUses(kind, f.ph) {
 					add("E_DECISION_MISSING", ds.Name, "local service credential "+strings.ToLower(f.name)+" is not set", "set "+pre+f.name)
+				}
+			}
+			if kind.UsesApp() {
+				if s.Creds.AppUser == "" || s.Creds.AppPassword == "" {
+					inst := d.Instance
+					if inst == "" {
+						inst = "<inst>"
+					}
+					add("E_DECISION_MISSING", ds.Name, "local service app credentials are not set",
+						fmt.Sprintf("cvctl project update %s", inst))
+				}
+				if s.Creds.AppUser != "" && !appUserRe.MatchString(s.Creds.AppUser) {
+					add("E_DECISION_INVALID", ds.Name, "app_user must match [A-Za-z0-9_-]+",
+						"set "+pre+"APP_USER to letters, digits, underscores and hyphens only")
 				}
 			}
 			for _, f := range []struct{ name, val string }{{"USER", s.Creds.User}, {"DB", s.Creds.DB}} {
@@ -425,10 +525,51 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 					"add label cvctl.external: allowed to the service or use local mode")
 				continue
 			}
-			for _, f := range kind.External {
-				if s.External[f] == "" {
-					add("E_DECISION_MISSING", ds.Name, fmt.Sprintf("external field %q is not set", f),
-						"set "+pre+"EXT_"+strings.ToUpper(f))
+			buckets := p.Buckets(ds.Name)
+			if len(buckets) > 0 {
+				for _, f := range kind.External {
+					if f == "bucket" {
+						continue
+					}
+					if s.External[f] == "" {
+						add("E_DECISION_MISSING", ds.Name, fmt.Sprintf("external field %q is not set", f),
+							"set "+pre+"EXT_"+contract.Normalize(f))
+					}
+				}
+				for _, b := range buckets {
+					bKey := "bucket_" + strings.ToLower(b.Name)
+					if s.External[bKey] == "" {
+						add("E_DECISION_MISSING", ds.Name, fmt.Sprintf("external field %q is not set", bKey),
+							"set "+pre+"EXT_"+contract.Normalize(bKey))
+					}
+					if b.Public {
+						pKey := "public_url_" + strings.ToLower(b.Name)
+						if s.External[pKey] == "" {
+							add("E_DECISION_MISSING", ds.Name, fmt.Sprintf("external field %q is not set", pKey),
+								"set "+pre+"EXT_"+contract.Normalize(pKey))
+						}
+					}
+				}
+			} else {
+				for _, f := range kind.External {
+					if s.External[f] == "" {
+						add("E_DECISION_MISSING", ds.Name, fmt.Sprintf("external field %q is not set", f),
+							"set "+pre+"EXT_"+contract.Normalize(f))
+					}
+				}
+			}
+			var extKeys []string
+			for k := range s.External {
+				if strings.HasPrefix(k, "public_url_") {
+					extKeys = append(extKeys, k)
+				}
+			}
+			sort.Strings(extKeys)
+			for _, k := range extKeys {
+				val := s.External[k]
+				if val != "" && !validPublicURL(val) {
+					add("E_DECISION_INVALID", ds.Name, fmt.Sprintf("external field %q must be an absolute http(s) URL without a trailing slash", k),
+						"set "+pre+"EXT_"+contract.Normalize(k)+" to an absolute https:// or http:// URL without a trailing slash")
 				}
 			}
 		default:

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/codeavers/cvctl/internal/backup"
 	"github.com/codeavers/cvctl/internal/compose"
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/deploy"
@@ -158,6 +160,8 @@ func newStatusCmd() *cobra.Command {
 			if deploy.BackupTargetFrom(e.Host, e.Secrets) == nil && e.backupsNeeded(instances) {
 				warnings = append(warnings, "backups are not configured: check CVCTL_S3_* and /etc/cvctl/secrets (run cvctl init)")
 			}
+
+			warnings = append(warnings, e.s3Warnings(instances)...)
 
 			rep := statusReport{
 				Instances: items,
@@ -338,4 +342,60 @@ func (e *OpsEnv) backupsNeeded(instances []string) bool {
 		}
 	}
 	return false
+}
+
+func (e *OpsEnv) s3Warnings(instances []string) []string {
+	cat := e.Catalog
+	if cat == nil {
+		var err error
+		if cat, err = kinds.Load(); err != nil {
+			return nil
+		}
+	}
+	loader := backup.LoadInstance(e.deployRoot(), cat)
+	var warnings []string
+	for _, inst := range instances {
+		p, d, err := loader(inst)
+		if err != nil {
+			continue
+		}
+		for _, ds := range p.Data {
+			sd := d.Services[ds.Name]
+			if d.Env != "prod" && sd.Mode == "local" {
+				if pub := p.PublicBuckets(ds.Name); len(pub) > 0 {
+					names := make([]string, 0, len(pub))
+					for _, b := range pub {
+						names = append(names, b.Name)
+					}
+					slices.Sort(names)
+					warnings = append(warnings, fmt.Sprintf("%s: %s serves public bucket(s) %s from local silo; use external storage in prod", inst, ds.Name, strings.Join(names, ", ")))
+				}
+			}
+			if k, ok := cat[ds.Kind]; ok && k.Buckets && sd.Mode == "external" {
+				warnings = append(warnings, fmt.Sprintf("%s: %s is external; cvctl does not back it up (use bucket versioning or replication)", inst, ds.Name))
+			}
+		}
+
+		orphansPath := filepath.Join(e.stateRoot(), inst, "s3-orphans.json")
+		if data, err := e.fs().ReadFile(orphansPath); err == nil {
+			var orphans map[string][]string
+			if err := json.Unmarshal(data, &orphans); err == nil && len(orphans) > 0 {
+				svcs := make([]string, 0, len(orphans))
+				for svc := range orphans {
+					svcs = append(svcs, svc)
+				}
+				slices.Sort(svcs)
+				for _, svc := range svcs {
+					names := orphans[svc]
+					if len(names) == 0 {
+						continue
+					}
+					sortedNames := slices.Clone(names)
+					slices.Sort(sortedNames)
+					warnings = append(warnings, fmt.Sprintf("%s: %s has buckets no longer declared: %s", inst, svc, strings.Join(sortedNames, ", ")))
+				}
+			}
+		}
+	}
+	return warnings
 }

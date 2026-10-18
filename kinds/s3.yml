@@ -11,9 +11,10 @@ container_env:
 env:
   ENDPOINT: "http://{host}:{port}"
   BUCKET: "{db}"
-  ACCESS_KEY: "{user}"
-  SECRET_KEY: "{password}"
+  ACCESS_KEY: "{app_user}"
+  SECRET_KEY: "{app_password}"
   REGION: us-east-1
 backup: volume
 external: [endpoint, bucket, access_key, secret_key, region]
 health: ["CMD", "mc", "ready", "local"]
+buckets: true

@@ -208,3 +208,287 @@ func TestProbeErrorHasNoSecret(t *testing.T) {
 		}
 	})
 }
+
+func TestProbeBucketsHappyPath(t *testing.T) {
+	memStores := map[string]*memStore{
+		"products":      newMemStore(),
+		"prescriptions": newMemStore(),
+	}
+	factory := func(c Config) (Store, error) {
+		s, ok := memStores[c.Bucket]
+		if !ok {
+			return nil, errors.New("unknown bucket: " + c.Bucket)
+		}
+		return s, nil
+	}
+
+	var publicGets []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := strings.TrimPrefix(r.URL.Path, "/")
+		publicGets = append(publicGets, key)
+		data, ok := memStores["products"].objects[key]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+	}))
+	defer srv.Close()
+
+	checks := []BucketCheck{
+		{Name: "products", PublicURL: srv.URL},
+		{Name: "prescriptions", PublicURL: ""},
+	}
+	base := Config{
+		Endpoint:  "https://s3.example.com",
+		Region:    "us-east-1",
+		AccessKey: "testaccess",
+		SecretKey: "testsecret",
+	}
+
+	if err := probeBuckets(context.Background(), base, checks, srv.Client(), factory); err != nil {
+		t.Fatalf("ProbeBuckets failed: %v", err)
+	}
+
+	for name, s := range memStores {
+		if len(s.putKeys) != 1 || len(s.getKeys) != 1 || len(s.delKeys) != 1 {
+			t.Fatalf("bucket %s expected 1 put/get/del, got put=%d get=%d del=%d", name, len(s.putKeys), len(s.getKeys), len(s.delKeys))
+		}
+		if !strings.HasPrefix(s.putKeys[0], "_cvctl-probe-") {
+			t.Fatalf("bucket %s probe object name should start with _cvctl-probe-, got %q", name, s.putKeys[0])
+		}
+		hexPart := strings.TrimPrefix(s.putKeys[0], "_cvctl-probe-")
+		if len(hexPart) != 16 {
+			t.Fatalf("bucket %s expected 16 hex chars after _cvctl-probe-, got %q", name, hexPart)
+		}
+		if len(s.objects) != 0 {
+			t.Fatalf("bucket %s probe object was not cleaned up: %v", name, s.objects)
+		}
+	}
+
+	if len(publicGets) != 1 {
+		t.Fatalf("expected 1 public GET for products, got %d", len(publicGets))
+	}
+	if publicGets[0] != memStores["products"].putKeys[0] {
+		t.Fatalf("public GET requested key %q, want %q", publicGets[0], memStores["products"].putKeys[0])
+	}
+}
+
+func TestProbeBucketsPublicGetWrongBody(t *testing.T) {
+	mem := newMemStore()
+	factory := func(c Config) (Store, error) { return mem, nil }
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("wrong-body-content"))
+	}))
+	defer srv.Close()
+
+	checks := []BucketCheck{{Name: "products", PublicURL: srv.URL}}
+	base := Config{Endpoint: "https://s3.example.com"}
+
+	err := probeBuckets(context.Background(), base, checks, srv.Client(), factory)
+	if err == nil {
+		t.Fatal("expected error on wrong public body, got nil")
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) {
+		t.Fatalf("expected *output.Error, got %T (%v)", err, err)
+	}
+	if oe.Code != "E_S3_PROBE" {
+		t.Fatalf("code = %q, want E_S3_PROBE", oe.Code)
+	}
+	if !strings.Contains(oe.Message, "bucket products: public-get:") {
+		t.Fatalf("message = %q, want bucket products: public-get: ...", oe.Message)
+	}
+	if oe.Hint != "check the bucket name, the app keys and the public URL: cvctl project update <inst>" {
+		t.Fatalf("hint = %q", oe.Hint)
+	}
+	if len(mem.objects) != 0 {
+		t.Fatalf("probe object should be deleted on failure, remaining: %v", mem.objects)
+	}
+}
+
+func TestProbeBucketsPublicGet403(t *testing.T) {
+	mem := newMemStore()
+	factory := func(c Config) (Store, error) { return mem, nil }
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("Forbidden"))
+	}))
+	defer srv.Close()
+
+	checks := []BucketCheck{{Name: "products", PublicURL: srv.URL}}
+	base := Config{Endpoint: "https://s3.example.com"}
+
+	err := probeBuckets(context.Background(), base, checks, srv.Client(), factory)
+	if err == nil {
+		t.Fatal("expected error on 403, got nil")
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) {
+		t.Fatalf("expected *output.Error, got %T (%v)", err, err)
+	}
+	if oe.Code != "E_S3_PROBE" {
+		t.Fatalf("code = %q, want E_S3_PROBE", oe.Code)
+	}
+	if !strings.Contains(oe.Message, "bucket products: public-get:") || !strings.Contains(oe.Message, "403") {
+		t.Fatalf("message = %q, want bucket products: public-get: ... 403", oe.Message)
+	}
+	if len(mem.objects) != 0 {
+		t.Fatalf("probe object should be deleted on failure, remaining: %v", mem.objects)
+	}
+}
+
+func TestProbeBucketsSecretNeverLeaked(t *testing.T) {
+	const (
+		accessKey = "AKIASECRETACCESSKEY99"
+		secretKey = "superSecretKeyValueThatMustNeverLeakUnderAnyCircumstances"
+	)
+
+	t.Run("error message containing secret", func(t *testing.T) {
+		mem := newMemStore()
+		mem.putErr = errors.New("connection failed with secret " + secretKey + " and key " + accessKey)
+		factory := func(c Config) (Store, error) { return mem, nil }
+
+		base := Config{
+			Endpoint:  "https://s3.example.com",
+			AccessKey: accessKey,
+			SecretKey: secretKey,
+		}
+		err := probeBuckets(context.Background(), base, []BucketCheck{{Name: "b1"}}, nil, factory)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		var oe *output.Error
+		if !errors.As(err, &oe) {
+			t.Fatalf("expected *output.Error, got %T", err)
+		}
+		if oe.Code != "E_S3_PROBE" {
+			t.Fatalf("code = %q, want E_S3_PROBE", oe.Code)
+		}
+		fullText := oe.Error() + " " + oe.Hint
+		if strings.Contains(fullText, secretKey) {
+			t.Fatalf("secret key leaked in error: %q", fullText)
+		}
+		if strings.Contains(fullText, accessKey) {
+			t.Fatalf("access key leaked in error: %q", fullText)
+		}
+	})
+
+	t.Run("403 AccessDenied from real client against fake S3", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Error><Code>AccessDenied</Code><Message>Access Denied.</Message><RequestId>1</RequestId></Error>`))
+		}))
+		defer srv.Close()
+
+		base := Config{
+			Endpoint:  srv.URL,
+			Region:    "us-east-1",
+			AccessKey: accessKey,
+			SecretKey: secretKey,
+		}
+		err := ProbeBuckets(context.Background(), base, []BucketCheck{{Name: "bucket1"}}, srv.Client())
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		var oe *output.Error
+		if !errors.As(err, &oe) {
+			t.Fatalf("expected *output.Error, got %T", err)
+		}
+		if oe.Code != "E_S3_PROBE" {
+			t.Fatalf("code = %q, want E_S3_PROBE", oe.Code)
+		}
+		if !strings.Contains(oe.Message, "bucket bucket1: put: AccessDenied") {
+			t.Fatalf("message = %q, want bucket bucket1: put: AccessDenied", oe.Message)
+		}
+		fullText := oe.Error() + " " + oe.Hint
+		if strings.Contains(fullText, secretKey) || strings.Contains(fullText, accessKey) {
+			t.Fatalf("credentials leaked: %q", fullText)
+		}
+		if strings.Contains(fullText, "X-Amz-Signature") || strings.Contains(fullText, "?") {
+			t.Fatalf("query string/signature leaked: %q", fullText)
+		}
+	})
+}
+
+func TestProbeBucketsStepsErrorMapping(t *testing.T) {
+	base := Config{Endpoint: "https://s3.example.com"}
+
+	t.Run("put error", func(t *testing.T) {
+		mem := newMemStore()
+		mem.putErr = errors.New("disk full")
+		err := probeBuckets(context.Background(), base, []BucketCheck{{Name: "b1"}}, nil, func(c Config) (Store, error) { return mem, nil })
+		var oe *output.Error
+		if !errors.As(err, &oe) || !strings.Contains(oe.Message, "bucket b1: put: disk full") {
+			t.Fatalf("expected put error, got %v", err)
+		}
+	})
+
+	t.Run("get error", func(t *testing.T) {
+		mem := newMemStore()
+		mem.getErr = errors.New("read timeout")
+		err := probeBuckets(context.Background(), base, []BucketCheck{{Name: "b1"}}, nil, func(c Config) (Store, error) { return mem, nil })
+		var oe *output.Error
+		if !errors.As(err, &oe) || !strings.Contains(oe.Message, "bucket b1: get: read timeout") {
+			t.Fatalf("expected get error, got %v", err)
+		}
+		if len(mem.objects) != 0 {
+			t.Fatalf("expected object deleted on get failure, remaining: %v", mem.objects)
+		}
+	})
+
+	t.Run("compare error", func(t *testing.T) {
+		mem := newMemStore()
+		factory := func(c Config) (Store, error) { return &corruptGetStore{memStore: mem}, nil }
+		err := probeBuckets(context.Background(), base, []BucketCheck{{Name: "b1"}}, nil, factory)
+		var oe *output.Error
+		if !errors.As(err, &oe) || !strings.Contains(oe.Message, "bucket b1: compare: content mismatch") {
+			t.Fatalf("expected compare error, got %v", err)
+		}
+		if len(mem.objects) != 0 {
+			t.Fatalf("expected object deleted on compare failure, remaining: %v", mem.objects)
+		}
+	})
+
+	t.Run("delete error", func(t *testing.T) {
+		mem := newMemStore()
+		mem.delErr = errors.New("permission denied")
+		err := probeBuckets(context.Background(), base, []BucketCheck{{Name: "b1"}}, nil, func(c Config) (Store, error) { return mem, nil })
+		var oe *output.Error
+		if !errors.As(err, &oe) || !strings.Contains(oe.Message, "bucket b1: delete: permission denied") {
+			t.Fatalf("expected delete error, got %v", err)
+		}
+	})
+
+	t.Run("redirect rejected in public get", func(t *testing.T) {
+		mem := newMemStore()
+		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer target.Close()
+
+		redirectSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL, http.StatusMovedPermanently)
+		}))
+		defer redirectSrv.Close()
+
+		err := probeBuckets(context.Background(), base, []BucketCheck{{Name: "b1", PublicURL: redirectSrv.URL}}, redirectSrv.Client(), func(c Config) (Store, error) { return mem, nil })
+		var oe *output.Error
+		if !errors.As(err, &oe) || !strings.Contains(oe.Message, "bucket b1: public-get: HTTP 301") {
+			t.Fatalf("expected 301 error without redirect, got %v", err)
+		}
+	})
+}
+
+type corruptGetStore struct {
+	*memStore
+}
+
+func (c *corruptGetStore) Get(ctx context.Context, key string) ([]byte, error) {
+	return []byte("corrupt-data"), nil
+}

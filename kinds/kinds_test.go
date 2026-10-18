@@ -73,9 +73,116 @@ func TestLocalVarsEscapes(t *testing.T) {
 
 func TestLocalVarsLiteralWithoutScheme(t *testing.T) {
 	k := mustLoad(t)["s3"]
-	got := k.LocalVars("S3", "h", Credentials{User: "a@b", Password: "p/q", DB: "bk"})
-	if got["S3_SECRET_KEY"] != "p/q" || got["S3_ENDPOINT"] != "http://h:9000" || got["S3_BUCKET"] != "bk" {
+	got := k.LocalVars("S3", "h", Credentials{User: "root-u", Password: "root-p", DB: "bk", AppUser: "a@b", AppPassword: "p/q"})
+	if got["S3_SECRET_KEY"] != "p/q" || got["S3_ACCESS_KEY"] != "a@b" || got["S3_ENDPOINT"] != "http://h:9000" || got["S3_BUCKET"] != "bk" {
 		t.Errorf("got %v", got)
+	}
+}
+
+func TestS3Buckets(t *testing.T) {
+	c := mustLoad(t)
+	if !c["s3"].Buckets {
+		t.Errorf("s3.Buckets = false, want true")
+	}
+	if c["postgres"].Buckets {
+		t.Errorf("postgres.Buckets = true, want false")
+	}
+	if c["redis"].Buckets {
+		t.Errorf("redis.Buckets = true, want false")
+	}
+}
+
+func TestLocalVarsS3AppKeys(t *testing.T) {
+	k := mustLoad(t)["s3"]
+	creds := Credentials{
+		User:        "root-u",
+		Password:    "root-p",
+		DB:          "my-bucket",
+		AppUser:     "app-u",
+		AppPassword: "app-p",
+	}
+	got := k.LocalVars("S3", "s3-host", creds)
+	if got["S3_ACCESS_KEY"] != "app-u" {
+		t.Errorf("S3_ACCESS_KEY = %q, want app user %q", got["S3_ACCESS_KEY"], "app-u")
+	}
+	if got["S3_SECRET_KEY"] != "app-p" {
+		t.Errorf("S3_SECRET_KEY = %q, want app password %q", got["S3_SECRET_KEY"], "app-p")
+	}
+	if got["S3_ACCESS_KEY"] == "root-u" || got["S3_SECRET_KEY"] == "root-p" {
+		t.Errorf("LocalVars returned root keys instead of app keys")
+	}
+	if got["S3_ENDPOINT"] != "http://s3-host:9000" {
+		t.Errorf("S3_ENDPOINT = %q, want %q", got["S3_ENDPOINT"], "http://s3-host:9000")
+	}
+	if got["S3_BUCKET"] != "my-bucket" {
+		t.Errorf("S3_BUCKET = %q, want %q", got["S3_BUCKET"], "my-bucket")
+	}
+}
+
+func TestContainerEnvForS3RootKeys(t *testing.T) {
+	k := mustLoad(t)["s3"]
+	creds := Credentials{
+		User:        "root-u",
+		Password:    "root-p",
+		DB:          "my-bucket",
+		AppUser:     "app-u",
+		AppPassword: "app-p",
+	}
+	env := k.ContainerEnvFor(creds)
+	if env["MINIO_ROOT_USER"] != "root-u" {
+		t.Errorf("MINIO_ROOT_USER = %q, want root user %q", env["MINIO_ROOT_USER"], "root-u")
+	}
+	if env["MINIO_ROOT_PASSWORD"] != "root-p" {
+		t.Errorf("MINIO_ROOT_PASSWORD = %q, want root password %q", env["MINIO_ROOT_PASSWORD"], "root-p")
+	}
+}
+
+func TestUsesApp(t *testing.T) {
+	c := mustLoad(t)
+	if !c["s3"].UsesApp() {
+		t.Errorf("s3.UsesApp() = false, want true")
+	}
+	if c["postgres"].UsesApp() {
+		t.Errorf("postgres.UsesApp() = true, want false")
+	}
+	if c["redis"].UsesApp() {
+		t.Errorf("redis.UsesApp() = true, want false")
+	}
+}
+
+func TestLocalVarsEscapesAppCredentials(t *testing.T) {
+	k := Kind{
+		Name: "custom",
+		Port: 9000,
+		Env: map[string]string{
+			"URL": "s3://{app_user}:{app_password}@{host}:{port}/{db}",
+		},
+	}
+	got := k.LocalVars("CUSTOM", "s3-host", Credentials{
+		AppUser:     "app@user",
+		AppPassword: "p@ss:w/rd",
+		DB:          "bucket",
+	})
+	want := map[string]string{
+		"CUSTOM_URL": "s3://app%40user:p%40ss%3Aw%2Frd@s3-host:9000/bucket",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestSubstituteAppCredentials(t *testing.T) {
+	k := Kind{}
+	got := k.Substitute("app={app_user}:{app_password} root={user}:{password} db={db}", Credentials{
+		User:        "ru",
+		Password:    "rp",
+		DB:          "mydb",
+		AppUser:     "au",
+		AppPassword: "ap",
+	})
+	want := "app=au:ap root=ru:rp db=mydb"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
@@ -146,15 +253,17 @@ func TestLoadRejectsEnvExternalMismatch(t *testing.T) {
 func TestLoadRejectsPasswordInShellHealth(t *testing.T) {
 	base := "name: a\nimage: x:{version}\nversions: [\"1\"]\ndefault_version: \"1\"\nbackup: none\n"
 	for name, extra := range map[string]string{
-		"health":  "health: [CMD-SHELL, \"ping {password}\"]\n",
-		"command": "command: [serve, \"{password}\"]\nhealth: [CMD-SHELL, ping]\n",
+		"health":               "health: [CMD-SHELL, \"ping {password}\"]\n",
+		"command":              "command: [serve, \"{password}\"]\nhealth: [CMD-SHELL, ping]\n",
+		"health app_password":  "health: [CMD-SHELL, \"ping {app_password}\"]\n",
+		"command app_password": "command: [serve, \"{app_password}\"]\nhealth: [CMD-SHELL, ping]\n",
 	} {
 		_, err := LoadFS(fstest.MapFS{"a.yml": {Data: []byte(base + extra)}})
 		if got := code(t, err); got != "E_KIND_INVALID" {
 			t.Errorf("%s: code = %s", name, got)
 		}
 	}
-	ok := base + "command: [serve, \"{password}\"]\nhealth: [CMD, ping, \"{password}\"]\n"
+	ok := base + "command: [serve, \"{password}\", \"{app_password}\"]\nhealth: [CMD, ping, \"{password}\", \"{app_password}\"]\n"
 	if _, err := LoadFS(fstest.MapFS{"a.yml": {Data: []byte(ok)}}); err != nil {
 		t.Errorf("CMD form rejected: %v", err)
 	}

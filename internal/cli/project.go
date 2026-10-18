@@ -134,6 +134,39 @@ func parseDomains(domainFlags []string) (map[string]string, error) {
 	return out, nil
 }
 
+func parseExt(extFlags []string) (map[string]map[string]string, error) {
+	out := make(map[string]map[string]string)
+	for _, s := range extFlags {
+		target, val, found := strings.Cut(s, "=")
+		if !found {
+			return nil, &output.UsageError{Err: &output.Error{
+				Code:    "E_USAGE_EXT",
+				Message: "invalid --ext flag: expected <svc>.<field>=<value>",
+				Hint:    "pass --ext <svc>.<field>=<value>, for example --ext media.region=auto",
+			}}
+		}
+		svc, field, foundDot := strings.Cut(target, ".")
+		svc = strings.TrimSpace(svc)
+		field = strings.TrimSpace(field)
+		if !foundDot || svc == "" || field == "" {
+			msg := "invalid --ext flag: expected <svc>.<field>=<value>"
+			if strings.TrimSpace(target) != "" {
+				msg = fmt.Sprintf("invalid --ext flag %q: expected <svc>.<field>=<value>", target)
+			}
+			return nil, &output.UsageError{Err: &output.Error{
+				Code:    "E_USAGE_EXT",
+				Message: msg,
+				Hint:    "pass --ext <svc>.<field>=<value>, for example --ext media.region=auto",
+			}}
+		}
+		if out[svc] == nil {
+			out[svc] = make(map[string]string)
+		}
+		out[svc][strings.ToLower(field)] = val
+	}
+	return out, nil
+}
+
 func newProjectCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "project",
@@ -166,12 +199,17 @@ func newProjectAddCmd() *cobra.Command {
 			asJSON, _ := cmd.Flags().GetBool("json")
 			setFlags, _ := cmd.Flags().GetStringArray("set")
 			domainFlags, _ := cmd.Flags().GetStringArray("domain")
+			extFlags, _ := cmd.Flags().GetStringArray("ext")
 
 			setMap, err := parseSet(setFlags)
 			if err != nil {
 				return err
 			}
 			domainMap, err := parseDomains(domainFlags)
+			if err != nil {
+				return err
+			}
+			extMap, err := parseExt(extFlags)
 			if err != nil {
 				return err
 			}
@@ -193,6 +231,7 @@ func newProjectAddCmd() *cobra.Command {
 				Strategy: strategy,
 				Set:      setMap,
 				Domains:  domainMap,
+				Ext:      extMap,
 			})
 			if err != nil {
 				return err
@@ -233,6 +272,7 @@ func newProjectAddCmd() *cobra.Command {
 	cmd.Flags().Bool("non-interactive", false, "never prompt; use defaults and --set values")
 	cmd.Flags().StringArray("set", nil, "pre-seed app.env values (KEY=VALUE, repeatable)")
 	cmd.Flags().StringArray("domain", nil, "domain for exposed service (svc=host, repeatable)")
+	cmd.Flags().StringArray("ext", nil, "pre-seed external service configuration (svc.field=value, repeatable)")
 	return cmd
 }
 
@@ -247,6 +287,12 @@ func newProjectUpdateCmd() *cobra.Command {
 			inst := args[0]
 			nonInt, _ := cmd.Flags().GetBool("non-interactive")
 			asJSON, _ := cmd.Flags().GetBool("json")
+			extFlags, _ := cmd.Flags().GetStringArray("ext")
+
+			extMap, err := parseExt(extFlags)
+			if err != nil {
+				return err
+			}
 
 			e, err := newProjectEnv(projectOpts{
 				NonInteractive: nonInt || asJSON,
@@ -257,7 +303,7 @@ func newProjectUpdateCmd() *cobra.Command {
 				return err
 			}
 
-			res, err := project.Update(cmd.Context(), e, inst)
+			res, err := project.Update(cmd.Context(), e, inst, project.UpdateOptions{Ext: extMap})
 			if err != nil {
 				return err
 			}
@@ -290,6 +336,7 @@ func newProjectUpdateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().Bool("non-interactive", false, "never prompt; use defaults")
+	cmd.Flags().StringArray("ext", nil, "pre-seed external service configuration (svc.field=value, repeatable)")
 	return cmd
 }
 

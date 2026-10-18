@@ -125,15 +125,82 @@ func ServiceVars(p *contract.Project, d *instance.Decisions, cat kinds.Catalog) 
 			return nil, missing("service " + ds.Name)
 		}
 		k := cat[ds.Kind]
+		buckets := p.Buckets(ds.Name)
+		if len(buckets) == 0 {
+			if sd.Mode == "external" {
+				v, err := k.ExternalVars(ds.EnvPrefix, sd.External)
+				if err != nil {
+					return nil, err
+				}
+				out[ds.Name] = v
+				continue
+			}
+			out[ds.Name] = k.LocalVars(ds.EnvPrefix, ds.Name, sd.Creds)
+			continue
+		}
+
 		if sd.Mode == "external" {
-			v, err := k.ExternalVars(ds.EnvPrefix, sd.External)
-			if err != nil {
-				return nil, err
+			v := make(map[string]string, len(k.External)+len(buckets))
+			for _, f := range k.External {
+				if f == "bucket" {
+					continue
+				}
+				val, ok := sd.External[f]
+				if !ok || val == "" {
+					return nil, &output.Error{
+						Code:    "E_KIND_EXTERNAL_MISSING",
+						Message: fmt.Sprintf("external %s requires field %q", k.Name, f),
+						Hint:    fmt.Sprintf("provide all of: %s", strings.Join(k.External, ", ")),
+					}
+				}
+				v[ds.EnvPrefix+"_"+strings.ToUpper(f)] = val
+			}
+			for _, b := range buckets {
+				norm := contract.Normalize(b.Name)
+				low := strings.ToLower(b.Name)
+				bKey := "bucket_" + low
+				val, ok := sd.External[bKey]
+				if !ok || val == "" {
+					return nil, &output.Error{
+						Code:    "E_KIND_EXTERNAL_MISSING",
+						Message: fmt.Sprintf("external %s requires field %q", k.Name, bKey),
+						Hint:    "provide field " + bKey,
+					}
+				}
+				v[ds.EnvPrefix+"_BUCKET_"+norm] = val
+				if b.Public {
+					pKey := "public_url_" + low
+					pval, ok := sd.External[pKey]
+					if !ok || pval == "" {
+						return nil, &output.Error{
+							Code:    "E_KIND_EXTERNAL_MISSING",
+							Message: fmt.Sprintf("external %s requires field %q", k.Name, pKey),
+							Hint:    "provide field " + pKey,
+						}
+					}
+					v[ds.EnvPrefix+"_PUBLIC_URL_"+norm] = pval
+				}
 			}
 			out[ds.Name] = v
 			continue
 		}
-		out[ds.Name] = k.LocalVars(ds.EnvPrefix, ds.Name, sd.Creds)
+
+		// Local mode with declared buckets: drop <P>_BUCKET, set <P>_BUCKET_<B>
+		// and, for public buckets, <P>_PUBLIC_URL_<B>.
+		v := k.LocalVars(ds.EnvPrefix, ds.Name, sd.Creds)
+		delete(v, ds.EnvPrefix+"_BUCKET")
+		for _, b := range buckets {
+			norm := contract.Normalize(b.Name)
+			v[ds.EnvPrefix+"_BUCKET_"+norm] = b.Name
+			if b.Public {
+				domain := d.Domains[ds.Name]
+				if domain == "" {
+					return nil, missing("domain of " + ds.Name)
+				}
+				v[ds.EnvPrefix+"_PUBLIC_URL_"+norm] = "https://" + domain + "/" + b.Name
+			}
+		}
+		out[ds.Name] = v
 	}
 	return out, nil
 }
@@ -196,16 +263,31 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 		if err != nil {
 			return nil, err
 		}
+		isExposedBucket := k.Buckets && ds.ExposePort > 0
+		isBackedUp := o.Backup != nil && (ds.Backup == "wal-g" || ds.Backup == "volume")
+		if isBackedUp {
+			usesBackupNet = true
+		}
+		var nets any
+		if isExposedBucket {
+			m := map[string]any{
+				"data": map[string]any{},
+				"edge": map[string]any{"aliases": []string{routeName(d, ds.Name)}},
+			}
+			if isBackedUp {
+				m[backupNetwork] = map[string]any{}
+			}
+			nets = m
+		} else if isBackedUp {
+			nets = []string{"data", backupNetwork}
+		} else {
+			nets = []string{"data"}
+		}
 		svc := map[string]any{
 			"image":    image,
 			"restart":  "unless-stopped",
-			"networks": []string{"data"},
+			"networks": nets,
 			"volumes":  []string{ds.Name + "-data:" + k.VolumePath},
-		}
-		// ds.Backup is the cvctl.backup label resolved over the kind default.
-		if o.Backup != nil && (ds.Backup == "wal-g" || ds.Backup == "volume") {
-			svc["networks"] = []string{"data", backupNetwork}
-			usesBackupNet = true
 		}
 		if o.Backup != nil && ds.Backup == "wal-g" {
 			dir := o.BackupEnvDir

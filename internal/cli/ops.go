@@ -57,6 +57,12 @@ func (e *OpsEnv) stateRoot() string {
 	if e.StateRoot != "" {
 		return e.StateRoot
 	}
+	if e.Deployer != nil && e.Deployer.StateRoot != "" {
+		return e.Deployer.StateRoot
+	}
+	if e.Store != nil && e.Store.Root() != "" {
+		return e.Store.Root()
+	}
 	return "/var/lib/cvctl"
 }
 

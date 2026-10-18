@@ -59,7 +59,7 @@ chmod -R a+rX /tmp/infra.git
 (cd /tmp && sudo -u deployer env HOME=/srv/deploy git config --global --add safe.directory /tmp/infra.git)
 
 echo "=== 3. project add with a postgres service ==="
-add_res=$(cvctl project add file:///tmp/infra.git --name demo --env dev --non-interactive --set GREETING=hello --domain api=api.e2e.local --json)
+add_res=$(cvctl project add file:///tmp/infra.git --name demo --env dev --non-interactive --set GREETING=hello --domain api=api.e2e.local --domain media=media.e2e.local --json)
 echo "$add_res"
 test "$(echo "$add_res" | jq -r '.ok')" = "true"
 test "$(echo "$add_res" | jq -r '.data.status')" = "OK"
@@ -112,7 +112,11 @@ echo "$clean" | jq -e --arg v "$prev" '.data.removed == false and ([.data.volume
 echo "Assert 3: PITR restored only A; previous volume still listed"
 
 echo "=== 7. backup verify -> OK, recorded in status ==="
-ver=$(cvctl backup verify "$INST" --json)
+# verify covers every backed-up service; media (restic volume) needs a snapshot first.
+res=$(cvctl backup now "$INST" media --json)
+echo "$res"
+echo "$res" | jq -e '.ok == true and ([.data.results[] | select(.ok != true)] | length == 0)'
+ver=$(cvctl backup verify "$INST" --json) || { echo "$ver"; false; }
 echo "$ver"
 echo "$ver" | jq -e '.ok == true and ([.data.results[] | select(.ok != true)] | length == 0)'
 state=$(cat "/var/lib/cvctl/${INST}/state.json")
