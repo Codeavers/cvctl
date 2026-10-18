@@ -1151,13 +1151,24 @@ func (d *Deployer) provisionBuckets(ctx context.Context, c ComposeAPI, inst stri
 	path := filepath.Join(d.stateRoot(), inst, "s3-orphans.json")
 	if len(orphans) == 0 {
 		if err := d.fs().Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("remove %s: %w", path, err)
+			return orphansErr(path, err)
 		}
 		return nil
 	}
 	data, err := json.Marshal(orphans)
-	if err != nil {
-		return err
+	if err == nil {
+		err = d.fs().WriteFile(path, append(data, '\n'), 0o640, deployOwner)
 	}
-	return d.fs().WriteFile(path, append(data, '\n'), 0o640, deployOwner)
+	if err != nil {
+		return orphansErr(path, err)
+	}
+	return nil
+}
+
+func orphansErr(path string, err error) error {
+	return &output.Error{
+		Code:    "E_S3_PROVISION",
+		Message: fmt.Sprintf("recording orphan buckets in %s: %v", path, err),
+		Hint:    "check the permissions of " + filepath.Dir(path),
+	}
 }

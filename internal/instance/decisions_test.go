@@ -450,7 +450,7 @@ func TestCheckLocalAppCredentials(t *testing.T) {
 	d.Services["media"] = ServiceDecision{
 		Mode: "local",
 		Creds: kinds.Credentials{
-			User: "media_root", Password: "root-password", DB: "media_db",
+			User: "media_root", Password: "root-password", DB: "mediadb",
 		},
 	}
 	// Missing app creds
@@ -487,6 +487,16 @@ func TestCheckLocalAppCredentials(t *testing.T) {
 	d.Services["media"] = s
 	if is := Check(d, p, cat); len(is) != 0 {
 		t.Fatalf("unexpected issues: %v", is)
+	}
+
+	// Without declared buckets the DB name is the bucket: it must be a valid one.
+	for _, db := range []string{"media_db", "s3", "Media"} {
+		s.Creds.DB = db
+		d.Services["media"] = s
+		bad := issueMsgs(Check(d, p, cat), "E_DECISION_INVALID")
+		if len(bad) != 1 || !strings.Contains(bad[0].Message, "bucket name") {
+			t.Fatalf("DB %q: expected one bucket-name issue, got %v", db, bad)
+		}
 	}
 }
 

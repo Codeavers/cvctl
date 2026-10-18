@@ -354,6 +354,9 @@ var (
 	// healthchecks (postgres uses CMD-SHELL with user and db).
 	identRe   = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 	appUserRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+	// S3 bucket naming without dots: what the provisioning script creates and
+	// what S3_BUCKET hands the app.
+	bucketNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
 	// volumeRe is docker's own volume-name rule.
 	volumeRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 )
@@ -454,6 +457,10 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 				}
 				add("E_S3_PUBLIC_LOCAL_PROD", ds.Name, fmt.Sprintf("public bucket on local %s service is not allowed in prod", ds.Name),
 					fmt.Sprintf("switch %s to external: cvctl project update %s", ds.Name, inst))
+			}
+			if kind.Buckets && len(p.Buckets(ds.Name)) == 0 && s.Creds.DB != "" && !bucketNameRe.MatchString(s.Creds.DB) {
+				add("E_DECISION_INVALID", ds.Name, fmt.Sprintf("bucket name %q (from %sDB) is not a valid S3 bucket name", s.Creds.DB, pre),
+					"declare the buckets in x-cvctl.s3."+ds.Name+".buckets, or set "+pre+"DB to 3-63 lowercase letters, digits and hyphens")
 			}
 			if ds.ExposePort != 0 {
 				n := contract.Normalize(ds.Name)

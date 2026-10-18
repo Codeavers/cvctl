@@ -50,6 +50,7 @@ type fakeCompose struct {
 	failUp      error
 	failExec    error
 	execOutput  []byte
+	execStderr  []byte
 	failLogs    error
 	hookOutputs map[string]sys.Result
 	upCount     int
@@ -106,7 +107,7 @@ func (b *boundCompose) ExecScript(_ context.Context, service, script string) (sy
 	b.fake.calls = append(b.fake.calls, "execscript:"+service)
 	b.fake.invocations = append(b.fake.invocations, composeCall{op: "execscript", override: b.override, envFile: b.envFile, service: service, script: script})
 	if b.fake.failExec != nil {
-		return sys.Result{ExitCode: 1, Stderr: []byte("mc: provisioning failed")}, b.fake.failExec
+		return sys.Result{ExitCode: 1, Stderr: b.fake.execStderr}, b.fake.failExec
 	}
 	return sys.Result{Stdout: b.fake.execOutput}, nil
 }
