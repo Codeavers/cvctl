@@ -139,7 +139,7 @@ func (TraefikStep) Check(ctx context.Context, e *Env) (Plan, error) {
 					"instance _edge networks reconnect on the next init", traefikProject, ProxyNetwork),
 			}
 		}
-	case strings.Contains(string(gwRes.Stderr), "No such network"):
+	case networkMissing(gwRes.Stderr):
 		changes = append(changes, "create network "+ProxyNetwork)
 		actions = append(actions, Action{Kind: "network-create", Target: ProxyNetwork})
 	default:

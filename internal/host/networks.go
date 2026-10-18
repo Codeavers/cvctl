@@ -76,7 +76,7 @@ func networkUsers(ctx context.Context, e *Env, name string) (bool, []string, err
 		return false, nil, sys.CmdErr("E_NETWORK", cmd, res, err, "check that docker is running")
 	}
 	if res.ExitCode != 0 {
-		if strings.Contains(string(res.Stderr), "No such network") {
+		if networkMissing(res.Stderr) {
 			return false, nil, nil
 		}
 		return false, nil, sys.CmdErr("E_NETWORK", cmd, res, nil, "check that docker is running")
@@ -122,4 +122,11 @@ func retireLegacyNetwork(ctx context.Context, e *Env, name, own string) string {
 		return fmt.Sprintf("legacy network %s could not be removed; run `docker network rm %s`", name, name)
 	}
 	return ""
+}
+
+// networkMissing recognizes both wordings Docker uses for an absent network
+// ("No such network: x" on older engines, "network x not found" on newer ones).
+func networkMissing(stderr []byte) bool {
+	s := string(stderr)
+	return strings.Contains(s, "No such network") || (strings.Contains(s, "network ") && strings.Contains(s, " not found"))
 }
