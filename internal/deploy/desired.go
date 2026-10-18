@@ -46,6 +46,8 @@ type Deps struct {
 	Catalog  kinds.Catalog
 	// OCI authenticates contract artifact pulls of OCI sources.
 	OCI infraoci.Auth
+	// Cache holds the instance's validated contracts; nil disables it.
+	Cache *ContractCache
 }
 
 var (
@@ -101,6 +103,7 @@ func SourceDepsWithRoots(inst string, run sys.Runner, host *hostcfg.Config, secr
 		Resolver: resolver,
 		Allowed:  AllowedRegistries(host),
 		OCI:      OCIAuth(host, secrets),
+		Cache:    NewContractCache(fsys, stateRoot, inst),
 	}
 }
 
@@ -289,9 +292,9 @@ func SourceFor(d *instance.Decisions, deps Deps) Source {
 	if d.IsOCI() {
 		switch d.Env {
 		case "dev":
-			return &OCIDevSource{Auth: deps.OCI, Resolver: deps.Resolver, Allowed: deps.Allowed, Catalog: deps.Catalog}
+			return &OCIDevSource{Auth: deps.OCI, Resolver: deps.Resolver, Allowed: deps.Allowed, Catalog: deps.Catalog, Cache: deps.Cache}
 		case "prod":
-			return &OCIProdSource{Auth: deps.OCI, Allowed: deps.Allowed, Catalog: deps.Catalog}
+			return &OCIProdSource{Auth: deps.OCI, Allowed: deps.Allowed, Catalog: deps.Catalog, Cache: deps.Cache}
 		default:
 			return invalidSource{env: d.Env}
 		}

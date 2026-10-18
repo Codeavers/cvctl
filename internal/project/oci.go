@@ -70,17 +70,33 @@ func installOCI(ctx context.Context, e *Env, instDir, ref, tag string) (string, 
 	fctx, cancel := deploy.WithStepTimeout(ctx, timeout, "contract fetch")
 	defer cancel()
 	a := deploy.OCIAuth(e.Host, e.Secrets)
+	fail := func(err error) (string, error) {
+		if terr := deploy.TimeoutError(fctx); terr != nil {
+			return "", terr
+		}
+		return "", deploy.RegistryHint(a.TokenHost, ref, err)
+	}
 	digest, err := infraoci.Resolve(fctx, a, ref, tag)
-	if err == nil {
-		var c *infraoci.Contract
-		if c, err = infraoci.Fetch(fctx, a, ref, digest); err == nil {
-			return digest, infraoci.Extract(e.fs(), instDir, c)
+	if err != nil {
+		return fail(err)
+	}
+	cache := deploy.NewContractCache(e.fs(), e.stateRoot(), filepath.Base(instDir))
+	c, ok := cache.Get(digest)
+	if !ok {
+		if c, err = infraoci.Fetch(fctx, a, ref, digest); err != nil {
+			return fail(err)
+		}
+		cat, err := e.catalog()
+		if err != nil {
+			return "", err
+		}
+		// Only a valid contract is cached; an invalid one is still extracted so
+		// the contract flow reports its issues.
+		if _, verr := deploy.ValidateContract(c, cat); verr == nil {
+			_ = cache.Put(c)
 		}
 	}
-	if terr := deploy.TimeoutError(fctx); terr != nil {
-		return "", terr
-	}
-	return "", err
+	return digest, infraoci.Extract(e.fs(), instDir, c)
 }
 
 var infraPathRe = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)

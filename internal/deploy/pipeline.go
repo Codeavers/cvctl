@@ -1121,6 +1121,8 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		var okErrs []error
 		if err := d.Store.Save(st); err != nil {
 			okErrs = append(okErrs, err)
+		} else {
+			d.pruneContracts(inst, st)
 		}
 		if err := d.Store.Append(inst, state.Event{
 			ID:     deployID,

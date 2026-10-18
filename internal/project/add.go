@@ -865,6 +865,11 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		}
 		infraPath = opts.InfraPath
 	}
+	if isOCI {
+		if err := registry.Allowed(strings.TrimPrefix(repoURL, ociScheme), deploy.AllowedRegistries(e.Host)); err != nil {
+			return nil, err
+		}
+	}
 
 	inst := DeriveInstanceName(repoURL, opts.Project, envName)
 	if err := ValidateInstance(e.deployRoot(), e.stateRoot(), inst, envName); err != nil {

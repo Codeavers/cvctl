@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -70,10 +71,20 @@ func hasInfra(t *state.Desired) bool {
 }
 
 // checkout puts the infra revision of t into <inst>/infra: a git checkout,
-// or for an OCI source the artifact fetched by digest and extracted.
+// or for an OCI source the contract by digest (local cache, else registry)
+// extracted. A revision of the other source kind fails before touching infra/.
 func (d *Deployer) checkout(ctx context.Context, inst string, t state.Desired) error {
+	instDir := filepath.Join(d.deployRoot(), inst)
+	env := d.instanceEnv(instDir)
+	isOCI := env["CVCTL_INFRA_SOURCE"] == instance.SourceOCI
+	switch {
+	case isOCI && t.InfraDigest == "" && t.InfraCommit != "":
+		return revMismatch(inst, "git commit "+commitShort(t.InfraCommit), "oci")
+	case !isOCI && t.InfraDigest != "":
+		return revMismatch(inst, "contract "+RevShort(t), "git")
+	}
 	if t.InfraDigest != "" {
-		return d.installContract(ctx, inst, t.InfraDigest)
+		return d.installContract(ctx, inst, env["CVCTL_INFRA_REF"], t.InfraDigest)
 	}
 	if r := d.repo(inst); r != nil {
 		return r.Checkout(ctx, t.InfraCommit)
@@ -81,7 +92,51 @@ func (d *Deployer) checkout(ctx context.Context, inst string, t state.Desired) e
 	return nil
 }
 
-func (d *Deployer) installContract(ctx context.Context, inst, digest string) error {
+func revMismatch(inst, rev, source string) error {
+	return &output.Error{
+		Code:    "E_DEPLOY_INVALID",
+		Message: fmt.Sprintf("instance %q records %s but its infra source is %s", inst, rev, source),
+		Hint:    "deploy the instance from its current source (cvctl deploy) instead of restoring a revision of the other source",
+	}
+}
+
+// Cache is the contract cache of inst.
+func (d *Deployer) Cache(inst string) *ContractCache {
+	return NewContractCache(d.fs(), d.stateRoot(), inst)
+}
+
+// pruneContracts keeps the cached contracts state references plus the most
+// recent ones; a failure only leaves extra files behind.
+func (d *Deployer) pruneContracts(inst string, st *state.State) {
+	var keep []string
+	for _, t := range []*state.Desired{st.Current, st.Previous} {
+		if t != nil && t.InfraDigest != "" {
+			keep = append(keep, t.InfraDigest)
+		}
+	}
+	_ = d.Cache(inst).Prune(keep...)
+}
+
+func (d *Deployer) tokenHost() string {
+	if d.Host == nil {
+		return ""
+	}
+	return d.Host.TokenHost()
+}
+
+func (d *Deployer) installContract(ctx context.Context, inst, ref, digest string) error {
+	instDir := filepath.Join(d.deployRoot(), inst)
+	cat, err := d.catalog()
+	if err != nil {
+		return err
+	}
+	cache := d.Cache(inst)
+	if c, ok := cache.Get(digest); ok {
+		if _, err := ValidateContract(c, cat); err == nil {
+			_ = cache.Put(c)
+			return infraoci.Extract(d.fs(), instDir, c)
+		}
+	}
 	if d.Contracts == nil {
 		return &output.Error{
 			Code:    "E_DEPLOY_MISCONFIGURED",
@@ -89,8 +144,6 @@ func (d *Deployer) installContract(ctx context.Context, inst, digest string) err
 			Hint:    "deployer has no contract fetcher",
 		}
 	}
-	instDir := filepath.Join(d.deployRoot(), inst)
-	ref := d.infraRef(instDir)
 	if ref == "" {
 		return &output.Error{
 			Code:    "E_INFRA_ARTIFACT",
@@ -109,21 +162,82 @@ func (d *Deployer) installContract(ctx context.Context, inst, digest string) err
 		if terr := TimeoutError(fctx); terr != nil {
 			return terr
 		}
-		return err
+		var oe *output.Error
+		if errors.As(err, &oe) && strings.Contains(oe.Message, "HTTP 404") {
+			e2 := *oe
+			e2.Message += fmt.Sprintf("; %s is not in the local cache and the registry no longer has it under %s: it may belong to a previous CVCTL_INFRA_REF", RevShort(state.Desired{InfraDigest: digest}), ref)
+			err = &e2
+		}
+		return RegistryHint(d.tokenHost(), ref, err)
+	}
+	// An invalid contract is still extracted so the pipeline reports it; only
+	// validated contracts are cached.
+	if _, verr := ValidateContract(c, cat); verr == nil {
+		_ = cache.Put(c)
 	}
 	return infraoci.Extract(d.fs(), instDir, c)
 }
 
-func (d *Deployer) infraRef(instDir string) string {
+func (d *Deployer) instanceEnv(instDir string) map[string]string {
 	raw, err := d.fs().ReadFile(filepath.Join(instDir, "cvctl.env"))
 	if err != nil {
-		return ""
+		return map[string]string{}
 	}
 	m, err := godotenv.Unmarshal(string(raw))
 	if err != nil {
-		return ""
+		return map[string]string{}
 	}
-	return m["CVCTL_INFRA_REF"]
+	return m
+}
+
+// RegistryHint adds to an E_INFRA_ARTIFACT error that ref's host gets no
+// token when it differs from the token host.
+func RegistryHint(tokenHost, ref string, err error) error {
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_INFRA_ARTIFACT" {
+		return err
+	}
+	host := strings.SplitN(ref, "/", 2)[0]
+	if tokenHost == "" || registry.SameHost(host, tokenHost) {
+		return err
+	}
+	e2 := *oe
+	e2.Hint = strings.TrimSpace(e2.Hint + "; the registry token is sent only to " + tokenHost + " (CVCTL_REGISTRY_HOST); " + host + " is accessed anonymously")
+	return &e2
+}
+
+// ValidateContract loads c (allowlist, compose load, env spec) from a temp
+// directory and validates it.
+func ValidateContract(c *infraoci.Contract, cat kinds.Catalog) (*contract.Project, error) {
+	if cat == nil {
+		var err error
+		if cat, err = kinds.Load(); err != nil {
+			return nil, err
+		}
+	}
+	dir, cleanup, err := sys.MkdirTemp("cvctl-contract-")
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	fsys := sys.NewOSFS()
+	for _, f := range []string{"compose.yml", "env.spec.yml"} {
+		if err := fsys.WriteFile(filepath.Join(dir, f), c.Files[f], 0o600, sys.Owner{}); err != nil {
+			return nil, err
+		}
+	}
+	p, err := contract.Load(dir, cat)
+	if err != nil {
+		return nil, instance.WrapLoadErr(err)
+	}
+	spec, err := envspec.Load(filepath.Join(dir, "env.spec.yml"))
+	if err != nil {
+		return nil, err
+	}
+	if is := contract.Validate(p, cat, spec); len(is) > 0 {
+		return nil, instance.WrapLoadErr(&output.IssuesError{Issues: is})
+	}
+	return p, nil
 }
 
 // OCIDevSource tracks <InfraRef>:<track tag> for the contract and the same tag
@@ -133,6 +247,7 @@ type OCIDevSource struct {
 	Resolver registry.Resolver
 	Allowed  []string
 	Catalog  kinds.Catalog
+	Cache    *ContractCache
 }
 
 // OCIProdSource tracks <InfraRef>:<track tag> and takes the app digests from
@@ -141,6 +256,7 @@ type OCIProdSource struct {
 	Auth    infraoci.Auth
 	Allowed []string
 	Catalog kinds.Catalog
+	Cache   *ContractCache
 }
 
 func ociTag(d *instance.Decisions, def string) string {
@@ -150,9 +266,9 @@ func ociTag(d *instance.Decisions, def string) string {
 	return def
 }
 
-// ociContract resolves ref:tag, fetches it by digest and loads its contract
-// (allowlist, compose load and validation) from a temp extraction.
-func ociContract(ctx context.Context, a infraoci.Auth, d *instance.Decisions, tag string, cat kinds.Catalog) (*infraoci.Contract, *contract.Project, error) {
+// ociContract resolves ref:tag and loads and validates that contract, from
+// the cache when it already holds the digest, else fetched and cached.
+func ociContract(ctx context.Context, a infraoci.Auth, cache *ContractCache, d *instance.Decisions, tag string, cat kinds.Catalog) (*infraoci.Contract, *contract.Project, error) {
 	if d == nil || d.InfraRef == "" {
 		return nil, nil, &output.Error{
 			Code:    "E_DECISION_MISSING",
@@ -160,49 +276,31 @@ func ociContract(ctx context.Context, a infraoci.Auth, d *instance.Decisions, ta
 			Hint:    "set CVCTL_INFRA_REF to host/repository",
 		}
 	}
-	if cat == nil {
-		var err error
-		if cat, err = kinds.Load(); err != nil {
-			return nil, nil, err
-		}
-	}
 	digest, err := infraoci.Resolve(ctx, a, d.InfraRef, tag)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, RegistryHint(a.TokenHost, d.InfraRef, err)
+	}
+	if c, ok := cache.Get(digest); ok {
+		if p, err := ValidateContract(c, cat); err == nil {
+			return c, p, nil
+		}
 	}
 	c, err := infraoci.Fetch(ctx, a, d.InfraRef, digest)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, RegistryHint(a.TokenHost, d.InfraRef, err)
 	}
-	dir, cleanup, err := sys.MkdirTemp("cvctl-contract-")
+	p, err := ValidateContract(c, cat)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer cleanup()
-	fsys := sys.NewOSFS()
-	for _, f := range []string{"compose.yml", "env.spec.yml"} {
-		if err := fsys.WriteFile(filepath.Join(dir, f), c.Files[f], 0o600, sys.Owner{}); err != nil {
-			return nil, nil, err
-		}
-	}
-	p, err := contract.Load(dir, cat)
-	if err != nil {
-		return nil, nil, instance.WrapLoadErr(err)
-	}
-	spec, err := envspec.Load(filepath.Join(dir, "env.spec.yml"))
-	if err != nil {
-		return nil, nil, err
-	}
-	if is := contract.Validate(p, cat, spec); len(is) > 0 {
-		return nil, nil, instance.WrapLoadErr(&output.IssuesError{Issues: is})
-	}
+	_ = cache.Put(c)
 	return c, p, nil
 }
 
 // Desired resolves the contract digest and the app image digests for the track tag.
 func (s *OCIDevSource) Desired(ctx context.Context, d *instance.Decisions) (state.Desired, error) {
 	tag := ociTag(d, "develop")
-	c, p, err := ociContract(ctx, s.Auth, d, tag, s.Catalog)
+	c, p, err := ociContract(ctx, s.Auth, s.Cache, d, tag, s.Catalog)
 	if err != nil {
 		return state.Desired{}, err
 	}
@@ -224,7 +322,7 @@ func (s *OCIDevSource) Desired(ctx context.Context, d *instance.Decisions) (stat
 
 // Desired resolves the contract digest and reads the pinned app digests from prod.env.
 func (s *OCIProdSource) Desired(ctx context.Context, d *instance.Decisions) (state.Desired, error) {
-	c, p, err := ociContract(ctx, s.Auth, d, ociTag(d, "main"), s.Catalog)
+	c, p, err := ociContract(ctx, s.Auth, s.Cache, d, ociTag(d, "main"), s.Catalog)
 	if err != nil {
 		return state.Desired{}, err
 	}

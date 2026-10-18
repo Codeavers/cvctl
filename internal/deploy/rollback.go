@@ -245,6 +245,7 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 	if err := d.Store.Save(st); err != nil {
 		return Result{}, err
 	}
+	d.pruneContracts(inst, st)
 
 	if err := d.Store.Append(inst, state.Event{
 		ID:     deployID,

@@ -2,6 +2,7 @@ package project
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"github.com/codeavers/cvctl/internal/deploy"
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/infraoci"
+	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/internal/sys/systest"
@@ -95,7 +97,7 @@ func newOCIRig(t *testing.T) *ociRig {
 		DeployRoot:  tmp,
 		StateRoot:   stateRoot,
 		Catalog:     cat,
-		Host:        &hostcfg.Config{Registries: "ghcr.io/codeavers"},
+		Host:        &hostcfg.Config{Registries: "ghcr.io/codeavers," + host + "/org"},
 		Deployer:    deployer,
 		Resolver:    fixedResolver{},
 		RepoFactory: func(string, string) RepoLike { return gitForbidden{t} },
@@ -305,5 +307,27 @@ func TestAddInfraPath(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "infra-path") {
 			t.Errorf("--infra-path %q: %v", bad, err)
 		}
+	}
+}
+
+func TestAddOCIRefMustBeAllowedRegistry(t *testing.T) {
+	rig := newOCIRig(t)
+	rig.env.Host.Registries = "ghcr.io/codeavers"
+	_, err := Add(context.Background(), rig.env, "oci://"+rig.ref, AddOptions{Project: "demo", Env: "dev"})
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_REGISTRY_NOT_ALLOWED" {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Stat(rig.instDir); err == nil {
+		t.Fatal("instance dir created for a disallowed ref")
+	}
+}
+
+func TestAddOCIErrorNamesTokenHost(t *testing.T) {
+	rig := newOCIRig(t)
+	_, err := Add(context.Background(), rig.env, "oci://"+rig.ref, AddOptions{Project: "demo", Env: "dev"})
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_INFRA_ARTIFACT" || !strings.Contains(oe.Hint, "sent only to ghcr.io (CVCTL_REGISTRY_HOST)") {
+		t.Fatalf("err = %+v", oe)
 	}
 }
