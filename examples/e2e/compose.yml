@@ -48,6 +48,7 @@ services:
       cvctl.kind: s3
       cvctl.env: S3
       cvctl.expose: "9000"
+      cvctl.external: allowed
     deploy:
       resources:
         limits:

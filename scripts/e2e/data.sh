@@ -112,7 +112,11 @@ echo "$clean" | jq -e --arg v "$prev" '.data.removed == false and ([.data.volume
 echo "Assert 3: PITR restored only A; previous volume still listed"
 
 echo "=== 7. backup verify -> OK, recorded in status ==="
-ver=$(cvctl backup verify "$INST" --json)
+# verify covers every backed-up service; media (restic volume) needs a snapshot first.
+res=$(cvctl backup now "$INST" media --json)
+echo "$res"
+echo "$res" | jq -e '.ok == true and ([.data.results[] | select(.ok != true)] | length == 0)'
+ver=$(cvctl backup verify "$INST" --json) || { echo "$ver"; false; }
 echo "$ver"
 echo "$ver" | jq -e '.ok == true and ([.data.results[] | select(.ok != true)] | length == 0)'
 state=$(cat "/var/lib/cvctl/${INST}/state.json")
