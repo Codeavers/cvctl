@@ -385,6 +385,53 @@ func TestProjectUsageErrorsCarryCodes(t *testing.T) {
 	if code != 2 || !strings.Contains(out, "E_USAGE_DOMAIN") {
 		t.Fatalf("--domain: code %d out=%s", code, out)
 	}
+	code, out, _ = run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--ext", "NOEQUALS", "--json")
+	if code != 2 || !strings.Contains(out, "E_USAGE_EXT") {
+		t.Fatalf("--ext: code %d out=%s", code, out)
+	}
+}
+
+func TestProjectAddExtValidation(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra-source")
+	writeCLIInfra(t, infraDir)
+
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stub := &cliStubRepo{infraSource: infraDir}
+
+	oldEnv := newProjectEnv
+	t.Cleanup(func() { newProjectEnv = oldEnv })
+
+	newProjectEnv = func(o projectOpts) (*project.Env, error) {
+		return &project.Env{
+			FS:          sys.NewOSFS(),
+			DeployRoot:  tmp,
+			StateRoot:   filepath.Join(tmp, "state"),
+			Catalog:     cat,
+			Interactive: false,
+			RepoFactory: func(dir, _ string) project.RepoLike {
+				r := *stub
+				r.dir = dir
+				return &r
+			},
+		}, nil
+	}
+
+	// Unknown service gives exit 2 and E_PROJECT_UNKNOWN_SERVICE
+	code, out, _ := run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--ext", "unknown.region=auto", "--json")
+	if code != 2 || !strings.Contains(out, "E_PROJECT_UNKNOWN_SERVICE") {
+		t.Fatalf("expected exit 2 and E_PROJECT_UNKNOWN_SERVICE, got code %d out: %s", code, out)
+	}
+
+	// Service in local mode gives exit 2 and E_USAGE_INVALID
+	code, out, _ = run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--ext", "db.region=auto", "--json")
+	if code != 2 || !strings.Contains(out, "E_USAGE_INVALID") {
+		t.Fatalf("expected exit 2 and E_USAGE_INVALID, got code %d out: %s", code, out)
+	}
 }
 
 func TestSetEnvValueRequiredCode(t *testing.T) {

@@ -129,6 +129,11 @@ type AddOptions struct {
 	Strategy string
 	Set      map[string]string
 	Domains  map[string]string
+	Ext      map[string]map[string]string
+}
+
+type UpdateOptions struct {
+	Ext map[string]map[string]string
 }
 
 type AddResult struct {
@@ -298,23 +303,26 @@ func DeriveInstanceName(repoURL, project, env string) string {
 	return fmt.Sprintf("%s-%s", name, strings.ToLower(env))
 }
 
-func promptDataServiceMode(ctx context.Context, e *Env, dsName string) (string, error) {
+func promptDataServiceMode(ctx context.Context, e *Env, dsName string, defaultMode string) (string, error) {
+	if defaultMode == "" {
+		defaultMode = "local"
+	}
 	for {
-		ans := "local"
+		ans := defaultMode
 		if e.Prompt != nil {
 			var err error
 			ans, err = e.Prompt.Ask(hostcfg.Question{
 				Key:     "data_" + dsName + "_mode",
 				Prompt:  fmt.Sprintf("Mode for data service %s (local|external)", dsName),
 				Options: []string{"local", "external"},
-			}, "local")
+			}, defaultMode)
 			if err != nil {
 				return "", err
 			}
 		}
 		ans = strings.ToLower(strings.TrimSpace(ans))
 		if ans == "" {
-			ans = "local"
+			ans = defaultMode
 		}
 		if ans == "local" || ans == "external" {
 			return ans, nil
@@ -362,72 +370,211 @@ func loadContractAndSpec(fsys sys.FS, infraDir string, cat kinds.Catalog) (*cont
 
 func promptDataServices(ctx context.Context, e *Env, cat kinds.Catalog, p *contract.Project, d *instance.Decisions) error {
 	for _, ds := range p.Data {
-		sd, ok := d.Services[ds.Name]
-		if ok && sd.Mode != "" {
-			continue
-		}
+		k := cat[ds.Kind]
+		sd := d.Services[ds.Name]
 
-		mode := "local"
-		if ds.ExternalAllowed {
-			var err error
-			mode, err = promptDataServiceMode(ctx, e, ds.Name)
-			if err != nil {
-				return err
+		mode := sd.Mode
+		if mode == "" {
+			mode = "local"
+			defaultMode := "local"
+			if d.Env == "prod" && len(p.PublicBuckets(ds.Name)) > 0 {
+				defaultMode = "external"
 			}
+			if ds.ExternalAllowed {
+				var err error
+				mode, err = promptDataServiceMode(ctx, e, ds.Name, defaultMode)
+				if err != nil {
+					return err
+				}
+			}
+			sd.Mode = mode
 		}
 
 		if mode == "local" {
-			user := strings.ToLower(contract.Normalize(ds.Name))
-			user = strings.ReplaceAll(user, "-", "_")
-			user = strings.ReplaceAll(user, ".", "_")
-			if !identRe.MatchString(user) {
-				return &output.Error{
-					Code:    "E_DECISION_INVALID",
-					Message: fmt.Sprintf("service %s normalizes to invalid identifier %q", ds.Name, user),
-					Hint:    "use characters a-z, 0-9 and _",
+			if len(sd.External) > 0 {
+				return &output.UsageError{
+					Err: &output.Error{
+						Code:    "E_USAGE_INVALID",
+						Message: fmt.Sprintf("service %q is in local mode, --ext is only valid for external services", ds.Name),
+						Hint:    "switch service to external mode or remove --ext",
+					},
 				}
 			}
-			pass, err := randomPassword32()
-			if err != nil {
-				return err
+
+			user := sd.Creds.User
+			db := sd.Creds.DB
+			pass := sd.Creds.Password
+
+			if user == "" {
+				user = strings.ToLower(contract.Normalize(ds.Name))
+				user = strings.ReplaceAll(user, "-", "_")
+				user = strings.ReplaceAll(user, ".", "_")
+				if !identRe.MatchString(user) {
+					return &output.Error{
+						Code:    "E_DECISION_INVALID",
+						Message: fmt.Sprintf("service %s normalizes to invalid identifier %q", ds.Name, user),
+						Hint:    "use characters a-z, 0-9 and _",
+					}
+				}
 			}
-			d.Services[ds.Name] = instance.ServiceDecision{
-				Mode:    "local",
-				Version: ds.Version,
-				Creds: kinds.Credentials{
-					User:     user,
-					DB:       user,
-					Password: pass,
-				},
+			if db == "" {
+				db = user
 			}
-		} else {
-			extMap := make(map[string]string)
-			k := cat[ds.Kind]
-			for _, field := range k.External {
-				fieldLower := strings.ToLower(field)
-				isSec := strings.Contains(fieldLower, "password") ||
-					strings.Contains(fieldLower, "secret") ||
-					strings.Contains(fieldLower, "key") ||
-					strings.Contains(fieldLower, "token") ||
-					strings.Contains(fieldLower, "url")
-				val := ""
-				if e.Prompt != nil {
-					ans, err := e.Prompt.Ask(hostcfg.Question{
-						Key:    "data_" + ds.Name + "_ext_" + field,
-						Prompt: fmt.Sprintf("%s external %s", ds.Name, field),
-						Secret: isSec,
-					}, "")
+			if pass == "" {
+				var err error
+				pass, err = randomPassword32()
+				if err != nil {
+					return err
+				}
+			}
+
+			appUser := sd.Creds.AppUser
+			appPass := sd.Creds.AppPassword
+			if k.UsesApp() {
+				if appUser == "" {
+					appUser = ds.Name + "-app"
+				}
+				if appPass == "" {
+					var err error
+					appPass, err = randomPassword32()
 					if err != nil {
 						return err
 					}
-					val = ans
 				}
-				extMap[field] = val
 			}
-			d.Services[ds.Name] = instance.ServiceDecision{
-				Mode:     "external",
-				External: extMap,
+
+			sd.Mode = "local"
+			if sd.Version == "" {
+				sd.Version = ds.Version
 			}
+			sd.Creds = kinds.Credentials{
+				User:        user,
+				DB:          db,
+				Password:    pass,
+				AppUser:     appUser,
+				AppPassword: appPass,
+			}
+			d.Services[ds.Name] = sd
+		} else {
+			if sd.External == nil {
+				sd.External = make(map[string]string)
+			}
+			buckets := p.Buckets(ds.Name)
+			if len(buckets) > 0 {
+				for _, field := range k.External {
+					if field == "bucket" {
+						continue
+					}
+					if sd.External[field] != "" {
+						continue
+					}
+					fieldLower := strings.ToLower(field)
+					isSec := strings.Contains(fieldLower, "password") ||
+						strings.Contains(fieldLower, "secret") ||
+						strings.Contains(fieldLower, "key") ||
+						strings.Contains(fieldLower, "token") ||
+						(strings.Contains(fieldLower, "url") && !strings.HasPrefix(fieldLower, "public_url_"))
+					def := ""
+					if field == "region" {
+						def = "auto"
+					}
+					val := ""
+					if e.Prompt != nil {
+						ans, err := e.Prompt.Ask(hostcfg.Question{
+							Key:    "data_" + ds.Name + "_ext_" + field,
+							Prompt: fmt.Sprintf("%s external %s", ds.Name, field),
+							Secret: isSec,
+						}, def)
+						if err != nil {
+							return err
+						}
+						val = ans
+					}
+					if val == "" && def != "" {
+						val = def
+					}
+					sd.External[field] = val
+				}
+
+				for _, b := range buckets {
+					bLower := strings.ToLower(b.Name)
+					bKey := "bucket_" + bLower
+					if sd.External[bKey] == "" {
+						val := ""
+						if e.Prompt != nil {
+							ans, err := e.Prompt.Ask(hostcfg.Question{
+								Key:    "data_" + ds.Name + "_ext_bucket_" + bLower,
+								Prompt: fmt.Sprintf("%s external %s", ds.Name, bKey),
+								Secret: false,
+							}, b.Name)
+							if err != nil {
+								return err
+							}
+							val = ans
+						}
+						if val == "" {
+							val = b.Name
+						}
+						sd.External[bKey] = val
+					}
+
+					if b.Public {
+						pKey := "public_url_" + bLower
+						if sd.External[pKey] == "" {
+							val := ""
+							if e.Prompt != nil {
+								ans, err := e.Prompt.Ask(hostcfg.Question{
+									Key:    "data_" + ds.Name + "_ext_public_url_" + bLower,
+									Prompt: fmt.Sprintf("%s external %s", ds.Name, pKey),
+									Secret: false,
+								}, "")
+								if err != nil {
+									return err
+								}
+								val = ans
+							}
+							sd.External[pKey] = val
+						}
+					}
+				}
+			} else {
+				for _, field := range k.External {
+					if sd.External[field] != "" {
+						continue
+					}
+					fieldLower := strings.ToLower(field)
+					isSec := strings.Contains(fieldLower, "password") ||
+						strings.Contains(fieldLower, "secret") ||
+						strings.Contains(fieldLower, "key") ||
+						strings.Contains(fieldLower, "token") ||
+						(strings.Contains(fieldLower, "url") && !strings.HasPrefix(fieldLower, "public_url_"))
+					def := ""
+					if field == "region" {
+						def = "auto"
+					}
+					val := ""
+					if e.Prompt != nil {
+						ans, err := e.Prompt.Ask(hostcfg.Question{
+							Key:    "data_" + ds.Name + "_ext_" + field,
+							Prompt: fmt.Sprintf("%s external %s", ds.Name, field),
+							Secret: isSec,
+						}, def)
+						if err != nil {
+							return err
+						}
+						val = ans
+					}
+					if val == "" && def != "" {
+						val = def
+					}
+					sd.External[field] = val
+				}
+			}
+			sd.Mode = "external"
+			if sd.Version == "" {
+				sd.Version = ds.Version
+			}
+			d.Services[ds.Name] = sd
 		}
 	}
 	return nil
@@ -448,6 +595,22 @@ func promptDomains(ctx context.Context, e *Env, p *contract.Project, d *instance
 				domain = ans
 			}
 			d.Domains[a.Name] = domain
+		}
+	}
+	for _, ds := range p.Data {
+		if ds.ExposePort > 0 && d.Services[ds.Name].Mode == "local" && d.Domains[ds.Name] == "" {
+			domain := ""
+			if e.Prompt != nil {
+				ans, err := e.Prompt.Ask(hostcfg.Question{
+					Key:    "domain_" + ds.Name,
+					Prompt: fmt.Sprintf("Domain for %s", ds.Name),
+				}, "")
+				if err != nil {
+					return err
+				}
+				domain = ans
+			}
+			d.Domains[ds.Name] = domain
 		}
 	}
 	return nil
@@ -696,18 +859,40 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		return nil, err
 	}
 
-	knownApps := make(map[string]bool, len(p.Apps))
+	validDomainServices := make(map[string]bool, len(p.Apps)+len(p.Data))
 	for _, a := range p.Apps {
-		knownApps[a.Name] = true
+		validDomainServices[a.Name] = true
+	}
+	for _, ds := range p.Data {
+		if ds.ExposePort > 0 {
+			validDomainServices[ds.Name] = true
+		}
 	}
 	for svc := range opts.Domains {
-		if !knownApps[svc] {
+		if !validDomainServices[svc] {
 			cleanupInst()
 			return nil, &output.UsageError{
 				Err: &output.Error{
 					Code:    "E_PROJECT_UNKNOWN_SERVICE",
 					Message: fmt.Sprintf("unknown service %q for --domain", svc),
 					Hint:    "specify an app service defined in compose.yml",
+				},
+			}
+		}
+	}
+
+	knownData := make(map[string]bool, len(p.Data))
+	for _, ds := range p.Data {
+		knownData[ds.Name] = true
+	}
+	for svc := range opts.Ext {
+		if !knownData[svc] {
+			cleanupInst()
+			return nil, &output.UsageError{
+				Err: &output.Error{
+					Code:    "E_PROJECT_UNKNOWN_SERVICE",
+					Message: fmt.Sprintf("unknown service %q for --ext", svc),
+					Hint:    "specify a data service defined in compose.yml",
 				},
 			}
 		}
@@ -732,6 +917,16 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	for k, v := range opts.Domains {
 		d.Domains[k] = v
 	}
+	for svc, extMap := range opts.Ext {
+		sd := d.Services[svc]
+		if sd.External == nil {
+			sd.External = make(map[string]string)
+		}
+		for k, v := range extMap {
+			sd.External[k] = v
+		}
+		d.Services[svc] = sd
+	}
 
 	if err := promptDataServices(ctx, e, cat, p, d); err != nil {
 		cleanupInst()
@@ -751,6 +946,23 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	if err := promptEnvSpec(ctx, e, spec, appEnvValues); err != nil {
 		cleanupInst()
 		return nil, err
+	}
+
+	var checkIssues []output.Issue
+	for _, iss := range instance.Check(d, p, cat) {
+		if iss.Code == "E_S3_PUBLIC_LOCAL_PROD" {
+			checkIssues = append(checkIssues, iss)
+			continue
+		}
+		if strings.HasPrefix(iss.Code, "E_DECISION_") {
+			if iss.Service == "" || knownData[iss.Service] {
+				checkIssues = append(checkIssues, iss)
+			}
+		}
+	}
+	if len(checkIssues) > 0 {
+		cleanupInst()
+		return nil, &output.IssuesError{Issues: checkIssues}
 	}
 
 	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
@@ -818,7 +1030,7 @@ func readRawEnv(fsys sys.FS, path string) (map[string]string, error) {
 	return m, nil
 }
 
-func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
+func Update(ctx context.Context, e *Env, inst string, opts ...UpdateOptions) (*AddResult, error) {
 	if err := ValidateInstanceName(e.deployRoot(), e.stateRoot(), inst); err != nil {
 		return nil, err
 	}
@@ -892,6 +1104,47 @@ func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
 		return nil, err
 	}
 
+	var updateOpts UpdateOptions
+	if len(opts) > 0 {
+		updateOpts = opts[0]
+	}
+
+	knownData := make(map[string]bool, len(p.Data))
+	for _, ds := range p.Data {
+		knownData[ds.Name] = true
+	}
+	for svc := range updateOpts.Ext {
+		if !knownData[svc] {
+			return nil, &output.UsageError{
+				Err: &output.Error{
+					Code:    "E_PROJECT_UNKNOWN_SERVICE",
+					Message: fmt.Sprintf("unknown service %q for --ext", svc),
+					Hint:    "specify a data service defined in compose.yml",
+				},
+			}
+		}
+		if sd, ok := d.Services[svc]; ok && sd.Mode == "local" {
+			return nil, &output.UsageError{
+				Err: &output.Error{
+					Code:    "E_USAGE_INVALID",
+					Message: fmt.Sprintf("service %q is in local mode, --ext is only valid for external services", svc),
+					Hint:    "switch service to external mode or remove --ext",
+				},
+			}
+		}
+	}
+
+	for svc, extMap := range updateOpts.Ext {
+		sd := d.Services[svc]
+		if sd.External == nil {
+			sd.External = make(map[string]string)
+		}
+		for k, v := range extMap {
+			sd.External[k] = v
+		}
+		d.Services[svc] = sd
+	}
+
 	appEnvPath := filepath.Join(instDir, "app.env")
 	appEnvValues := make(map[string]string)
 	if data, err := e.fs().ReadFile(appEnvPath); err == nil {
@@ -922,6 +1175,22 @@ func Update(ctx context.Context, e *Env, inst string) (*AddResult, error) {
 
 	if err := promptEnvSpec(ctx, e, spec, appEnvValues); err != nil {
 		return nil, err
+	}
+
+	var checkIssues []output.Issue
+	for _, iss := range instance.Check(d, p, cat) {
+		if iss.Code == "E_S3_PUBLIC_LOCAL_PROD" {
+			checkIssues = append(checkIssues, iss)
+			continue
+		}
+		if strings.HasPrefix(iss.Code, "E_DECISION_") {
+			if iss.Service == "" || knownData[iss.Service] {
+				checkIssues = append(checkIssues, iss)
+			}
+		}
+	}
+	if len(checkIssues) > 0 {
+		return nil, &output.IssuesError{Issues: checkIssues}
 	}
 
 	// Overlay onto the raw file: keys of services that left the contract (and any
