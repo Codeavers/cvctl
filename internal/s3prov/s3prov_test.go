@@ -43,8 +43,13 @@ func TestScriptSortsBucketsAndNeverEmbedsRootKeys(t *testing.T) {
 	if strings.Index(s, "local/alpha") > strings.Index(s, "local/zeta") {
 		t.Fatal("buckets not sorted")
 	}
-	if !strings.Contains(s, `"$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"`) {
-		t.Fatal("root keys must come from the container env")
+	if !strings.Contains(s, `export MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@localhost:9000"`) {
+		t.Fatal("root keys must reach mc through the environment")
+	}
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(line, "mc ") && (strings.Contains(line, "MINIO_ROOT") || strings.Contains(line, "'pw'")) {
+			t.Fatalf("secret in mc argv: %s", line)
+		}
 	}
 	if !strings.Contains(s, `"Resource":["arn:aws:s3:::alpha/*"]`) || strings.Contains(s, "arn:aws:s3:::zeta/*\"]}]}\nCVCTL_EOF\nmc anonymous set-json") {
 		t.Fatal("anonymous policy must cover only the public bucket objects")
@@ -56,7 +61,7 @@ func TestScriptSortsBucketsAndNeverEmbedsRootKeys(t *testing.T) {
 
 func TestScriptQuotesPassword(t *testing.T) {
 	s := Script(testBuckets, "media-app", "it's", PolicyName)
-	if !strings.Contains(s, `mc admin user add local 'media-app' 'it'\''s'`) {
+	if !strings.Contains(s, `printf '%s\n' 'it'\''s' | mc admin user add local 'media-app'`) {
 		t.Fatalf("password not quoted:\n%s", s)
 	}
 }

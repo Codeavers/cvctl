@@ -419,15 +419,8 @@ func promptDataServices(ctx context.Context, e *Env, cat kinds.Catalog, p *contr
 		}
 
 		if mode == "local" {
-			if len(sd.External) > 0 {
-				return &output.UsageError{
-					Err: &output.Error{
-						Code:    "E_USAGE_INVALID",
-						Message: fmt.Sprintf("service %q is in local mode, --ext is only valid for external services", ds.Name),
-						Hint:    "switch service to external mode or remove --ext",
-					},
-				}
-			}
+			// Values left from an earlier external mode do not apply to a local service.
+			sd.External = nil
 
 			user := sd.Creds.User
 			db := sd.Creds.DB
@@ -603,12 +596,18 @@ func applyExt(d *instance.Decisions, p *contract.Project, cat kinds.Catalog, ext
 		}
 
 		sd := d.Services[svc]
+		// --ext is the explicit way to move a local service to external storage.
+		if sd.Mode == "local" && ds.ExternalAllowed {
+			sd.Mode = "external"
+			sd.External = nil
+			d.Services[svc] = sd
+		}
 		if sd.Mode == "local" {
 			return &output.UsageError{
 				Err: &output.Error{
 					Code:    "E_USAGE_INVALID",
-					Message: fmt.Sprintf("service %q is in local mode, --ext is only valid for external services", svc),
-					Hint:    "switch service to external mode or remove --ext",
+					Message: fmt.Sprintf("service %q does not allow external mode, --ext is only valid for external services", svc),
+					Hint:    "add the label cvctl.external: allowed to " + svc + " in compose.yml, or remove --ext",
 				},
 			}
 		}

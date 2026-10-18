@@ -616,6 +616,9 @@ func TestCheckExternalDeclaredBuckets(t *testing.T) {
 		"cdn.example.com",
 		"ftp://cdn.example.com",
 		"https:///",
+		"https://cdn.example.com/p?x=1",
+		"https://cdn.example.com/p#frag",
+		"https://user@cdn.example.com/p",
 		"/relative/path",
 		"http://",
 	} {
@@ -654,7 +657,7 @@ func TestCheckProdPublicLocalRule(t *testing.T) {
 	if len(prodIssues) != 1 || prodIssues[0].Service != "media" {
 		t.Fatalf("expected 1 E_S3_PUBLIC_LOCAL_PROD issue, got: %v", is)
 	}
-	if !strings.Contains(prodIssues[0].Hint, "switch media to external: cvctl project update proj-prod") {
+	if !strings.Contains(prodIssues[0].Hint, "cvctl project update proj-prod --ext media.endpoint=") {
 		t.Errorf("unexpected hint: %q", prodIssues[0].Hint)
 	}
 

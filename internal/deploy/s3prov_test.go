@@ -204,3 +204,27 @@ func TestDeploySkipsProvisioningWithoutBucketServices(t *testing.T) {
 		}
 	}
 }
+
+func TestRollbackReprovisionsBuckets(t *testing.T) {
+	rig := setupBucketsRig(t)
+	prev := defaultDesired()
+	curr := defaultDesired()
+	curr.InfraCommit = "2222222222222222222222222222222222222222"
+	if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusOK, Current: &curr, Previous: &prev}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := rig.deployer.Rollback(context.Background(), "demo-dev", nil, "cli:admin")
+	if err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if res.Status != state.StatusPaused {
+		t.Fatalf("status = %v, detail %q", res.Status, res.Detail)
+	}
+	order := strings.Join(rig.compose.calls, " ")
+	iUp := strings.Index(order, "up")
+	iExec := strings.Index(order, "execscript:media")
+	if iUp < 0 || iExec < iUp {
+		t.Fatalf("rollback must provision after up, got %q", order)
+	}
+}

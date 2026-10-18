@@ -29,7 +29,10 @@ func Script(buckets []contract.Bucket, appUser, appPassword, policyName string) 
 
 	var b strings.Builder
 	b.WriteString("set -eu\n")
-	b.WriteString(`mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null` + "\n")
+	// The root keys reach mc through the environment and the app secret through
+	// stdin: container processes show up in the host's process table, so
+	// neither may be an mc argument.
+	b.WriteString(`export MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@localhost:9000"` + "\n")
 	for _, bk := range bs {
 		fmt.Fprintf(&b, "mc mb --ignore-existing local/%s\n", bk.Name)
 	}
@@ -43,9 +46,10 @@ func Script(buckets []contract.Bucket, appUser, appPassword, policyName string) 
 	}
 	fmt.Fprintf(&b, "cat > /tmp/cvctl-app-policy.json <<'CVCTL_EOF'\n%s\nCVCTL_EOF\n", appPolicy(bs))
 	fmt.Fprintf(&b, "mc admin policy create local %s /tmp/cvctl-app-policy.json\n", policyName)
-	fmt.Fprintf(&b, "mc admin user add local %s %s\n", shQuote(appUser), shQuote(appPassword))
+	fmt.Fprintf(&b, "printf '%%s\\n' %s | mc admin user add local %s\n", shQuote(appPassword), shQuote(appUser))
 	fmt.Fprintf(&b, "case \"$(mc admin user info local %s --json)\" in\n", shQuote(appUser))
-	fmt.Fprintf(&b, "  *'\"policyName\":\"%s\"'*) ;;\n", policyName)
+	// policyName lists every attached policy, comma-separated.
+	fmt.Fprintf(&b, "  *'\"policyName\":\"%[1]s\"'* | *'\"policyName\":\"%[1]s,'* | *',%[1]s\"'* | *',%[1]s,'*) ;;\n", policyName)
 	fmt.Fprintf(&b, "  *) mc admin policy attach local %s --user %s ;;\n", policyName, shQuote(appUser))
 	b.WriteString("esac\n")
 	b.WriteString("rm -f /tmp/cvctl-app-policy.json /tmp/cvctl-anon-*.json\n")

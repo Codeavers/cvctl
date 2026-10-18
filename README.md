@@ -79,6 +79,18 @@ bucket, plus `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` and `S3_REGION`.
   `--ext <service>.<field>=<value>`). Every deploy probes each bucket with the app keys and fetches
   the probe object anonymously from each public URL. Backups are the provider's job.
 
+- **Upgrading** an instance that already runs a local `s3` service: its deploys fail with
+  `E_DECISION_MISSING` until `cvctl project update <instance>` generates the app keys; from then on
+  the app holds scoped keys and cannot create buckets itself. Without declared buckets the bucket is
+  `CVCTL_SVC_<SVC>_DB`, which must be a valid S3 bucket name; otherwise declare the buckets.
+- **Moving to external**: `cvctl project update <instance> --ext <service>.endpoint=…` switches a
+  local service with `cvctl.external: allowed` to external. Data is not copied; use `mc mirror`.
+- `--ext` values land in the shell history and the process list; prefer the interactive prompt
+  for keys on a shared host.
+- An exposed silo joins the shared `cvctl-edge` network so Traefik can reach it: other instances'
+  exposed apps can reach its S3 API too (signed requests only; anonymous access stays limited to
+  `GetObject` on public buckets).
+
 Design: `docs/specs/2026-10-17-s3-buckets-design.md`.
 
 ## Backup generations

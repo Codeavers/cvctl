@@ -389,7 +389,18 @@ func validPublicURL(raw string) bool {
 	if u.Hostname() == "" {
 		return false
 	}
+	// The value is a base the app and the probe append "/<key>" to.
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
+		return false
+	}
 	return true
+}
+
+func instName(d *Decisions) string {
+	if d.Instance == "" {
+		return "<inst>"
+	}
+	return d.Instance
 }
 
 // Check reports every gap or invalid value; issues are sorted so output is
@@ -456,7 +467,7 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 					inst = "<inst>"
 				}
 				add("E_S3_PUBLIC_LOCAL_PROD", ds.Name, fmt.Sprintf("public bucket on local %s service is not allowed in prod", ds.Name),
-					fmt.Sprintf("switch %s to external: cvctl project update %s", ds.Name, inst))
+					fmt.Sprintf("switch %s to external storage: cvctl project update %s --ext %s.endpoint=<url> (the service needs cvctl.external: allowed)", ds.Name, inst, ds.Name))
 			}
 			if kind.Buckets && len(p.Buckets(ds.Name)) == 0 && s.Creds.DB != "" && !bucketNameRe.MatchString(s.Creds.DB) {
 				add("E_DECISION_INVALID", ds.Name, fmt.Sprintf("bucket name %q (from %sDB) is not a valid S3 bucket name", s.Creds.DB, pre),
@@ -465,7 +476,7 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 			if ds.ExposePort != 0 {
 				n := contract.Normalize(ds.Name)
 				if dom := d.Domains[ds.Name]; dom == "" {
-					add("E_DECISION_MISSING", ds.Name, "exposed bucket service has no domain", "set CVCTL_DOMAIN_"+n)
+					add("E_DECISION_MISSING", ds.Name, "exposed service has no domain", "cvctl project update "+instName(d)+" (or set CVCTL_DOMAIN_"+n+")")
 				} else if !validHostname(dom) {
 					add("E_DECISION_INVALID", ds.Name, fmt.Sprintf("domain %q is not a valid hostname", dom),
 						"set CVCTL_DOMAIN_"+n+" to lowercase labels of letters, digits and hyphens separated by dots")

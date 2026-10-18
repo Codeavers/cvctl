@@ -293,6 +293,11 @@ func (d *Deployer) cvctlSecrets(path string) map[string]string {
 		if !strings.HasPrefix(k, "CVCTL_SVC_") {
 			continue
 		}
+		// Bucket names and public URLs are not secret, and an E_S3_PROBE naming
+		// the bucket is what makes it actionable.
+		if strings.Contains(k, "_EXT_BUCKET") || strings.Contains(k, "_EXT_PUBLIC_URL_") {
+			continue
+		}
 		if strings.HasSuffix(k, "_PASSWORD") || strings.Contains(k, "_EXT_") {
 			if len(v) >= 8 {
 				out[k] = v

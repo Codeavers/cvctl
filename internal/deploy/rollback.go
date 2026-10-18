@@ -114,6 +114,11 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 	if err := finalCompose.Up(ctx); err != nil {
 		return err
 	}
+	// The restored app.env may need buckets or policy grants that a later deploy
+	// or an older volume snapshot removed; the script is idempotent.
+	if err := d.provisionBuckets(ctx, finalCompose, inst, p, dec, cat, withSecrets(appEnv, d.cvctlSecrets(cvctlEnvPath))); err != nil {
+		return err
+	}
 
 	if err := d.Health(ctx, inst, finalOverridePath); err != nil {
 		return err

@@ -2374,6 +2374,8 @@ CVCTL_TRACK_TAG=main
 CVCTL_INFRA_PATH=.
 CVCTL_STRATEGY=recreate
 CVCTL_SVC_MEDIA_MODE=local
+CVCTL_SVC_MEDIA_EXT_ENDPOINT=https://left.over.example.com
+CVCTL_SVC_MEDIA_EXT_BUCKET_PRODUCTS=leftover-products
 CVCTL_SVC_MEDIA_VERSION=RELEASE.2024-01-01T00-00-00Z
 CVCTL_SVC_MEDIA_USER=media
 CVCTL_SVC_MEDIA_PASSWORD=existingpass123456789012345678
@@ -2586,7 +2588,9 @@ CVCTL_DOMAIN_WEB=web.example.com
 	}
 }
 
-func TestUpdateExtLocalModeRejection(t *testing.T) {
+// --ext moves a local service to external; with only some fields given, Check
+// rejects the result before anything is written.
+func TestUpdateExtSwitchesLocalToExternalAndChecksFields(t *testing.T) {
 	tmp := t.TempDir()
 	inst := "my-service-dev"
 	instDir := filepath.Join(tmp, inst)
@@ -2649,16 +2653,18 @@ CVCTL_DOMAIN_MEDIA=media.example.com
 		t.Fatal("expected error, got nil")
 	}
 
-	var ue *output.UsageError
-	if !errors.As(err, &ue) {
-		t.Fatalf("expected *output.UsageError, got %T: %v", err, err)
+	var ie *output.IssuesError
+	if !errors.As(err, &ie) {
+		t.Fatalf("expected *output.IssuesError, got %T: %v", err, err)
 	}
-	var oe *output.Error
-	if !errors.As(ue.Err, &oe) {
-		t.Fatalf("expected *output.Error, got %T", ue.Err)
+	missingEndpoint := false
+	for _, is := range ie.Issues {
+		if is.Code == "E_DECISION_MISSING" && strings.Contains(is.Hint, "EXT_ENDPOINT") {
+			missingEndpoint = true
+		}
 	}
-	if oe.Code != "E_USAGE_INVALID" {
-		t.Fatalf("expected code E_USAGE_INVALID, got %q", oe.Code)
+	if !missingEndpoint {
+		t.Fatalf("expected a missing endpoint issue after switching to external, got %v", ie.Issues)
 	}
 
 	afterBytes, err := os.ReadFile(cvctlEnvPath)
