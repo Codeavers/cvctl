@@ -30,6 +30,10 @@ func runServe() {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "ok %s", greeting)
 	})
+	// The E2E checks which client address Traefik forwards.
+	http.HandleFunc("/echo-xff", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, r.Header.Get("X-Forwarded-For"))
+	})
 
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
