@@ -87,9 +87,8 @@ bucket, plus `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` and `S3_REGION`.
   local service with `cvctl.external: allowed` to external. Data is not copied; use `mc mirror`.
 - `--ext` values land in the shell history and the process list; prefer the interactive prompt
   for keys on a shared host.
-- An exposed silo joins the shared `cvctl-edge` network so Traefik can reach it: other instances'
-  exposed apps can reach its S3 API too (signed requests only; anonymous access stays limited to
-  `GetObject` on public buckets).
+- An exposed silo joins its instance's `<inst>_edge` network so Traefik can reach it; anonymous access stays
+  limited to `GetObject` on public buckets.
 
 Design: `docs/specs/2026-10-17-s3-buckets-design.md`.
 

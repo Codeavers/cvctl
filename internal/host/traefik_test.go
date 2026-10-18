@@ -168,6 +168,7 @@ func TestTraefikNoDockerSocket(t *testing.T) {
 
 func TestTraefikSecretsNotInCompose(t *testing.T) {
 	r := &systest.Runner{}
+	r.OnPrefix(legacyUsersPrefix, noSuchNet)
 	fs := systest.NewFS()
 	_, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 	if err != nil {
@@ -251,6 +252,7 @@ func TestTraefikSecretsNotInCompose(t *testing.T) {
 
 func TestTraefikSwitchDNSToHTTPRemovesEnvAndRecreates(t *testing.T) {
 	r := &systest.Runner{}
+	r.OnPrefix(legacyUsersPrefix, noSuchNet)
 	fs := systest.NewFS()
 	_, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 	if err != nil {
@@ -361,6 +363,7 @@ func TestTraefikRecreateOnlyWhenStaticOrEnvChanges(t *testing.T) {
 
 	t.Run("traefik.yml changed uses --force-recreate", func(t *testing.T) {
 		r := &systest.Runner{}
+		r.OnPrefix(legacyUsersPrefix, noSuchNet)
 		fs := systest.NewFS()
 		_, sec, _ := hostcfg.Load(fs, "/etc/cvctl")
 		env := &Env{Run: r, FS: fs, Cfg: cfg, Secrets: sec, EUID: 0}
@@ -404,6 +407,7 @@ func TestTraefikRecreateOnlyWhenStaticOrEnvChanges(t *testing.T) {
 
 	t.Run("only _cvctl.yml changed does not use --force-recreate", func(t *testing.T) {
 		r := &systest.Runner{}
+		r.OnPrefix(legacyUsersPrefix, noSuchNet)
 		fs := systest.NewFS()
 		_, sec, _ := hostcfg.Load(fs, "/etc/cvctl")
 		env := &Env{Run: r, FS: fs, Cfg: cfg, Secrets: sec, EUID: 0}
@@ -448,6 +452,7 @@ func TestTraefikRecreateOnlyWhenStaticOrEnvChanges(t *testing.T) {
 
 func TestTraefikUnchanged(t *testing.T) {
 	r := &systest.Runner{}
+	r.OnPrefix(legacyUsersPrefix, noSuchNet)
 	fs := systest.NewFS()
 	cfg := &hostcfg.Config{
 		EdgeMode:      "edge",
@@ -505,6 +510,7 @@ func TestTraefikUnchanged(t *testing.T) {
 
 func TestTraefikCreatesNetworkOnce(t *testing.T) {
 	r := &systest.Runner{}
+	r.OnPrefix(legacyUsersPrefix, noSuchNet)
 	fs := systest.NewFS()
 	_ = fs.MkdirAll("/etc/traefik/dynamic", 0o2775, deployerOwner)
 
@@ -579,6 +585,7 @@ func TestTraefikCreatesNetworkOnce(t *testing.T) {
 
 func TestTraefikUnhealthy(t *testing.T) {
 	r := &systest.Runner{}
+	r.OnPrefix(legacyUsersPrefix, noSuchNet)
 	fs := systest.NewFS()
 	cfg := &hostcfg.Config{
 		EdgeMode:      "edge",
@@ -622,6 +629,7 @@ func TestTraefikUnhealthy(t *testing.T) {
 
 func TestTraefikCommandFailure(t *testing.T) {
 	r := &systest.Runner{}
+	r.OnPrefix(legacyUsersPrefix, noSuchNet)
 	fs := systest.NewFS()
 	cfg := &hostcfg.Config{
 		EdgeMode:      "edge",
@@ -761,6 +769,7 @@ func TestTraefikBehindProxyItem7Requirements(t *testing.T) {
 
 func TestTraefikCheckWithDockerMissingReturnsChangesNoError(t *testing.T) {
 	r := &systest.Runner{}
+	r.OnPrefix(legacyUsersPrefix, noSuchNet)
 	fs := systest.NewFS()
 	cfg := &hostcfg.Config{
 		EdgeMode:  "behind-proxy",
@@ -799,10 +808,11 @@ func writeTraefikFiles(t *testing.T, fs *systest.FS, cfg *hostcfg.Config) {
 }
 
 const (
-	lsEdgeCmd      = "docker network ls --filter label=cvctl.managed=true --filter name=_edge --format {{.Name}}"
-	traefikNetsCmd = "docker inspect -f {{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}} cvctl-traefik"
-	legacyEdgeCmd  = "docker network inspect cvctl-edge"
-	psCmd          = "docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml ps --format json"
+	lsEdgeCmd         = "docker network ls --filter label=cvctl.managed=true --filter name=_edge --format {{.Name}}"
+	traefikNetsCmd    = "docker inspect -f {{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}} cvctl-traefik"
+	legacyEdgeCmd     = "docker network inspect -f {{range $k, $v := .Containers}}{{$v.Name}} {{end}} cvctl-edge"
+	legacyUsersPrefix = "docker network inspect -f {{range $k, $v := .Containers}}"
+	psCmd             = "docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml ps --format json"
 )
 
 func runningPS() sys.Result {
@@ -811,6 +821,7 @@ func runningPS() sys.Result {
 
 func newTraefikEnv(cfg *hostcfg.Config) (*systest.Runner, *systest.FS, *Env) {
 	r := &systest.Runner{}
+	r.OnPrefix(legacyUsersPrefix, noSuchNet)
 	fs := systest.NewFS()
 	_, sec, _ := hostcfg.Load(fs, "/etc/cvctl")
 	return r, fs, &Env{Run: r, FS: fs, Cfg: cfg, Secrets: sec, EUID: 0}
@@ -819,7 +830,7 @@ func newTraefikEnv(cfg *hostcfg.Config) (*systest.Runner, *systest.FS, *Env) {
 func TestTraefikCustomSubnetGateway(t *testing.T) {
 	c := hostcfg.NewConfig()
 	_ = c.Set("EDGE_MODE", "behind-proxy")
-	_ = c.Set("EDGE_SUBNET", "192.168.50.7/24")
+	_ = c.Set("EDGE_SUBNET", "192.168.50.0/24")
 	st, err := renderTraefikStatic(c)
 	if err != nil {
 		t.Fatal(err)
@@ -846,7 +857,7 @@ func TestTraefikCheckAdoptedHostWithLegacyNetwork(t *testing.T) {
 	r, fs, env := newTraefikEnv(cfg)
 	writeTraefikFiles(t, fs, cfg)
 	r.On(proxyInspectCmd, sys.Result{Stdout: []byte("10.203.0.1 \n")})
-	r.On(legacyEdgeCmd, sys.Result{Stdout: []byte("[{}]\n")})
+	r.On(legacyEdgeCmd, sys.Result{Stdout: []byte("cvctl-traefik ")})
 	r.On(psCmd, runningPS())
 	plan, err := TraefikStep{}.Check(context.Background(), env)
 	if err != nil {
@@ -862,7 +873,7 @@ func TestTraefikFreshHostPlansNetworkAndStart(t *testing.T) {
 	cfg := &hostcfg.Config{EdgeMode: "behind-proxy", ProxyPort: 8081}
 	r, fs, env := newTraefikEnv(cfg)
 	writeTraefikFiles(t, fs, cfg)
-	r.On(proxyInspectCmd, sys.Result{ExitCode: 1})
+	r.On(proxyInspectCmd, noSuchNet)
 	plan, err := TraefikStep{}.Check(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
@@ -924,11 +935,11 @@ func TestTraefikLegacyNetworkRetire(t *testing.T) {
 		r, fs, env := newTraefikEnv(cfg)
 		writeTraefikFiles(t, fs, cfg)
 		r.On(proxyInspectCmd, sys.Result{Stdout: []byte("10.203.0.1 \n")})
-		r.On(legacyEdgeCmd, sys.Result{Stdout: []byte("[{}]\n")})
+		r.On(legacyEdgeCmd, sys.Result{Stdout: []byte("cvctl-traefik ")})
 		r.On(psCmd, runningPS())
 		r.On(traefikNetsCmd, sys.Result{Stdout: []byte("cvctl-edge-proxy cvctl-edge \n")})
 		r.On("docker network disconnect cvctl-edge cvctl-traefik", sys.Result{})
-		r.On("docker network inspect -f {{range $k, $v := .Containers}}{{$v.Name}} {{end}} cvctl-edge", sys.Result{Stdout: []byte(users)})
+		r.On(legacyEdgeCmd, sys.Result{Stdout: []byte(users)})
 		r.On("docker network rm cvctl-edge", sys.Result{})
 		r.On("docker compose -p cvctl-traefik -f /etc/cvctl/traefik/compose.yml up -d", sys.Result{})
 		r.On("docker inspect -f {{.State.Health.Status}} cvctl-traefik", sys.Result{Stdout: []byte("healthy\n")})
@@ -951,8 +962,58 @@ func TestTraefikLegacyNetworkRetire(t *testing.T) {
 	if warn != "" || !slices.Contains(calls, "docker network disconnect cvctl-edge cvctl-traefik") || !slices.Contains(calls, "docker network rm cvctl-edge") {
 		t.Fatalf("unused legacy network must be disconnected and removed: warn=%q calls=%v", warn, calls)
 	}
-	warn, calls = run("old-app-1 ")
-	if !strings.Contains(warn, "old-app-1") || slices.Contains(calls, "docker network rm cvctl-edge") {
-		t.Fatalf("used legacy network must be kept with a warning: warn=%q calls=%v", warn, calls)
+}
+
+func TestTraefikLegacyNetworkInUsePlansNothing(t *testing.T) {
+	cfg := &hostcfg.Config{EdgeMode: "behind-proxy", ProxyPort: 8081}
+	r, fs, env := newTraefikEnv(cfg)
+	writeTraefikFiles(t, fs, cfg)
+	r.On(proxyInspectCmd, sys.Result{Stdout: []byte("10.203.0.1 \n")})
+	r.On(legacyEdgeCmd, sys.Result{Stdout: []byte("cvctl-traefik old-app-1 ")})
+	r.On(psCmd, runningPS())
+	for i := 0; i < 2; i++ {
+		plan, err := TraefikStep{}.Check(context.Background(), env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(plan.Actions) != 0 || len(plan.Changes) != 0 || !strings.Contains(plan.Pending, "old-app-1") {
+			t.Fatalf("run %d: want zero actions and a pending warning, got %+v", i, plan)
+		}
+	}
+}
+
+func TestTraefikDockerDownIsErrorNotNetworkCreate(t *testing.T) {
+	cfg := &hostcfg.Config{EdgeMode: "behind-proxy", ProxyPort: 8081}
+	r, fs, env := newTraefikEnv(cfg)
+	writeTraefikFiles(t, fs, cfg)
+	r.On(proxyInspectCmd, sys.Result{ExitCode: 1, Stderr: []byte("Cannot connect to the Docker daemon\n")})
+	if _, err := (TraefikStep{}).Check(context.Background(), env); err == nil {
+		t.Fatal("daemon failure must be an error")
+	}
+}
+
+func TestTraefikComposePinsProxyGateway(t *testing.T) {
+	for _, cfg := range []*hostcfg.Config{
+		{EdgeMode: "behind-proxy", ProxyPort: 8081},
+		{EdgeMode: "edge", AcmeChallenge: "http", AcmeEmail: "a@example.com"},
+	} {
+		b, err := renderTraefikCompose(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc struct {
+			Services map[string]struct {
+				Networks map[string]struct {
+					GwPriority int `yaml:"gw_priority"`
+				} `yaml:"networks"`
+			} `yaml:"services"`
+		}
+		if err := yaml.Unmarshal(b, &doc); err != nil {
+			t.Fatal(err)
+		}
+		nets := doc.Services["traefik"].Networks
+		if len(nets) != 1 || nets["cvctl-edge-proxy"].GwPriority != 1000 {
+			t.Fatalf("traefik must pin cvctl-edge-proxy with gw_priority 1000: %v", nets)
+		}
 	}
 }

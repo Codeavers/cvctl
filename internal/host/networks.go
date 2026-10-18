@@ -2,7 +2,9 @@ package host
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os/exec"
 	"slices"
 	"strings"
 
@@ -55,38 +57,69 @@ func connectedNetworks(ctx context.Context, e *Env, container string) map[string
 	return set
 }
 
-func networkExists(ctx context.Context, e *Env, name string) bool {
-	_, ok := dockerOut(ctx, e, "network", "inspect", name)
-	return ok
+// dockerMissing is true before the docker step has installed the binary.
+func dockerMissing(err error) bool {
+	return err != nil && (errors.Is(err, exec.ErrNotFound) || strings.Contains(err.Error(), "executable file not found"))
 }
 
-// retireLegacyNetwork detaches own from a pre-instance shared network and
-// removes the network when nothing else uses it. A network still in use is
-// left alone and reported as a warning.
-func retireLegacyNetwork(ctx context.Context, e *Env, name, own string) (string, error) {
-	if !networkExists(ctx, e, name) {
-		return "", nil
+// networkUsers inspects a network. A missing network is (false, nil); any
+// other docker failure (daemon down, permissions) is an error so it is never
+// mistaken for "absent".
+func networkUsers(ctx context.Context, e *Env, name string) (bool, []string, error) {
+	cmd := sys.Cmd{Name: "docker", Env: dockerEnv, Args: []string{"network", "inspect", "-f",
+		"{{range $k, $v := .Containers}}{{$v.Name}} {{end}}", name}}
+	res, err := e.Run.Run(ctx, cmd)
+	if dockerMissing(err) {
+		return false, nil, nil
+	}
+	if err != nil {
+		return false, nil, sys.CmdErr("E_NETWORK", cmd, res, err, "check that docker is running")
+	}
+	if res.ExitCode != 0 {
+		if strings.Contains(string(res.Stderr), "No such network") {
+			return false, nil, nil
+		}
+		return false, nil, sys.CmdErr("E_NETWORK", cmd, res, nil, "check that docker is running")
+	}
+	return true, strings.Fields(string(res.Stdout)), nil
+}
+
+// planLegacyRemoval returns the action to retire a pre-instance shared network
+// when only own still uses it. A network held by other containers yields a
+// pending warning and no action, so repeated runs stay quiet on changes.
+func planLegacyRemoval(ctx context.Context, e *Env, name, own string) (*Action, string, error) {
+	exists, users, err := networkUsers(ctx, e, name)
+	if err != nil || !exists {
+		return nil, "", err
+	}
+	var others []string
+	for _, u := range users {
+		if u != own {
+			others = append(others, u)
+		}
+	}
+	if len(others) > 0 {
+		return nil, fmt.Sprintf("legacy network %s still used by %s; remove it once they are gone", name, strings.Join(others, ", ")), nil
+	}
+	return &Action{Kind: "network-remove", Target: name}, "", nil
+}
+
+// retireLegacyNetwork detaches own from the legacy network and removes it
+// when nothing else uses it; otherwise it leaves it and returns a warning.
+func retireLegacyNetwork(ctx context.Context, e *Env, name, own string) string {
+	exists, _, err := networkUsers(ctx, e, name)
+	if err != nil || !exists {
+		return ""
 	}
 	if connectedNetworks(ctx, e, own)[name] {
 		_, _ = dockerOut(ctx, e, "network", "disconnect", name, own)
 	}
-	out, _ := dockerOut(ctx, e, "network", "inspect", "-f",
-		"{{range $k, $v := .Containers}}{{$v.Name}} {{end}}", name)
-	if users := strings.Fields(out); len(users) > 0 {
-		return fmt.Sprintf("legacy network %s still used by %s; remove it once they are gone", name, strings.Join(users, ", ")), nil
+	_, users, _ := networkUsers(ctx, e, name)
+	if len(users) > 0 {
+		return fmt.Sprintf("legacy network %s still used by %s; remove it once they are gone", name, strings.Join(users, ", "))
 	}
 	if _, ok := dockerOut(ctx, e, "network", "rm", name); !ok {
-		return fmt.Sprintf("legacy network %s could not be removed; run `docker network rm %s`", name, name), nil
+		return fmt.Sprintf("legacy network %s could not be removed; run `docker network rm %s`", name, name)
 	}
-	return "", nil
-}
-
-func joinWarnings(ws ...string) string {
-	var out []string
-	for _, w := range ws {
-		if w != "" {
-			out = append(out, w)
-		}
-	}
-	return strings.Join(out, "; ")
+	return ""
 }

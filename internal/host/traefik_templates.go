@@ -141,14 +141,20 @@ type traefikComposeConfig struct {
 }
 
 type traefikComposeService struct {
-	ContainerName string                    `yaml:"container_name,omitempty"`
-	Image         string                    `yaml:"image"`
-	Restart       string                    `yaml:"restart"`
-	Ports         []string                  `yaml:"ports"`
-	EnvFile       []string                  `yaml:"env_file,omitempty"`
-	Volumes       []string                  `yaml:"volumes"`
-	Networks      []string                  `yaml:"networks"`
-	Healthcheck   traefikComposeHealthcheck `yaml:"healthcheck"`
+	ContainerName string                          `yaml:"container_name,omitempty"`
+	Image         string                          `yaml:"image"`
+	Restart       string                          `yaml:"restart"`
+	Ports         []string                        `yaml:"ports"`
+	EnvFile       []string                        `yaml:"env_file,omitempty"`
+	Volumes       []string                        `yaml:"volumes"`
+	Networks      map[string]traefikComposeAttach `yaml:"networks"`
+	Healthcheck   traefikComposeHealthcheck       `yaml:"healthcheck"`
+}
+
+// traefikComposeAttach pins the gateway endpoint: Docker publishes ports through
+// the highest gw_priority network, and trustedIPs only names the proxy gateway.
+type traefikComposeAttach struct {
+	GwPriority int `yaml:"gw_priority"`
 }
 
 type traefikComposeHealthcheck struct {
@@ -341,7 +347,7 @@ func renderTraefikCompose(cfg *hostcfg.Config) ([]byte, error) {
 					"/etc/traefik/dynamic:/etc/traefik/dynamic:ro",
 					"cvctl-traefik-acme:/acme",
 				},
-				Networks: []string{ProxyNetwork},
+				Networks: map[string]traefikComposeAttach{ProxyNetwork: {GwPriority: 1000}},
 				Healthcheck: traefikComposeHealthcheck{
 					Test: []string{"CMD", "traefik", "healthcheck", "--ping"},
 				},

@@ -174,10 +174,15 @@ func (s StorageStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		p.Changes = append(p.Changes, "configure internal storage endpoint")
 		p.Actions = append(p.Actions, Action{Kind: "configure", Target: actionInternalEP})
 	}
-	if networkExists(ctx, e, legacyBackupNetwork) {
-		p.Changes = append(p.Changes, "retire network "+legacyBackupNetwork)
-		p.Actions = append(p.Actions, Action{Kind: "network-remove", Target: legacyBackupNetwork})
+	legacyAct, pending, err := planLegacyRemoval(ctx, e, legacyBackupNetwork, siloContainer)
+	if err != nil {
+		return Plan{}, err
 	}
+	if legacyAct != nil {
+		p.Changes = append(p.Changes, "retire network "+legacyBackupNetwork)
+		p.Actions = append(p.Actions, *legacyAct)
+	}
+	p.Pending = pending
 	if effectiveStorageMode(e.Cfg) == "local" {
 		connected := connectedNetworks(ctx, e, siloContainer)
 		for _, n := range managedNetworks(ctx, e, "_backup") {
@@ -288,10 +293,7 @@ func (s StorageStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 			return "", err
 		}
 	}
-	warn, err := retireLegacyNetwork(ctx, e, legacyBackupNetwork, siloContainer)
-	if err != nil {
-		return "", err
-	}
+	warn := retireLegacyNetwork(ctx, e, legacyBackupNetwork, siloContainer)
 
 	if mode == "s3" {
 		if err := hostcfg.Save(e.FS, "/etc/cvctl", e.Cfg, e.Secrets); err != nil {

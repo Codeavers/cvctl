@@ -73,7 +73,7 @@ var alnum40Re = regexp.MustCompile(`^[A-Za-z0-9]{40}$`)
 
 func TestStorageLocalGeneratesKeysOnce(t *testing.T) {
 	r := &systest.Runner{}
-	r.OnPrefix("docker network", sys.Result{ExitCode: 1})
+	r.OnPrefix("docker network", noSuchNet)
 	fs := systest.NewFS()
 	cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 	if err != nil {
@@ -171,7 +171,7 @@ func (h *hookedStore) EnsureBucket(ctx context.Context) error {
 
 func TestStorageLocalComposeNoInlineSecrets(t *testing.T) {
 	r := &systest.Runner{}
-	r.OnPrefix("docker network", sys.Result{ExitCode: 1})
+	r.OnPrefix("docker network", noSuchNet)
 	fs := systest.NewFS()
 	cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 	if err != nil {
@@ -284,7 +284,7 @@ func TestStorageLocalComposeNoInlineSecrets(t *testing.T) {
 
 func TestStorageS3BucketDenied(t *testing.T) {
 	r := &systest.Runner{}
-	r.OnPrefix("docker network", sys.Result{ExitCode: 1})
+	r.OnPrefix("docker network", noSuchNet)
 	fs := systest.NewFS()
 	cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 	if err != nil {
@@ -340,8 +340,8 @@ func TestStorageS3BucketDenied(t *testing.T) {
 func TestStorageUnchangedWhenProbeOK(t *testing.T) {
 	t.Run("s3", func(t *testing.T) {
 		r := &systest.Runner{}
-		r.OnPrefix("docker network", sys.Result{ExitCode: 1})
-		r.OnPrefix("docker network", sys.Result{ExitCode: 1})
+		r.OnPrefix("docker network", noSuchNet)
+		r.OnPrefix("docker network", noSuchNet)
 		fs := systest.NewFS()
 		cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 		if err != nil {
@@ -375,15 +375,15 @@ func TestStorageUnchangedWhenProbeOK(t *testing.T) {
 		if len(plan.Changes) != 0 {
 			t.Fatalf("expected no changes when Probe is OK, got %v", plan.Changes)
 		}
-		if len(r.Calls) != 1 || r.Calls[0].String() != "docker network inspect cvctl-backup" {
+		if len(r.Calls) != 1 || !strings.HasPrefix(r.Calls[0].String(), "docker network inspect") {
 			t.Fatalf("expected only the network inspect call, got %v", r.Calls)
 		}
 	})
 
 	t.Run("local", func(t *testing.T) {
 		r := &systest.Runner{}
-		r.OnPrefix("docker network", sys.Result{ExitCode: 1})
-		r.OnPrefix("docker network", sys.Result{ExitCode: 1})
+		r.OnPrefix("docker network", noSuchNet)
+		r.OnPrefix("docker network", noSuchNet)
 		fs := systest.NewFS()
 		cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 		if err != nil {
@@ -549,6 +549,8 @@ func TestStorageBackupKeysGeneratedOnce(t *testing.T) {
 	}
 }
 
+var noSuchNet = sys.Result{ExitCode: 1, Stderr: []byte("Error response from daemon: network not found: No such network\n")}
+
 const (
 	lsBackupCmd = "docker network ls --filter label=cvctl.managed=true --filter name=_backup --format {{.Name}}"
 	siloNetsCmd = "docker inspect -f {{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}} cvctl-storage-s3-1"
@@ -600,7 +602,7 @@ func TestStorageLegacyBackupNetworkInUseWarns(t *testing.T) {
 
 func TestStorageSiloReconnectsToBackupNetworks(t *testing.T) {
 	env, r, _ := backupEnv(t, "local", "")
-	r.OnPrefix("docker network", sys.Result{ExitCode: 1})
+	r.OnPrefix("docker network", noSuchNet)
 	r.On(lsBackupCmd, sys.Result{Stdout: []byte("a_backup\nb_backup\nc_backup_x\n")})
 	r.On(siloNetsCmd, sys.Result{Stdout: []byte("cvctl-storage a_backup \n")})
 	r.OnPrefix("docker network connect", sys.Result{})
@@ -623,7 +625,7 @@ func TestStorageSiloReconnectsToBackupNetworks(t *testing.T) {
 
 func TestStorageCheckIsReadOnlyForBackup(t *testing.T) {
 	env, r, fs := backupEnv(t, "s3", "https://s3.example.com")
-	r.OnPrefix("docker network", sys.Result{ExitCode: 1})
+	r.OnPrefix("docker network", noSuchNet)
 	if _, err := (StorageStep{}).Check(context.Background(), env); err != nil {
 		t.Fatal(err)
 	}
@@ -642,7 +644,7 @@ func TestStorageCheckIsReadOnlyForBackup(t *testing.T) {
 
 func TestStorageLocalComposeOnlyPrivateNetwork(t *testing.T) {
 	env, r, fs := backupEnv(t, "local", "")
-	r.OnPrefix("docker network", sys.Result{ExitCode: 1})
+	r.OnPrefix("docker network", noSuchNet)
 	step := StorageStep{PollInterval: time.Millisecond, PollTimeout: 20 * time.Millisecond}
 	plan, err := step.Check(context.Background(), env)
 	if err != nil {
@@ -685,7 +687,7 @@ func TestStorageInternalEndpointPerMode(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.mode, func(t *testing.T) {
 			env, r, fs := backupEnv(t, tc.mode, tc.ep)
-			r.OnPrefix("docker network", sys.Result{ExitCode: 1})
+			r.OnPrefix("docker network", noSuchNet)
 			step := StorageStep{PollInterval: time.Millisecond, PollTimeout: 20 * time.Millisecond}
 			plan, err := step.Check(context.Background(), env)
 			if err != nil {
@@ -717,7 +719,7 @@ func TestStorageInternalEndpointFollowsModeChanges(t *testing.T) {
 		t.Run(tc.mode, func(t *testing.T) {
 			env, r, fs := backupEnv(t, tc.mode, tc.ep)
 			_ = env.Cfg.Set("S3_ENDPOINT_INTERNAL", tc.stale)
-			r.OnPrefix("docker network", sys.Result{ExitCode: 1})
+			r.OnPrefix("docker network", noSuchNet)
 			step := StorageStep{PollInterval: time.Millisecond, PollTimeout: 20 * time.Millisecond}
 			plan, err := step.Check(context.Background(), env)
 			if err != nil {

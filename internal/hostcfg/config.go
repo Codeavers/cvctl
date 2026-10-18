@@ -105,11 +105,14 @@ const DefaultEdgeSubnet = "10.203.0.0/24"
 
 func validEdgeSubnet(v string) error {
 	p, err := netip.ParsePrefix(v)
-	if err != nil || !p.Addr().Is4() {
-		return errors.New("must be an IPv4 CIDR such as 10.203.0.0/24")
+	if err != nil || !p.Addr().Is4() || !p.Addr().IsPrivate() {
+		return errors.New("must be a private IPv4 CIDR such as 10.203.0.0/24")
 	}
-	if p.Bits() > 29 {
-		return errors.New("must be /29 or larger")
+	if p.Bits() < 16 || p.Bits() > 29 {
+		return errors.New("prefix length must be between /16 and /29")
+	}
+	if p != p.Masked() {
+		return fmt.Errorf("must be in canonical form (%s)", p.Masked())
 	}
 	return nil
 }

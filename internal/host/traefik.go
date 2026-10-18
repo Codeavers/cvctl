@@ -121,22 +121,38 @@ func (TraefikStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		}
 	}
 
-	gwOut, netOK := dockerOut(ctx, e, "network", "inspect", "-f",
-		"{{range .IPAM.Config}}{{.Gateway}} {{end}}", ProxyNetwork)
-	if !netOK {
+	gwCmd := sys.Cmd{Name: "docker", Env: dockerEnv, Args: []string{"network", "inspect", "-f",
+		"{{range .IPAM.Config}}{{.Gateway}} {{end}}", ProxyNetwork}}
+	gwRes, err := e.Run.Run(ctx, gwCmd)
+	switch {
+	case dockerMissing(err):
 		changes = append(changes, "create network "+ProxyNetwork)
 		actions = append(actions, Action{Kind: "network-create", Target: ProxyNetwork})
-	} else if want := e.Cfg.EdgeGateway(); !slices.Contains(strings.Fields(gwOut), want) {
-		return Plan{}, &output.Error{
-			Code:    "E_TRAEFIK_EDGE_SUBNET",
-			Message: fmt.Sprintf("network %s has gateway %q, want %s", ProxyNetwork, strings.TrimSpace(gwOut), want),
-			Hint:    fmt.Sprintf("stop Traefik, run `docker network rm %s` and re-run `cvctl init`", ProxyNetwork),
+	case err != nil:
+		return Plan{}, sys.CmdErr("E_NETWORK", gwCmd, gwRes, err, "check that docker is running")
+	case gwRes.ExitCode == 0:
+		if want := e.Cfg.EdgeGateway(); !slices.Contains(strings.Fields(string(gwRes.Stdout)), want) {
+			return Plan{}, &output.Error{
+				Code:    "E_TRAEFIK_EDGE_SUBNET",
+				Message: fmt.Sprintf("network %s has gateway %q, want %s", ProxyNetwork, strings.TrimSpace(string(gwRes.Stdout)), want),
+				Hint: fmt.Sprintf("run `docker compose -p %s down`, then `docker network rm %s`, and re-run `cvctl init`; "+
+					"instance _edge networks reconnect on the next init", traefikProject, ProxyNetwork),
+			}
 		}
+	case strings.Contains(string(gwRes.Stderr), "No such network"):
+		changes = append(changes, "create network "+ProxyNetwork)
+		actions = append(actions, Action{Kind: "network-create", Target: ProxyNetwork})
+	default:
+		return Plan{}, sys.CmdErr("E_NETWORK", gwCmd, gwRes, nil, "check that docker is running")
 	}
 
-	if networkExists(ctx, e, legacyEdgeNetwork) {
+	legacyAct, pending, err := planLegacyRemoval(ctx, e, legacyEdgeNetwork, traefikContainer)
+	if err != nil {
+		return Plan{}, err
+	}
+	if legacyAct != nil {
 		changes = append(changes, "retire network "+legacyEdgeNetwork)
-		actions = append(actions, Action{Kind: "network-remove", Target: legacyEdgeNetwork})
+		actions = append(actions, *legacyAct)
 	}
 
 	connected := connectedNetworks(ctx, e, traefikContainer)
@@ -157,7 +173,7 @@ func (TraefikStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		actions = append(actions, Action{Kind: "start", Target: "traefik"})
 	}
 
-	return Plan{Changes: changes, Actions: actions}, nil
+	return Plan{Changes: changes, Actions: actions, Pending: pending}, nil
 }
 
 func (s TraefikStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
@@ -259,10 +275,7 @@ func (s TraefikStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 		}
 	}
 
-	warn, err := retireLegacyNetwork(ctx, e, legacyEdgeNetwork, traefikContainer)
-	if err != nil {
-		return "", err
-	}
+	warn := retireLegacyNetwork(ctx, e, legacyEdgeNetwork, traefikContainer)
 
 	if err := s.waitForHealthy(ctx, e); err != nil {
 		return "", err
