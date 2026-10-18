@@ -226,3 +226,24 @@ func TestAfterKeyMigrationNotifies(t *testing.T) {
 		t.Fatalf("failed deploy: no backups, a hint per service: %v %v", w, log)
 	}
 }
+
+// Keys written to cvctl.env must be reported even when the deploy errors.
+func TestUpdateDeployErrorStillReportsNewKeys(t *testing.T) {
+	e, path := addForBackupKeys(t)
+	stripBackupKeys(t, path)
+	n := &recNotify{}
+	// No CVCTL_REGISTRIES on this env: Desired fails before any deploy.
+	e.Deployer = &deploy.Deployer{Notify: n}
+	_, err := Update(context.Background(), e, "my-service-dev", UpdateOptions{})
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_REGISTRY_NOT_ALLOWED" || !strings.Contains(oe.Hint, keysCreatedWarning) ||
+		!strings.Contains(oe.Hint, "run cvctl backup now my-service-dev db") {
+		t.Fatalf("err = %#v", err)
+	}
+	if len(n.msgs) != 1 || !strings.Contains(n.msgs[0].Text, keysCreatedWarning) {
+		t.Fatalf("notification: %+v", n.msgs)
+	}
+	if readEnv(t, path)["CVCTL_BACKUP_ACCESS_KEY"] == "" {
+		t.Fatal("keys not persisted")
+	}
+}

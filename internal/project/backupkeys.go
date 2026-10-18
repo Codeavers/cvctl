@@ -157,6 +157,21 @@ func afterKeyMigration(ctx context.Context, e *Env, d *instance.Decisions, p *co
 	return warnings
 }
 
+// withWarnings appends warnings to err's hint, so a failed command still
+// reports them.
+func withWarnings(err error, warnings []string) error {
+	if len(warnings) == 0 {
+		return err
+	}
+	var oe *output.Error
+	if errors.As(err, &oe) {
+		e2 := *oe
+		e2.Hint = strings.TrimSpace(e2.Hint + "; " + strings.Join(warnings, "; "))
+		return &e2
+	}
+	return fmt.Errorf("%w; %s", err, strings.Join(warnings, "; "))
+}
+
 // migrateBackupKeyGen moves every backed-up local service of an instance that
 // just got its own keys past what the host keys encrypted: WAL-G services to
 // a new generation, restic services to repository r1. usedGen is the highest

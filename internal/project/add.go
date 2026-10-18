@@ -1345,6 +1345,11 @@ func Update(ctx context.Context, e *Env, inst string, opts UpdateOptions) (*AddR
 
 	deployRes, err := runDeploy(ctx, e, repo, d, "cli:project-update", locked)
 	if err != nil {
+		if newKeys {
+			// cvctl.env already holds the new keys: the operator must still
+			// export them and back up once a deploy succeeds.
+			return nil, withWarnings(err, afterKeyMigration(ctx, e, d, p, deploy.Result{Status: state.StatusFailed}))
+		}
 		return nil, err
 	}
 	if newKeys {
