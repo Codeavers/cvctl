@@ -151,7 +151,6 @@ services:
         limits:
           memory: 256M
   db:
-    image: postgres:16
     labels:
       cvctl.kind: postgres
       cvctl.version: "16"
@@ -386,14 +385,12 @@ services:
         limits:
           memory: 256M
   main-db:
-    image: postgres:16
     labels:
       cvctl.kind: postgres
       cvctl.version: "16"
       cvctl.env: MAIN_DB
       cvctl.external: allowed
   cache:
-    image: redis:7
     labels:
       cvctl.kind: redis
       cvctl.version: "7"
@@ -559,13 +556,11 @@ services:
         limits:
           memory: 256M
   db:
-    image: postgres:16
     labels:
       cvctl.kind: postgres
       cvctl.version: "16"
       cvctl.env: DB
   new-db:
-    image: postgres:16
     labels:
       cvctl.kind: postgres
       cvctl.version: "16"
@@ -730,7 +725,6 @@ services:
         limits:
           memory: 256M
   db:
-    image: postgres:16
     labels:
       cvctl.kind: postgres
       cvctl.version: "16"
@@ -882,8 +876,8 @@ func TestAddPathTraversalAndValidation(t *testing.T) {
 		t.Fatal("expected error for --name '..', got nil")
 	}
 	var oe *output.Error
-	if !errors.As(err, &oe) || oe.Code != "E_PROJECT_NAME_INVALID" {
-		t.Fatalf("expected E_PROJECT_NAME_INVALID, got %v", err)
+	if !errors.As(err, &oe) || oe.Code != "E_INSTANCE_NAME" {
+		t.Fatalf("expected E_INSTANCE_NAME, got %v", err)
 	}
 	if !strings.Contains(oe.Hint, "use --name with letters, digits and '-'") {
 		t.Errorf("expected hint to contain 'use --name with letters, digits and -', got %q", oe.Hint)
@@ -895,8 +889,15 @@ func TestAddPathTraversalAndValidation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for 70-char name, got nil")
 	}
-	if !errors.As(err, &oe) || oe.Code != "E_PROJECT_NAME_INVALID" {
-		t.Fatalf("expected E_PROJECT_NAME_INVALID for 70-char name, got %v", err)
+	if !errors.As(err, &oe) || oe.Code != "E_INSTANCE_NAME" {
+		t.Fatalf("expected E_INSTANCE_NAME for 70-char name, got %v", err)
+	}
+
+	// 2b. double hyphen in instance name
+	if err := ValidateInstance("/srv/deploy", "/var/lib/cvctl", "my--app-dev", "dev"); err == nil {
+		t.Fatal("expected error for instance with '--', got nil")
+	} else if !errors.As(err, &oe) || oe.Code != "E_INSTANCE_NAME" {
+		t.Fatalf("expected E_INSTANCE_NAME for double hyphen, got %v", err)
 	}
 
 	// 3. --env "../foo"
@@ -906,6 +907,19 @@ func TestAddPathTraversalAndValidation(t *testing.T) {
 	}
 	if !errors.As(err, &oe) || oe.Code != "E_PROJECT_ENV_INVALID" {
 		t.Fatalf("expected E_PROJECT_ENV_INVALID for invalid env, got %v", err)
+	}
+
+	// 4. --set with newline
+	_, err = Add(context.Background(), e, "git@github.com:myorg/repo.git", AddOptions{
+		Project: "my-app",
+		Env:     "dev",
+		Set:     map[string]string{"FOO": "bad\nvalue"},
+	})
+	if err == nil {
+		t.Fatal("expected error for --set with newline, got nil")
+	}
+	if !errors.As(err, &oe) || oe.Code != "E_ENVSPEC_VALUE" {
+		t.Fatalf("expected E_ENVSPEC_VALUE for --set with newline, got %v", err)
 	}
 
 	// Assert fake FS has no files created (none of the error cases touched FS)
@@ -929,8 +943,8 @@ func TestUpdatePathTraversalAndValidation(t *testing.T) {
 		t.Fatal("expected error for Update('../x'), got nil")
 	}
 	var oe *output.Error
-	if !errors.As(err, &oe) || oe.Code != "E_PROJECT_NAME_INVALID" {
-		t.Fatalf("expected E_PROJECT_NAME_INVALID, got %v", err)
+	if !errors.As(err, &oe) || oe.Code != "E_INSTANCE_NAME" {
+		t.Fatalf("expected E_INSTANCE_NAME, got %v", err)
 	}
 
 	// Assert fake FS has no files created
@@ -1029,7 +1043,6 @@ services:
         limits:
           memory: 256M
   main-db:
-    image: postgres:16
     labels:
       cvctl.kind: postgres
       cvctl.version: "16"
@@ -1619,7 +1632,6 @@ func newUpdateRig(t *testing.T, answers map[string]string) *updateRig {
 
 	writeTestInfra(t, infraDir, validCompose, validSpec)
 	v2Compose := strings.Replace(validCompose, "x-cvctl:", `  extra:
-    image: postgres:16
     labels:
       cvctl.kind: postgres
       cvctl.version: "16"
@@ -1747,7 +1759,6 @@ services:
         limits:
           memory: 256M
   media:
-    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
     labels:
       cvctl.kind: s3
       cvctl.env: S3
@@ -1777,7 +1788,6 @@ services:
         limits:
           memory: 256M
   media:
-    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
     labels:
       cvctl.kind: s3
       cvctl.env: S3

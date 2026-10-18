@@ -38,7 +38,7 @@ const (
 )
 
 var (
-	instRe       = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+	instRe       = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 	secretNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 	instFileRe   = regexp.MustCompile(`^(cvctl\.env|app\.env|backup-[A-Za-z0-9._-]+\.env|restic-[A-Za-z0-9._-]+\.env)$`)
 	keyFileRe    = regexp.MustCompile(`^deploy_key(\.pub)?$`)

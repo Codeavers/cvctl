@@ -348,8 +348,9 @@ func contains(list []string, v string) bool {
 }
 
 var (
-	dnsLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
-	digestRe   = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	dnsLabelRe     = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+	instanceNameRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+	digestRe       = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	// identRe limits user and db names: they end up inside shell
 	// healthchecks (postgres uses CMD-SHELL with user and db).
 	identRe   = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
@@ -413,11 +414,11 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 	switch {
 	case d.Instance == "":
 		add("E_DECISION_MISSING", "", "instance is not set", "set CVCTL_INSTANCE to <project>-<env>")
-	case !dnsLabelRe.MatchString(d.Instance):
-		add("E_DECISION_INVALID", "", fmt.Sprintf("instance %q is not a DNS label", d.Instance),
-			"use lowercase letters, digits and hyphens, e.g. myproj-dev")
+	case !instanceNameRe.MatchString(d.Instance):
+		add("E_INSTANCE_NAME", "", fmt.Sprintf("instance %q is not a DNS label without '--'", d.Instance),
+			"use lowercase letters, digits and hyphens without '--', e.g. myproj-dev")
 	case (d.Env == "dev" || d.Env == "prod") && !strings.HasSuffix(d.Instance, "-"+d.Env):
-		add("E_DECISION_INVALID", "", fmt.Sprintf("instance %q does not end with -%s", d.Instance, d.Env),
+		add("E_INSTANCE_NAME", "", fmt.Sprintf("instance %q does not end with -%s", d.Instance, d.Env),
 			"name the instance <project>-"+d.Env)
 	}
 	switch d.Env {
@@ -578,4 +579,21 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 	}
 	output.SortIssues(is)
 	return is
+}
+
+// CheckDir verifies that the instance name in Decisions matches the directory name of cvctl.env.
+func CheckDir(d *Decisions, cvctlEnvPath string) *output.Error {
+	dir := filepath.Base(filepath.Dir(cvctlEnvPath))
+	if d == nil || d.Instance != dir {
+		inst := ""
+		if d != nil {
+			inst = d.Instance
+		}
+		return &output.Error{
+			Code:    "E_INSTANCE_MISMATCH",
+			Message: fmt.Sprintf("instance name %q in %s does not match directory %q", inst, cvctlEnvPath, dir),
+			Hint:    "ensure CVCTL_INSTANCE matches the directory containing cvctl.env",
+		}
+	}
+	return nil
 }

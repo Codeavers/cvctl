@@ -105,6 +105,9 @@ func Run(ctx context.Context, cfg Config) error {
 			if err != nil {
 				return nil, nil, err
 			}
+			if err := instance.CheckDir(d0, cvctlEnvPath); err != nil {
+				return nil, nil, err
+			}
 			infraPath := d0.InfraPath
 			if infraPath == "" {
 				infraPath = "."
@@ -124,6 +127,9 @@ func Run(ctx context.Context, cfg Config) error {
 			}
 			dec, err := instance.Read(cvctlEnvPath, p)
 			if err != nil {
+				return nil, nil, err
+			}
+			if err := instance.CheckDir(dec, cvctlEnvPath); err != nil {
 				return nil, nil, err
 			}
 			return dec, p, nil

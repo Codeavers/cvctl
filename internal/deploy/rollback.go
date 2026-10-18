@@ -29,6 +29,9 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 	if err != nil {
 		return err
 	}
+	if err := instance.CheckDir(d0, cvctlEnvPath); err != nil {
+		return err
+	}
 	infraPath := d0.InfraPath
 	if infraPath == "" {
 		infraPath = "."
@@ -47,6 +50,9 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 
 	dec, err := instance.Read(cvctlEnvPath, p)
 	if err != nil {
+		return err
+	}
+	if err := instance.CheckDir(dec, cvctlEnvPath); err != nil {
 		return err
 	}
 	if dec.InfraPath == "" {

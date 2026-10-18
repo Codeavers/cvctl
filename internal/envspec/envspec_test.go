@@ -3,6 +3,7 @@ package envspec
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -241,5 +242,55 @@ func TestLoadErrorNamesVar(t *testing.T) {
 	_, err = Load(write(t, "vars:\n  Y: {source: magic}\n  X: {source: service}\n"))
 	if !errors.As(err, &e) || !strings.Contains(e.Message, "var X") {
 		t.Fatalf("validation not in sorted order: %v", err)
+	}
+}
+
+func TestLoadVarNameValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		varN string
+		want string
+	}{
+		{"lowercase", "my_var", "E_ENVSPEC_NAME"},
+		{"hyphen", "MY-VAR", "E_ENVSPEC_NAME"},
+		{"starts with digit", "1VAR", "E_ENVSPEC_NAME"},
+		{"dot in name", "MY.VAR", "E_ENVSPEC_NAME"},
+		{"compose prefix", "COMPOSE_PROJECT", "E_ENVSPEC_NAME"},
+		{"docker prefix", "DOCKER_IMAGE", "E_ENVSPEC_NAME"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf("vars:\n  %s: {source: random}\n", tc.varN)
+			_, err := Load(write(t, body))
+			if c := code(t, err); c != tc.want {
+				t.Fatalf("%s: expected %s, got %s", tc.name, tc.want, c)
+			}
+		})
+	}
+
+	// Valid names pass
+	for _, valid := range []string{"A", "FOO_BAR", "_PRIVATE", "VAR123", "DATABASE_URL"} {
+		body := fmt.Sprintf("vars:\n  %s: {source: random}\n", valid)
+		if _, err := Load(write(t, body)); err != nil {
+			t.Fatalf("valid var %q failed: %v", valid, err)
+		}
+	}
+}
+
+func TestResolveRejectsNewlines(t *testing.T) {
+	s := &Spec{Vars: map[string]Var{
+		"FIXED_NL": {Source: "fixed", Value: "hello\nworld"},
+		"FIXED_CR": {Source: "fixed", Value: "hello\rworld"},
+		"CLEAN":    {Source: "fixed", Value: "clean"},
+	}}
+	_, err := Resolve(s, Input{Env: "dev"})
+	if c := code(t, err); c != "E_ENVSPEC_VALUE" {
+		t.Fatalf("expected E_ENVSPEC_VALUE for newline in fixed, got %s: %v", c, err)
+	}
+
+	// In Existing (e.g. from prompt answers or app.env)
+	sClean := &Spec{Vars: map[string]Var{"FOO": {Source: "prompt"}}}
+	_, err = Resolve(sClean, Input{Existing: map[string]string{"FOO": "bad\nval"}})
+	if c := code(t, err); c != "E_ENVSPEC_VALUE" {
+		t.Fatalf("expected E_ENVSPEC_VALUE for newline in Existing, got %s: %v", c, err)
 	}
 }

@@ -75,6 +75,9 @@ func LoadInstance(deployRoot string, cat kinds.Catalog) Loader {
 		if err != nil {
 			return nil, nil, err
 		}
+		if err := instance.CheckDir(d0, envPath); err != nil {
+			return nil, nil, err
+		}
 		infra := d0.InfraPath
 		if infra == "" {
 			infra = "."
@@ -91,6 +94,9 @@ func LoadInstance(deployRoot string, cat kinds.Catalog) Loader {
 		}
 		d, err := instance.Read(envPath, p)
 		if err != nil {
+			return nil, nil, err
+		}
+		if err := instance.CheckDir(d, envPath); err != nil {
 			return nil, nil, err
 		}
 		return p, d, nil

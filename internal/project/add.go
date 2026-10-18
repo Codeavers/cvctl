@@ -30,7 +30,7 @@ import (
 
 var deployOwner = sys.Owner{User: "deployer", Group: "deploy"}
 var identRe = regexp.MustCompile(`^[a-z0-9_]+$`)
-var instanceNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+var instanceNameRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 const alphaNum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
@@ -165,7 +165,7 @@ func sanitizeName(s string) string {
 func ValidateInstance(deployRoot, stateRoot, inst, env string) error {
 	if len(inst) == 0 || len(inst) > 63 || !instanceNameRe.MatchString(inst) || !strings.HasSuffix(inst, "-"+env) {
 		return &output.Error{
-			Code:    "E_PROJECT_NAME_INVALID",
+			Code:    "E_INSTANCE_NAME",
 			Message: fmt.Sprintf("invalid instance name %q", inst),
 			Hint:    "use --name with letters, digits and '-'",
 		}
@@ -173,7 +173,7 @@ func ValidateInstance(deployRoot, stateRoot, inst, env string) error {
 	expectedDeployDir := strings.TrimRight(deployRoot, "/") + "/" + inst
 	if filepath.Join(deployRoot, inst) != expectedDeployDir {
 		return &output.Error{
-			Code:    "E_PROJECT_NAME_INVALID",
+			Code:    "E_INSTANCE_NAME",
 			Message: fmt.Sprintf("path traversal detected in instance %q", inst),
 			Hint:    "use --name with letters, digits and '-'",
 		}
@@ -181,7 +181,7 @@ func ValidateInstance(deployRoot, stateRoot, inst, env string) error {
 	expectedStateDir := strings.TrimRight(stateRoot, "/") + "/" + inst
 	if filepath.Join(stateRoot, inst) != expectedStateDir {
 		return &output.Error{
-			Code:    "E_PROJECT_NAME_INVALID",
+			Code:    "E_INSTANCE_NAME",
 			Message: fmt.Sprintf("path traversal detected in instance %q", inst),
 			Hint:    "use --name with letters, digits and '-'",
 		}
@@ -198,7 +198,7 @@ func ValidateInstanceName(deployRoot, stateRoot, inst string) error {
 	}
 	if envName == "" {
 		return &output.Error{
-			Code:    "E_PROJECT_NAME_INVALID",
+			Code:    "E_INSTANCE_NAME",
 			Message: fmt.Sprintf("invalid instance name %q: must end with -dev or -prod", inst),
 			Hint:    "use --name with letters, digits and '-'",
 		}
@@ -733,8 +733,22 @@ func promptEnvSpec(ctx context.Context, e *Env, spec *envspec.Spec, appEnvValues
 				if err != nil {
 					return err
 				}
+				if strings.ContainsAny(ans, "\r\n") {
+					return &output.Error{
+						Code:    "E_ENVSPEC_VALUE",
+						Message: fmt.Sprintf("var %s: value cannot contain newline or carriage return", name),
+						Hint:    "remove newline and carriage return characters from the value",
+					}
+				}
 				appEnvValues[name] = ans
 			} else if def != "" {
+				if strings.ContainsAny(def, "\r\n") {
+					return &output.Error{
+						Code:    "E_ENVSPEC_VALUE",
+						Message: fmt.Sprintf("var %s: default value cannot contain newline or carriage return", name),
+						Hint:    "remove newline and carriage return characters from the value",
+					}
+				}
 				appEnvValues[name] = def
 			}
 		}
@@ -802,6 +816,16 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 				Message: fmt.Sprintf("invalid environment %q: must be dev or prod", opts.Env),
 				Hint:    "use --env dev or --env prod",
 			},
+		}
+	}
+
+	for k, v := range opts.Set {
+		if strings.ContainsAny(v, "\r\n") {
+			return nil, &output.Error{
+				Code:    "E_ENVSPEC_VALUE",
+				Message: fmt.Sprintf("--set %s: value cannot contain newline or carriage return", k),
+				Hint:    "remove newline and carriage return characters from the value",
+			}
 		}
 	}
 

@@ -556,6 +556,9 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	if err != nil {
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("cannot read %s: %v", cvctlEnvPath, err), cvSecrets)
 	}
+	if err := instance.CheckDir(d0, cvctlEnvPath); err != nil {
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), cvSecrets)
+	}
 	infraPath := d0.InfraPath
 	if infraPath == "" {
 		infraPath = "."
@@ -575,6 +578,9 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	dec, err := instance.Read(cvctlEnvPath, p)
 	if err != nil {
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, fmt.Sprintf("cannot read %s: %v", cvctlEnvPath, err), cvSecrets)
+	}
+	if err := instance.CheckDir(dec, cvctlEnvPath); err != nil {
+		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, err.Error(), cvSecrets)
 	}
 	if dec.InfraPath == "" {
 		dec.InfraPath = "."

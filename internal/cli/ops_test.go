@@ -455,6 +455,16 @@ func TestSetEnv(t *testing.T) {
 	if !strings.Contains(out, "E_APPENV_READ") {
 		t.Errorf("expected E_APPENV_READ, got %s", out)
 	}
+
+	// 5. Value with newline rejected with E_ENVSPEC_VALUE
+	_ = os.WriteFile(appEnvPath, []byte("EXISTING=foo\n"), 0o640)
+	code, out, _ = run(t, "set-env", "myapp-dev", "SOME_KEY", "bad\nvalue", "--json")
+	if code == 0 {
+		t.Fatalf("expected error on value with newline")
+	}
+	if !strings.Contains(out, "E_ENVSPEC_VALUE") {
+		t.Errorf("expected E_ENVSPEC_VALUE, got %s", out)
+	}
 }
 
 func TestSetStrategy(t *testing.T) {
@@ -1001,7 +1011,6 @@ services:
         limits:
           memory: 256M
   media:
-    image: minio/minio:RELEASE.2024-10-13T13-33-44Z
     labels:
       cvctl.kind: s3
       cvctl.version: "2024"

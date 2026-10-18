@@ -232,7 +232,7 @@ func TestRestoreRequiresImportedSecrets(t *testing.T) {
 func TestRestoreValidatesInstanceFirst(t *testing.T) {
 	rig := newRestoreRig(t, restoreEnvBase)
 	_, err := Restore(context.Background(), rig.env, "../etc-dev", RestoreOptions{})
-	if codeOf(t, err) != "E_PROJECT_NAME_INVALID" {
+	if codeOf(t, err) != "E_INSTANCE_NAME" {
 		t.Fatalf("got %v", err)
 	}
 }

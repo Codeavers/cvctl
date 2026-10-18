@@ -33,6 +33,10 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 		out = append(out, output.Issue{Code: code, Service: svc, Message: msg, Hint: hint})
 	}
 
+	if len(p.RawCompose) > 0 {
+		out = append(out, CheckFields(p.RawCompose)...)
+	}
+
 	isApp := map[string]bool{}
 	for _, a := range p.Apps {
 		isApp[a.Name] = true

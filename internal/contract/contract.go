@@ -167,6 +167,10 @@ func Load(dir string, cat kinds.Catalog) (*Project, error) {
 		}
 	}
 
+	if issues := CheckFields(raw); len(issues) > 0 {
+		return nil, &output.IssuesError{Issues: issues}
+	}
+
 	var doc struct {
 		X rawExt `yaml:"x-cvctl"`
 	}
@@ -182,6 +186,8 @@ func Load(dir string, cat kinds.Catalog) (*Project, error) {
 		o.SkipInterpolation = true
 		o.SkipConsistencyCheck = true
 		o.SkipResolveEnvironment = true
+		o.SkipInclude = true
+		o.SkipExtends = true
 		o.SetProjectName("cvctl-lint", true)
 	})
 	if err != nil {

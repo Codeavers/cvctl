@@ -317,3 +317,12 @@ func TestRestoreLooksUpDeployOwnerBeforeWriting(t *testing.T) {
 		t.Fatalf("wrote %d paths", n)
 	}
 }
+
+func TestAllowedRejectsDoubleHyphen(t *testing.T) {
+	if Allowed("/srv/deploy/shop--prod/cvctl.env") {
+		t.Fatal("expected Allowed to reject path with double hyphen in instance name")
+	}
+	if !Allowed("/srv/deploy/shop-prod/cvctl.env") {
+		t.Fatal("expected Allowed to accept valid path")
+	}
+}

@@ -240,11 +240,12 @@ func TestCheckInstance(t *testing.T) {
 		{"wrong env suffix", "proj-prod"},
 		{"no suffix", "proj"},
 		{"leading hyphen", "-dev"},
+		{"double hyphen", "proj--dev"},
 	} {
 		d := full()
 		d.Instance = tc.inst
 		is := Check(d, p, cat)
-		if len(is) != 1 || is[0].Code != "E_DECISION_INVALID" || is[0].Hint == "" {
+		if len(is) != 1 || is[0].Code != "E_INSTANCE_NAME" || is[0].Hint == "" {
 			t.Fatalf("%s: got %v", tc.name, is)
 		}
 	}
@@ -253,6 +254,22 @@ func TestCheckInstance(t *testing.T) {
 	is := Check(d, p, cat)
 	if len(is) != 1 || is[0].Code != "E_DECISION_MISSING" || !strings.Contains(is[0].Hint, "CVCTL_INSTANCE") {
 		t.Fatalf("empty: got %v", is)
+	}
+}
+
+func TestCheckDir(t *testing.T) {
+	d := &Decisions{Instance: "demo-dev"}
+	// Matching directory
+	if err := CheckDir(d, "/srv/deploy/demo-dev/cvctl.env"); err != nil {
+		t.Fatalf("expected nil for matching directory, got %v", err)
+	}
+	// Mismatching directory
+	err := CheckDir(d, "/srv/deploy/other-dev/cvctl.env")
+	if err == nil {
+		t.Fatal("expected error for mismatching directory, got nil")
+	}
+	if err.Code != "E_INSTANCE_MISMATCH" {
+		t.Fatalf("expected E_INSTANCE_MISMATCH, got %s: %v", err.Code, err)
 	}
 }
 

@@ -69,7 +69,6 @@ services:
         limits:
           memory: 256M
   db:
-    image: postgres:16
     labels:
       cvctl.kind: postgres
       cvctl.version: "16"
