@@ -26,7 +26,7 @@ ReadWritePaths=/srv/deploy /var/lib/cvctl /etc/traefik/dynamic
 PrivateTmp=yes
 SupplementaryGroups=docker
 Environment=DOCKER_CONFIG=/var/lib/cvctl/docker
-TimeoutStopSec=300
+TimeoutStopSec=420
 
 [Install]
 WantedBy=multi-user.target
