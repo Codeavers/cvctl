@@ -44,7 +44,12 @@ var runAgentRegistryLogin = func(ctx context.Context, run sys.Runner, hcfg *host
 	if host == "" {
 		return
 	}
-	if err := registry.LoginWithFS(ctx, run, sys.NewOSFS(), host, hcfg.RegistryUser, token); err != nil {
+	fsys := sys.NewOSFS()
+	err := registry.LoginWithFS(ctx, run, fsys, host, hcfg.RegistryUser, token)
+	if err == nil {
+		err = registry.PruneAuths(fsys, host)
+	}
+	if err != nil {
 		errReason := fmt.Sprintf("registry login failed for %s: %v", host, err)
 		logEntry := agent.DecisionLog{
 			TS:       time.Now().UTC().Format(time.RFC3339),

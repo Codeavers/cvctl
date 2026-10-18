@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -258,6 +259,61 @@ func LoginWithFS(ctx context.Context, run sys.Runner, fsys sys.FS, host, user, t
 		}
 	}
 	return nil
+}
+
+// PruneAuths drops every "auths" entry of the cvctl docker config except
+// keep's, so logins left by an older version for other registries stop being
+// sent; other top-level keys are kept. A missing config is not an error.
+func PruneAuths(fsys sys.FS, keep string) error {
+	data, err := fsys.ReadFile(dockerConfigPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return pruneErr(err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return pruneErr(err)
+	}
+	raw, ok := doc["auths"]
+	if !ok {
+		return nil
+	}
+	var auths map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &auths); err != nil {
+		return pruneErr(err)
+	}
+	changed := false
+	for k := range auths {
+		host := strings.SplitN(strings.TrimPrefix(strings.TrimPrefix(k, "https://"), "http://"), "/", 2)[0]
+		if !SameHost(host, keep) {
+			delete(auths, k)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if doc["auths"], err = json.Marshal(auths); err != nil {
+		return pruneErr(err)
+	}
+	out, err := json.MarshalIndent(doc, "", "\t")
+	if err != nil {
+		return pruneErr(err)
+	}
+	if err := fsys.WriteFile(dockerConfigPath, append(out, '\n'), 0o600, dockerConfigOwner); err != nil {
+		return pruneErr(err)
+	}
+	return nil
+}
+
+func pruneErr(err error) error {
+	return &output.Error{
+		Code:    "E_REGISTRY_LOGIN",
+		Message: fmt.Sprintf("cannot prune stale logins in %s: %v", dockerConfigPath, err),
+		Hint:    "check ownership and JSON syntax of /var/lib/cvctl/docker/config.json",
+	}
 }
 
 // InsecureHostsFromEnv parses the comma-separated CVCTL_INSECURE_REGISTRIES environment variable.

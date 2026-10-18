@@ -2,6 +2,7 @@ package registry_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -381,5 +382,35 @@ func TestDigestTokenOnlyToTokenHost(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("token host got no Basic auth")
+	}
+}
+
+func TestPruneAuthsKeepsOnlyTokenHost(t *testing.T) {
+	fsys := systest.NewFS()
+	const cfg = "/var/lib/cvctl/docker/config.json"
+	in := `{"auths":{"ghcr.io":{"auth":"a"},"https://index.docker.io/v1/":{"auth":"b"},"old.example.com":{"auth":"c"}},"credsStore":"x","HttpHeaders":{"User-Agent":"y"}}`
+	if err := fsys.WriteFile(cfg, []byte(in), 0o644, sys.Owner{User: "root", Group: "root"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.PruneAuths(fsys, "GHCR.io"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := fsys.ReadFile(cfg)
+	var doc struct {
+		Auths       map[string]json.RawMessage `json:"auths"`
+		CredsStore  string                     `json:"credsStore"`
+		HTTPHeaders map[string]string          `json:"HttpHeaders"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Auths) != 1 || doc.Auths["ghcr.io"] == nil || doc.CredsStore != "x" || doc.HTTPHeaders["User-Agent"] != "y" {
+		t.Fatalf("config = %s", data)
+	}
+	if fi, err := fsys.Stat(cfg); err != nil || fi.User != "deployer" || fi.Group != "deploy" || fi.Mode != 0o600 {
+		t.Fatalf("owner/mode: %+v %v", fi, err)
+	}
+	if err := registry.PruneAuths(systest.NewFS(), "ghcr.io"); err != nil {
+		t.Fatalf("missing config: %v", err)
 	}
 }
