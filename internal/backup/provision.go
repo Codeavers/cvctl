@@ -21,10 +21,11 @@ const (
 func BackupUser(inst string) string   { return "bk-" + inst }
 func BackupPolicy(inst string) string { return "cvctl-bk-" + inst }
 
-// ProvisionUser creates or updates the instance's backup user in the host silo
-// and attaches the silo to the instance's backup network. It does nothing
-// unless t is a per-instance target on the local silo. The backup network must
-// exist already.
+// ProvisionUser attaches the host silo to the instance's backup network and,
+// for a per-instance target, creates or updates the instance's backup user in
+// it. It does nothing unless t is on the local silo. The backup network must
+// exist already. Instances still on the host credentials need the connect too:
+// their backup containers reach the silo only through <inst>_backup.
 func ProvisionUser(ctx context.Context, run sys.Runner, t *render.BackupTarget, inst string) error {
 	_, err := provisionUser(ctx, run, t, inst)
 	return err
@@ -33,7 +34,7 @@ func ProvisionUser(ctx context.Context, run sys.Runner, t *render.BackupTarget, 
 // provisionUser also reports whether the silo was found and only the user
 // step failed.
 func provisionUser(ctx context.Context, run sys.Runner, t *render.BackupTarget, inst string) (bool, error) {
-	if t == nil || !t.Local || t.Instance == "" {
+	if t == nil || !t.Local {
 		return false, nil
 	}
 	if run == nil {
@@ -54,16 +55,18 @@ func provisionUser(ctx context.Context, run sys.Runner, t *render.BackupTarget, 
 		return false, provisionErr(inst, "the storage container is not running")
 	}
 	id := ids[0]
-	script := s3prov.BackupUserScript(t.AccessKey, t.SecretKey, t.Bucket, t.UserPrefix(inst), BackupPolicy(inst))
-	res, err = run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"exec", "-i", id, "sh", "-s"}, Stdin: []byte(script), Env: []string{dockerConfig}})
-	if err != nil || res.ExitCode != 0 {
-		detail := cmdDetail(res, err)
-		for _, s := range []string{t.SecretKey, t.AccessKey} {
-			if s != "" {
-				detail = strings.ReplaceAll(detail, s, "[REDACTED]")
+	if t.Instance != "" {
+		script := s3prov.BackupUserScript(t.AccessKey, t.SecretKey, t.Bucket, t.UserPrefix(inst), BackupPolicy(inst))
+		res, err = run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"exec", "-i", id, "sh", "-s"}, Stdin: []byte(script), Env: []string{dockerConfig}})
+		if err != nil || res.ExitCode != 0 {
+			detail := cmdDetail(res, err)
+			for _, s := range []string{t.SecretKey, t.AccessKey} {
+				if s != "" {
+					detail = strings.ReplaceAll(detail, s, "[REDACTED]")
+				}
 			}
+			return true, provisionErr(inst, "creating the backup user failed: "+detail)
 		}
-		return true, provisionErr(inst, "creating the backup user failed: "+detail)
 	}
 	if err := sys.ConnectNetwork(ctx, run, render.NetworkBackup(inst), id, siloAlias); err != nil {
 		return false, provisionErr(inst, err.Error())

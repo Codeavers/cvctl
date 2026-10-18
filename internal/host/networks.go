@@ -104,19 +104,33 @@ func planLegacyRemoval(ctx context.Context, e *Env, name, own string) (*Action, 
 	return &Action{Kind: "network-remove", Target: name}, "", nil
 }
 
-// retireLegacyNetwork detaches own from the legacy network and removes it
-// when nothing else uses it; otherwise it leaves it and returns a warning.
-func retireLegacyNetwork(ctx context.Context, e *Env, name, own string) string {
-	exists, _, err := networkUsers(ctx, e, name)
+// retireLegacyNetwork removes the legacy network once only own uses it. While
+// other containers (instances not yet updated) still use it, own stays (or is
+// put back) on it with aliases, so they keep reaching it, and a warning is
+// returned.
+func retireLegacyNetwork(ctx context.Context, e *Env, name, own string, aliases ...string) string {
+	exists, users, err := networkUsers(ctx, e, name)
 	if err != nil || !exists {
 		return ""
 	}
-	if connectedNetworks(ctx, e, own)[name] {
-		_, _ = dockerOut(ctx, e, "network", "disconnect", name, own)
+	var others []string
+	for _, u := range users {
+		if u != own {
+			others = append(others, u)
+		}
 	}
-	_, users, _ := networkUsers(ctx, e, name)
-	if len(users) > 0 {
-		return fmt.Sprintf("legacy network %s still used by %s; remove it once they are gone", name, strings.Join(users, ", "))
+	ownNets := connectedNetworks(ctx, e, own)
+	if len(others) > 0 {
+		warn := fmt.Sprintf("legacy network %s still used by %s; remove it once they are gone", name, strings.Join(others, ", "))
+		if len(ownNets) > 0 && !ownNets[name] {
+			if err := sys.ConnectNetwork(ctx, e.Run, name, own, aliases...); err != nil {
+				warn += fmt.Sprintf("; reconnecting %s to it failed: %v", own, err)
+			}
+		}
+		return warn
+	}
+	if ownNets[name] {
+		_, _ = dockerOut(ctx, e, "network", "disconnect", name, own)
 	}
 	if _, ok := dockerOut(ctx, e, "network", "rm", name); !ok {
 		return fmt.Sprintf("legacy network %s could not be removed; run `docker network rm %s`", name, name)

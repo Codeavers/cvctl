@@ -293,9 +293,8 @@ func (s StorageStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 			return "", err
 		}
 	}
-	warn := retireLegacyNetwork(ctx, e, legacyBackupNetwork, siloContainer)
-
 	if mode == "s3" {
+		warn := retireLegacyNetwork(ctx, e, legacyBackupNetwork, siloContainer, storageAlias)
 		if err := hostcfg.Save(e.FS, "/etc/cvctl", e.Cfg, e.Secrets); err != nil {
 			return "", err
 		}
@@ -417,6 +416,8 @@ func (s StorageStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 			return "", err
 		}
 	}
+	// After up: a recreated silo is no longer on the legacy network.
+	warn := retireLegacyNetwork(ctx, e, legacyBackupNetwork, siloContainer, storageAlias)
 
 	store, err := newStore(storageConfigFor(e.Cfg, mode, ak, sk))
 	if err != nil {

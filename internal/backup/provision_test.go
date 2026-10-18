@@ -48,14 +48,28 @@ func TestProvisionUserRunsScriptInSiloThenConnects(t *testing.T) {
 	}
 }
 
-func TestProvisionUserSkipsHostTargets(t *testing.T) {
+func TestProvisionUserSkipsNonLocalTargets(t *testing.T) {
 	run := &systest.Runner{}
-	for _, tg := range []*render.BackupTarget{nil, {Local: true}, {Instance: "app-prod"}} {
+	for _, tg := range []*render.BackupTarget{nil, {Instance: "app-prod"}} {
 		if err := backup.ProvisionUser(context.Background(), run, tg, "app-prod"); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if len(run.Calls) != 0 {
+		t.Fatalf("calls: %v", run.Calls)
+	}
+}
+
+// An instance still on the host credentials gets no user, but its backup
+// containers reach the silo only through <inst>_backup.
+func TestProvisionUserConnectsHostTargetWithoutUser(t *testing.T) {
+	run := &systest.Runner{}
+	run.On(siloPS, sys.Result{Stdout: []byte("abc123\n")})
+	run.On("docker network connect --alias cvctl-storage app-prod_backup abc123", sys.Result{})
+	if err := backup.ProvisionUser(context.Background(), run, &render.BackupTarget{Local: true}, "app-prod"); err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Calls) != 2 || !strings.Contains(run.Calls[1].String(), "network connect") {
 		t.Fatalf("calls: %v", run.Calls)
 	}
 }

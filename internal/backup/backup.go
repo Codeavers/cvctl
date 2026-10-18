@@ -291,12 +291,13 @@ func (r *Runner) exec(ctx context.Context, cmd sys.Cmd) (sys.Result, error) {
 }
 
 // forInstance returns a copy of r whose Host is inst's own backup target. On
-// the local silo it first makes sure the instance's backup user exists, so a
-// backup or verify works before the instance's first deploy with its own keys.
+// the local silo it first attaches the silo to the instance's backup network
+// and makes sure the instance's backup user exists, so a backup or verify works
+// before the instance's first deploy with its own keys.
 func (r *Runner) forInstance(ctx context.Context, inst string, p *contract.Project, d *instance.Decisions) (*Runner, error) {
 	rr := *r
 	rr.Host = render.BackupTargetFor(r.Host, d)
-	if rr.Host == nil || !rr.Host.Local || rr.Host.Instance == "" || len(Targets(p, d)) == 0 {
+	if rr.Host == nil || !rr.Host.Local || len(Targets(p, d)) == 0 {
 		return &rr, nil
 	}
 	if _, err := rr.backupNet(ctx, inst); err != nil {
