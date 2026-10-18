@@ -23,7 +23,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Build cvctl
-        run: CGO_ENABLED=0 go build -ldflags "-X main.version=dev-${{ github.sha }}" -o cvctl ./cmd/cvctl
+        run: CGO_ENABLED=0 go build -ldflags "-X main.version=dev-${{ github.sha }}" -o cvctl ./cmd/cvctl && go build -o rawpush ./scripts/e2e/rawpush
 
       - name: Build cvctl-postgres
         run: |
