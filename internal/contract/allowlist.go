@@ -52,7 +52,8 @@ func CheckFields(raw []byte) []output.Issue {
 		if err != nil {
 			return invalid("compose.yml is not valid YAML: " + err.Error())
 		}
-		if n.Kind == yaml.DocumentNode && len(n.Content) == 0 {
+		if n.Kind == yaml.DocumentNode && (len(n.Content) == 0 ||
+			(n.Content[0].Kind == yaml.ScalarNode && n.Content[0].Tag == "!!null")) {
 			continue
 		}
 		docs = append(docs, &n)
@@ -179,7 +180,7 @@ func checkLabels(svcName, path string, lNode *yaml.Node, add func(svc, path stri
 	if lNode.Kind == yaml.MappingNode {
 		for i := 0; i+1 < len(lNode.Content); i += 2 {
 			lk := lNode.Content[i].Value
-			if strings.HasPrefix(lk, "traefik.") {
+			if isTraefikLabel(lk) {
 				add(svcName, path+"."+lk)
 			}
 		}
@@ -187,7 +188,7 @@ func checkLabels(svcName, path string, lNode *yaml.Node, add func(svc, path stri
 		for _, item := range lNode.Content {
 			k := strings.TrimSpace(strings.SplitN(item.Value, "=", 2)[0])
 			k = strings.TrimSpace(strings.SplitN(k, ":", 2)[0])
-			if strings.HasPrefix(k, "traefik.") {
+			if isTraefikLabel(k) {
 				add(svcName, path+"."+k)
 			}
 		}
@@ -269,4 +270,10 @@ func checkNoAliases(n *yaml.Node, path string, issues *[]output.Issue) {
 	for i, c := range n.Content {
 		checkNoAliases(c, fmt.Sprintf("%s[%d]", path, i), issues)
 	}
+}
+
+// Traefik in cvctl reads only file-provider routes; the label check is
+// defense in depth, so it ignores case and surrounding space.
+func isTraefikLabel(k string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(k)), "traefik.")
 }

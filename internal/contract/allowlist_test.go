@@ -539,3 +539,13 @@ func TestCheckFieldsRejectsMultipleDocumentsAndBadYAML(t *testing.T) {
 		t.Fatalf("a single document after a leading --- is fine, got %v", issues)
 	}
 }
+
+func TestCheckFieldsTraefikLabelCaseAndTrailingSeparator(t *testing.T) {
+	issues := contract.CheckFields([]byte("services:\n  api:\n    image: a\n    labels: {cvctl.role: app, \"Traefik.enable\": \"true\", \" traefik.http\": x}\n"))
+	if len(issues) != 2 {
+		t.Fatalf("want both traefik labels rejected, got %v", issues)
+	}
+	if issues := contract.CheckFields([]byte("services:\n  api:\n    image: a\n    labels: {cvctl.role: app}\n---\n...\n")); len(issues) != 0 {
+		t.Fatalf("trailing empty documents are fine, got %v", issues)
+	}
+}
