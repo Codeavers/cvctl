@@ -17,7 +17,7 @@ import (
 	"github.com/codeavers/cvctl/kinds"
 )
 
-const cpBase = "docker compose -p app-prod --env-file /srv/deploy/app-prod/app.env -f /srv/deploy/app-prod/infra/compose.yml -f /srv/deploy/app-prod/compose.cvctl.yml"
+const cpBase = "docker compose -p app-prod --env-file /srv/deploy/app-prod/app.env -f /srv/deploy/app-prod/compose.cvctl.yml"
 const cp = cpBase + " "
 
 const probe = "docker ps -a --filter label=com.docker.compose.project=app-prod --filter label=com.docker.compose.service=db --format {{.State}}"

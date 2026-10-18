@@ -7,9 +7,23 @@ networks:
     name: cvctl-edge
 services:
   api:
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 512m
     env_file:
       - /srv/inst/proj-dev/app.env
+    environment:
+      S3_BUCKET_PRESCRIPTIONS: ${S3_BUCKET_PRESCRIPTIONS}
+      S3_BUCKET_PRODUCTS: ${S3_BUCKET_PRODUCTS}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_PUBLIC_URL_PRODUCTS: ${S3_PUBLIC_URL_PRODUCTS}
     image: ghcr.io/org/project-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    labels:
+      cvctl.expose: "3000"
+      cvctl.role: app
     networks:
       app: {}
       data: {}
@@ -17,7 +31,17 @@ services:
         aliases:
           - proj-dev-api
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
   media:
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
+    cap_drop:
+      - ALL
     command:
       - server
       - /data
@@ -35,12 +59,18 @@ services:
         - ready
         - local
     image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    labels:
+      cvctl.env: S3
+      cvctl.expose: "9000"
+      cvctl.kind: s3
     networks:
       data: {}
       edge:
         aliases:
           - proj-dev-media
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - media-data:/data
 volumes:

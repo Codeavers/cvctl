@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -180,9 +181,7 @@ func TestOverrideIsValidCompose(t *testing.T) {
 
 func TestProjectMemoryLimitKept(t *testing.T) {
 	p, d, cat := setup(t)
-	svc := p.Compose.Services["main-db"]
-	svc.Deploy = &types.DeployConfig{Resources: types.Resources{Limits: &types.Resource{MemoryBytes: 1 << 30}}}
-	p.Compose.Services["main-db"] = svc
+	p.RawCompose = []byte(strings.Replace(string(p.RawCompose), "  main-db:\n", "  main-db:\n    deploy: { resources: { limits: { memory: 1g } } }\n", 1))
 	out, err := Override(p, d, cat, Options{InstanceDir: "/x", Edge: "edge"})
 	if err != nil {
 		t.Fatal(err)
@@ -193,8 +192,11 @@ func TestProjectMemoryLimitKept(t *testing.T) {
 	if err := yaml.Unmarshal(out, &doc); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := doc.Services["main-db"]["deploy"]; ok {
-		t.Fatal("main-db must not get a deploy block")
+	if !strings.Contains(string(out), "memory: 1g") {
+		t.Fatalf("main-db must keep the project memory limit:\n%s", out)
+	}
+	if strings.Count(string(out), "memory: 512m") != 2 {
+		t.Fatalf("api and cache keep 512m, main-db must not:\n%s", out)
 	}
 	if _, ok := doc.Services["cache"]["deploy"]; !ok || !strings.Contains(string(out), "memory: 512m") {
 		t.Fatal("cache must still get 512m")
@@ -762,8 +764,8 @@ func TestOverrideBucketsExternal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "profiles:\n      - cvctl-disabled") {
-		t.Fatalf("expected cvctl-disabled for external media:\n%s", out)
+	if strings.Contains(string(out), "media") || strings.Contains(string(out), "cvctl-disabled") {
+		t.Fatalf("external media must be omitted from the compose file:\n%s", out)
 	}
 	tout, err := Traefik(p, d, Options{Edge: "edge"})
 	if err != nil {
@@ -772,4 +774,59 @@ func TestOverrideBucketsExternal(t *testing.T) {
 	if strings.Contains(string(tout), "proj-dev-media") {
 		t.Fatalf("external media should have no router in traefik:\n%s", tout)
 	}
+}
+
+func TestOverrideIsSelfSufficient(t *testing.T) {
+	p, d, cat := setup(t)
+	out, err := Override(p, d, cat, Options{InstanceDir: "/srv/inst/proj-dev", Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := loadCompose(t, map[string][]byte{"compose.cvctl.yml": out}, []string{"compose.cvctl.yml"})
+	if _, ok := cp.Services["media"]; ok {
+		t.Fatal("external media must not be in the generated file")
+	}
+	for name, svc := range cp.Services {
+		if svc.Privileged {
+			t.Errorf("%s is privileged", name)
+		}
+		if !slices.Equal(svc.CapDrop, []string{"ALL"}) {
+			t.Errorf("%s cap_drop = %v", name, svc.CapDrop)
+		}
+		if !slices.Equal(svc.SecurityOpt, []string{"no-new-privileges:true"}) {
+			t.Errorf("%s security_opt = %v", name, svc.SecurityOpt)
+		}
+		for _, v := range svc.Volumes {
+			if v.Type == types.VolumeTypeBind {
+				t.Errorf("%s has a bind mount %s", name, v.Source)
+			}
+		}
+	}
+	if got := cp.Services["main-db"].CapAdd; !slices.Equal(got, []string{"CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER"}) {
+		t.Errorf("main-db cap_add = %v", got)
+	}
+	if len(cp.Services["api"].CapAdd) != 0 {
+		t.Errorf("api must have no cap_add")
+	}
+}
+
+// Generated strings are escaped; values copied from the project keep their
+// ${VAR} references for compose to interpolate from --env-file.
+func TestOverrideEscapesOnlyGenerated(t *testing.T) {
+	p, d, cat := setup(t)
+	sd := d.Services["main-db"]
+	sd.Creds.Password = "a$b"
+	d.Services["main-db"] = sd
+	out, err := Override(p, d, cat, Options{InstanceDir: "/x", Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "DATABASE_URL: ${DATABASE_URL}") {
+		t.Fatalf("project value must keep ${DATABASE_URL}:\n%s", s)
+	}
+	if !strings.Contains(s, "a$$b") {
+		t.Fatalf("generated password must be escaped:\n%s", s)
+	}
+	golden(t, "override-escape.yml", out)
 }

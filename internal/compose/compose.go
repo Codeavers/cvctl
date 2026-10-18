@@ -14,12 +14,11 @@ import (
 )
 
 type Project struct {
-	Run       sys.Runner
-	Instance  string
-	Dir       string
-	InfraPath string
-	Override  string
-	EnvFile   string
+	Run      sys.Runner
+	Instance string
+	Dir      string
+	Override string
+	EnvFile  string
 }
 
 type Container struct {
@@ -39,8 +38,7 @@ func (p Project) Cmd(args ...string) sys.Cmd {
 	if override == "" {
 		override = filepath.Join(p.Dir, "compose.cvctl.yml")
 	}
-	composeFile := filepath.Join(p.Dir, "infra", p.InfraPath, "compose.yml")
-	baseArgs := []string{"compose", "-p", p.Instance, "--env-file", envFile, "-f", composeFile, "-f", override}
+	baseArgs := []string{"compose", "-p", p.Instance, "--env-file", envFile, "-f", override}
 	return sys.Cmd{
 		Name: "docker",
 		Args: append(baseArgs, args...),

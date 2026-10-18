@@ -19,3 +19,4 @@ backup: wal-g
 external: [url]
 health: ["CMD-SHELL", "pg_isready -U {user} -d {db}"]
 restore_check: "select count(*) from information_schema.tables where table_schema='public'"
+cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]

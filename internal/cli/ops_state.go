@@ -275,19 +275,12 @@ func newLogsCmd() *cobra.Command {
 				}
 				logsOut = out
 			} else {
-				cvctlEnvPath := filepath.Join(e.deployRoot(), inst, "cvctl.env")
-				d0, _ := instance.Read(cvctlEnvPath, &contract.Project{})
-				infraPath := "."
-				if d0 != nil && d0.InfraPath != "" {
-					infraPath = d0.InfraPath
-				}
 				p := compose.Project{
-					Run:       e.runner(),
-					Instance:  inst,
-					Dir:       filepath.Join(e.deployRoot(), inst),
-					InfraPath: infraPath,
-					Override:  overridePath,
-					EnvFile:   appEnvPath,
+					Run:      e.runner(),
+					Instance: inst,
+					Dir:      filepath.Join(e.deployRoot(), inst),
+					Override: overridePath,
+					EnvFile:  appEnvPath,
 				}
 				out, err := p.Logs(cmd.Context(), service, tail)
 				if err != nil {

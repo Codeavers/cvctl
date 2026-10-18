@@ -277,3 +277,16 @@ func checkNoAliases(n *yaml.Node, path string, issues *[]output.Issue) {
 func isTraefikLabel(k string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(k)), "traefik.")
 }
+
+// RawService returns the fields of one service exactly as written in the
+// project's compose.yml, so values keep their original form (memory "128m",
+// environment as list or map). It returns nil when the service is absent.
+func RawService(p *Project, name string) map[string]any {
+	var doc struct {
+		Services map[string]map[string]any `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(p.RawCompose, &doc); err != nil {
+		return nil
+	}
+	return doc.Services[name]
+}

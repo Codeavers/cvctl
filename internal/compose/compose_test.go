@@ -32,43 +32,38 @@ func TestCmdShape(t *testing.T) {
 			wantArgs: []string{
 				"compose", "-p", "proj-dev",
 				"--env-file", "/srv/deploy/proj-dev/app.env",
-				"-f", "/srv/deploy/proj-dev/infra/compose.yml",
 				"-f", "/srv/deploy/proj-dev/compose.cvctl.yml",
 				"up", "-d",
 			},
 		},
 		{
-			name: "dot infra path",
+			name: "default override and env file",
 			project: Project{
-				Instance:  "proj-dev",
-				Dir:       "/srv/deploy/proj-dev",
-				InfraPath: ".",
+				Instance: "proj-dev",
+				Dir:      "/srv/deploy/proj-dev",
 			},
 			subcmd:   []string{"ps"},
 			wantName: "docker",
 			wantArgs: []string{
 				"compose", "-p", "proj-dev",
 				"--env-file", "/srv/deploy/proj-dev/app.env",
-				"-f", "/srv/deploy/proj-dev/infra/compose.yml",
 				"-f", "/srv/deploy/proj-dev/compose.cvctl.yml",
 				"ps",
 			},
 		},
 		{
-			name: "nested infra path and custom override and env file",
+			name: "custom override and env file",
 			project: Project{
-				Instance:  "proj-prod",
-				Dir:       "/srv/deploy/proj-prod",
-				InfraPath: "services/web",
-				Override:  "/srv/deploy/proj-prod/staging.override.yml",
-				EnvFile:   "/srv/deploy/proj-prod/staging.app.env",
+				Instance: "proj-prod",
+				Dir:      "/srv/deploy/proj-prod",
+				Override: "/srv/deploy/proj-prod/staging.override.yml",
+				EnvFile:  "/srv/deploy/proj-prod/staging.app.env",
 			},
 			subcmd:   []string{"config", "-q"},
 			wantName: "docker",
 			wantArgs: []string{
 				"compose", "-p", "proj-prod",
 				"--env-file", "/srv/deploy/proj-prod/staging.app.env",
-				"-f", "/srv/deploy/proj-prod/infra/services/web/compose.yml",
 				"-f", "/srv/deploy/proj-prod/staging.override.yml",
 				"config", "-q",
 			},
@@ -101,6 +96,9 @@ func TestRunHookArgs(t *testing.T) {
 	}
 
 	expectedCmd := p.Cmd("run", "--rm", "--no-deps", "-T", "--entrypoint", "sh", "api", "-c", "npm run migrate")
+	if n := strings.Count(strings.Join(expectedCmd.Args, " "), " -f "); n != 1 || strings.Contains(strings.Join(expectedCmd.Args, " "), "/infra") {
+		t.Fatalf("hooks must use only the generated file, got %v", expectedCmd.Args)
+	}
 	runner.On(expectedCmd.String(), sys.Result{Stdout: []byte("migrated 5 tables\n"), ExitCode: 0})
 
 	res, err := p.RunHook(context.Background(), "api", "npm run migrate")

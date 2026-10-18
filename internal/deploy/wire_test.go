@@ -70,7 +70,6 @@ func TestWire(t *testing.T) {
 		"compose",
 		"-p", inst,
 		"--env-file", envFile,
-		"-f", filepath.Join(instDir, "infra", "server", "compose.yml"),
 		"-f", override,
 		"config", "-q",
 	}
@@ -108,7 +107,7 @@ x-cvctl:
 
 	run := &systest.Runner{}
 	psOut := `[{"Service":"web","Name":"myapp-dev-web-1","State":"running","Health":"healthy"}]`
-	run.On("docker compose -p myapp-dev --env-file "+filepath.Join(instDir, "app.env")+" -f "+filepath.Join(serverDir, "compose.yml")+" -f "+filepath.Join(instDir, "compose.cvctl.yml")+" ps --format json", sys.Result{Stdout: []byte(psOut), ExitCode: 0})
+	run.On("docker compose -p myapp-dev --env-file "+filepath.Join(instDir, "app.env")+" -f "+filepath.Join(instDir, "compose.cvctl.yml")+" ps --format json", sys.Result{Stdout: []byte(psOut), ExitCode: 0})
 
 	inspectOut := `{"myapp_dev_app":{"IPAddress":"127.0.0.1"}}`
 	run.On("docker inspect -f {{json .NetworkSettings.Networks}} myapp-dev-web-1", sys.Result{Stdout: []byte(inspectOut), ExitCode: 0})

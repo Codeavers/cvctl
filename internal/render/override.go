@@ -5,6 +5,7 @@ package render
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -205,12 +206,52 @@ func ServiceVars(p *contract.Project, d *instance.Decisions, cat kinds.Catalog) 
 	return out, nil
 }
 
-func hasProjectMemoryLimit(p *contract.Project, name string) bool {
-	svc, ok := p.Compose.Services[name]
-	if !ok || svc.Deploy == nil || svc.Deploy.Resources.Limits == nil {
-		return false
+// appRawFields are copied verbatim from the project's compose.yml into an
+// app service; their ${VAR} references stay for compose to interpolate.
+var appRawFields = []string{"environment", "command", "entrypoint", "healthcheck", "labels", "stop_grace_period", "depends_on"}
+
+// copyRaw copies the named fields of the raw project service into svc and
+// records them as project-owned so their "$" is not doubled.
+func copyRaw(svc map[string]any, raw map[string]any, fields []string, owned map[string]bool) {
+	for _, f := range fields {
+		if v, ok := raw[f]; ok {
+			svc[f] = v
+			owned[f] = true
+		}
 	}
-	return svc.Deploy.Resources.Limits.MemoryBytes > 0
+}
+
+// rawResources returns the project's deploy.resources of a service.
+func rawResources(raw map[string]any) map[string]any {
+	deploy, _ := raw["deploy"].(map[string]any)
+	res, _ := deploy["resources"].(map[string]any)
+	return res
+}
+
+// dataResources is the project's deploy.resources, with the 512m memory limit
+// added when the project sets none.
+func dataResources(raw map[string]any) (map[string]any, bool) {
+	res := rawResources(raw)
+	if res == nil {
+		return map[string]any{"limits": map[string]any{"memory": "512m"}}, false
+	}
+	limits, _ := res["limits"].(map[string]any)
+	if _, ok := limits["memory"]; ok {
+		return res, true
+	}
+	out := maps.Clone(res)
+	nl := maps.Clone(limits)
+	if nl == nil {
+		nl = map[string]any{}
+	}
+	nl["memory"] = "512m"
+	out["limits"] = nl
+	return out, true
+}
+
+func hardened(svc map[string]any) {
+	svc["security_opt"] = []string{"no-new-privileges:true"}
+	svc["cap_drop"] = []string{"ALL"}
 }
 
 func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o Options) ([]byte, error) {
@@ -218,6 +259,7 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 		return nil, missing("instance")
 	}
 	services := map[string]any{}
+	owned := map[string]map[string]bool{}
 	volumes := map[string]any{}
 	usesBackupNet := false
 
@@ -234,12 +276,22 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 		if appEnvPath == "" {
 			appEnvPath = filepath.Join(o.InstanceDir, "app.env")
 		}
-		services[a.Name] = map[string]any{
+		svc := map[string]any{
 			"image":    a.Image + "@" + digest,
 			"env_file": []string{appEnvPath},
 			"restart":  "unless-stopped",
 			"networks": nets,
 		}
+		own := map[string]bool{}
+		raw := contract.RawService(p, a.Name)
+		copyRaw(svc, raw, appRawFields, own)
+		if res := rawResources(raw); res != nil {
+			svc["deploy"] = map[string]any{"resources": res}
+			own["deploy"] = true
+		}
+		hardened(svc)
+		services[a.Name] = svc
+		owned[a.Name] = own
 	}
 
 	for _, ds := range p.Data {
@@ -248,7 +300,6 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 			return nil, missing("service " + ds.Name)
 		}
 		if sd.Mode == "external" {
-			services[ds.Name] = map[string]any{"profiles": []string{"cvctl-disabled"}}
 			continue
 		}
 		if err := validateCreds(ds.Name, sd.Creds); err != nil {
@@ -309,10 +360,16 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 		if len(k.Health) > 0 {
 			svc["healthcheck"] = map[string]any{"test": substituteAll(k, k.Health, sd.Creds)}
 		}
-		if !hasProjectMemoryLimit(p, ds.Name) {
-			svc["deploy"] = map[string]any{"resources": map[string]any{"limits": map[string]any{"memory": "512m"}}}
-		}
+		raw := contract.RawService(p, ds.Name)
+		own := map[string]bool{}
+		copyRaw(svc, raw, []string{"labels"}, own)
+		res, fromProject := dataResources(raw)
+		svc["deploy"] = map[string]any{"resources": res}
+		own["deploy"] = fromProject
+		hardened(svc)
+		svc["cap_add"] = k.CapAdd
 		services[ds.Name] = svc
+		owned[ds.Name] = own
 		volumes[ds.Name+"-data"] = map[string]any{"name": VolumeName(d, ds.Name)}
 	}
 
@@ -330,7 +387,7 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 	if len(volumes) > 0 {
 		doc["volumes"] = volumes
 	}
-	return marshalEscaped(doc)
+	return marshalEscaped(doc, owned)
 }
 
 var safeIdent = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
@@ -352,14 +409,35 @@ func validateCreds(name string, c kinds.Credentials) error {
 	return nil
 }
 
-// marshalEscaped doubles every "$" in string values: docker compose
-// interpolates the override at deploy time, unlike env_file contents.
-func marshalEscaped(v any) ([]byte, error) {
+// marshalEscaped doubles every "$" in cvctl-generated string values: docker
+// compose interpolates the file at deploy time, unlike env_file contents.
+// owned lists, per service, the fields copied from the project, which keep
+// their ${VAR} references for compose to resolve from --env-file.
+func marshalEscaped(v map[string]any, owned map[string]map[string]bool) ([]byte, error) {
 	var n yaml.Node
 	if err := n.Encode(v); err != nil {
 		return nil, err
 	}
-	escapeValues(&n)
+	top := &n
+	if n.Kind == yaml.DocumentNode && len(n.Content) > 0 {
+		top = n.Content[0]
+	}
+	for i := 0; i+1 < len(top.Content); i += 2 {
+		if top.Content[i].Value != "services" {
+			escapeValues(top.Content[i+1])
+			continue
+		}
+		svcs := top.Content[i+1]
+		for j := 0; j+1 < len(svcs.Content); j += 2 {
+			svc := svcs.Content[j+1]
+			skip := owned[svcs.Content[j].Value]
+			for k := 0; k+1 < len(svc.Content); k += 2 {
+				if !skip[svc.Content[k].Value] {
+					escapeValues(svc.Content[k+1])
+				}
+			}
+		}
+	}
 	return marshal(&n)
 }
 

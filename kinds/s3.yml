@@ -18,3 +18,4 @@ backup: volume
 external: [endpoint, bucket, access_key, secret_key, region]
 health: ["CMD", "mc", "ready", "local"]
 buckets: true
+cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]

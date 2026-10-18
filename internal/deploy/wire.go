@@ -48,14 +48,12 @@ func Wire(d *Deployer, run sys.Runner) {
 
 	d.Compose = func(inst, override, envFile string) ComposeAPI {
 		instDir := filepath.Join(d.deployRoot(), inst)
-		infraPath := readInfraPath(d.FS, d.deployRoot(), inst)
 		return &compose.Project{
-			Run:       run,
-			Instance:  inst,
-			Dir:       instDir,
-			InfraPath: infraPath,
-			Override:  override,
-			EnvFile:   envFile,
+			Run:      run,
+			Instance: inst,
+			Dir:      instDir,
+			Override: override,
+			EnvFile:  envFile,
 		}
 	}
 
@@ -87,12 +85,11 @@ func Wire(d *Deployer, run sys.Runner) {
 
 		port := p.HealthPort()
 		proj := compose.Project{
-			Run:       run,
-			Instance:  inst,
-			Dir:       instDir,
-			InfraPath: infraPath,
-			Override:  override,
-			EnvFile:   filepath.Join(instDir, "app.env"),
+			Run:      run,
+			Instance: inst,
+			Dir:      instDir,
+			Override: override,
+			EnvFile:  filepath.Join(instDir, "app.env"),
 		}
 		return compose.Health(ctx, run, proj, p.X.Health, port, nil)
 	}
@@ -102,10 +99,9 @@ func Wire(d *Deployer, run sys.Runner) {
 // override and app env paths.
 func (d *Deployer) ComposeProject(run sys.Runner, inst string) *compose.Project {
 	return &compose.Project{
-		Run:       run,
-		Instance:  inst,
-		Dir:       filepath.Join(d.deployRoot(), inst),
-		InfraPath: readInfraPath(d.FS, d.deployRoot(), inst),
+		Run:      run,
+		Instance: inst,
+		Dir:      filepath.Join(d.deployRoot(), inst),
 	}
 }
 

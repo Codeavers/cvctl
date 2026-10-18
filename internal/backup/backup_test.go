@@ -70,7 +70,7 @@ func newRig(t *testing.T) *rig {
 	r := &backup.Runner{
 		Run: run, FS: fsys, Store: store, Notify: note,
 		Compose: func(inst string) *compose.Project {
-			return &compose.Project{Run: run, Instance: inst, Dir: "/srv/deploy/" + inst, InfraPath: "."}
+			return &compose.Project{Run: run, Instance: inst, Dir: "/srv/deploy/" + inst}
 		},
 		Load: func(string) (*contract.Project, *instance.Decisions, error) { return p, d, nil },
 		Host: &render.BackupTarget{
