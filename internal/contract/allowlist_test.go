@@ -519,3 +519,23 @@ func TestCheckFieldsPortsAndShapes(t *testing.T) {
 		t.Fatalf("non-mapping deploy not rejected: %v", issues)
 	}
 }
+
+func TestCheckFieldsRejectsMultipleDocumentsAndBadYAML(t *testing.T) {
+	cases := map[string]string{
+		"second document": "services:\n  api:\n    image: a\n    labels: {cvctl.role: app}\n---\nservices:\n  api:\n    privileged: true\n",
+		"invalid yaml":    "services: [\n",
+		"scalar root":     "just a string\n",
+		"empty":           "",
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			issues := contract.CheckFields([]byte(raw))
+			if len(issues) != 1 || issues[0].Code != "E_CONTRACT_COMPOSE_INVALID" {
+				t.Fatalf("want one E_CONTRACT_COMPOSE_INVALID, got %v", issues)
+			}
+		})
+	}
+	if issues := contract.CheckFields([]byte("---\nservices:\n  api:\n    image: a\n    labels: {cvctl.role: app}\n")); len(issues) != 0 {
+		t.Fatalf("a single document after a leading --- is fine, got %v", issues)
+	}
+}

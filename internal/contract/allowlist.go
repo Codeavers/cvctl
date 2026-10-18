@@ -1,7 +1,10 @@
 package contract
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -29,17 +32,39 @@ var dataAllowedFields = map[string]bool{
 // CheckFields validates raw compose YAML against the contract field allowlist
 // before compose-go normalizes or expands includes/extends.
 func CheckFields(raw []byte) []output.Issue {
-	var root yaml.Node
-	if err := yaml.Unmarshal(raw, &root); err != nil {
-		return nil
+	invalid := func(msg string) []output.Issue {
+		return []output.Issue{{
+			Code:    "E_CONTRACT_COMPOSE_INVALID",
+			Message: msg,
+			Hint:    "compose.yml must be a single YAML document with a top-level mapping",
+		}}
 	}
-	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		return nil
+	// compose-go merges every document of the file, so the check must see
+	// exactly the one it would load.
+	var docs []*yaml.Node
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	for {
+		var n yaml.Node
+		err := dec.Decode(&n)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return invalid("compose.yml is not valid YAML: " + err.Error())
+		}
+		if n.Kind == yaml.DocumentNode && len(n.Content) == 0 {
+			continue
+		}
+		docs = append(docs, &n)
+	}
+	if len(docs) != 1 {
+		return invalid(fmt.Sprintf("compose.yml has %d YAML documents", len(docs)))
+	}
+	root := docs[0]
+	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return invalid("compose.yml has no top-level mapping")
 	}
 	doc := root.Content[0]
-	if doc.Kind != yaml.MappingNode {
-		return nil
-	}
 
 	var issues []output.Issue
 	// Anchors and aliases would let a service reuse a mapping the walk below
