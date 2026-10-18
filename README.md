@@ -2,7 +2,6 @@
 
 Pull-based deploy agent and CLI for Docker Compose on a single VPS.
 
-
 Every command accepts `--json` and then prints exactly one JSON document.
 Exit codes: `0` ok, `1` validation or business error, `2` usage error.
 Every error and issue carries a stable `E_<AREA>_<CAUSE>` code and a `hint`.
@@ -51,20 +50,29 @@ access to the project repository (Package settings, Manage Actions access).
 ## Timeouts
 
 Defaults and `host.env` keys: fetch 2m (`CVCTL_TIMEOUT_FETCH`), pull 10m (`CVCTL_TIMEOUT_PULL`),
-each hook 15m (`CVCTL_TIMEOUT_HOOK`, or `x-cvctl.hooks[].timeout`), whole deploy 45m
-(`CVCTL_TIMEOUT_DEPLOY`). Health waits use `x-cvctl.health.timeout` plus 2m. Exceeding one fails
-with `E_TIMEOUT`.
+each hook 15m (`CVCTL_TIMEOUT_HOOK`; `x-cvctl.hooks[].timeout` can only lower it), whole deploy
+45m (`CVCTL_TIMEOUT_DEPLOY`). Health waits use `x-cvctl.health.timeout` (at most 10m) plus 2m.
+Exceeding one fails with `E_TIMEOUT`. Fetch, pull and deploy timeouts are retried on the next
+cycle; a hook timeout fails that desired state until it changes.
 
-## Upgrade notes
+## Upgrading a host to v0.7
 
-- Networks: instances move to per-instance `<inst>_edge` and `<inst>_backup` networks and Traefik
-  uses the fixed subnet `10.203.0.0/24` (`E_TRAEFIK_EDGE_SUBNET` if it clashes). Re-run `cvctl init`
-  and redeploy each instance.
-- Backup keys: the backup user and policy are now per instance. Run `cvctl project update` to
-  migrate; the backup generation is bumped (see Backup generations). Failures are
-  `E_BACKUP_PROVISION`.
-- `--` is no longer allowed in instance names (`E_INSTANCE_NAME`); rename such instances.
-- Re-run `cvctl secrets export` after the update so the bundle holds the new keys.
+Requires Docker Engine 28 or later (`E_DOCKER_TOO_OLD`). Instance names containing `--` must be
+renamed first: `E_INSTANCE_NAME`, and bundle import rejects them. Run, in this order:
+
+1. With the new binary, `cvctl lint` each instance's infra dir and fix and publish what it reports
+   (forbidden compose fields, service names that are not `^[a-z0-9]+([-_][a-z0-9]+)*$`).
+2. Check that the app images run without capabilities: no port below 1024, no setuid at start.
+3. Install the binary.
+4. `cvctl project update <inst>` for every instance: per-instance backup keys (the backup
+   generation is bumped, see Backup generations; failures are `E_BACKUP_PROVISION`), the
+   `<inst>_edge` and `<inst>_backup` networks, and connecting Traefik and the storage silo to them.
+5. `cvctl init` last: Traefik moves to `cvctl-edge-proxy` (`10.203.0.0/24`,
+   `E_TRAEFIK_EDGE_SUBNET` if it clashes) and the legacy `cvctl-edge` and `cvctl-backup` networks
+   are retired once nothing else uses them.
+6. `cvctl secrets export`, so the bundle holds the new keys.
+7. Registry logins other than the token host (`CVCTL_REGISTRY_HOST`, else the first
+   `CVCTL_REGISTRIES` host) are pruned automatically by the agent on start.
 
 ## init
 
@@ -83,7 +91,6 @@ sudo cvctl init --non-interactive --json
 
 See [docs/host-init.md](docs/host-init.md) for full step documentation, file permissions table,
 SSH try/confirm recovery flow, and non-interactive configuration.
-
 
 ## lint
 
