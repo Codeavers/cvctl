@@ -337,6 +337,7 @@ func TestSameHost(t *testing.T) {
 		{"localhost:5000", "localhost:5001", false},
 		{"reg.io", "reg.io:5000", false},
 		{"", "", false},
+		{"docker.io", "index.docker.io", true},
 	} {
 		if got := registry.SameHost(tc.a, tc.b); got != tc.want {
 			t.Errorf("SameHost(%q,%q)=%v", tc.a, tc.b, got)

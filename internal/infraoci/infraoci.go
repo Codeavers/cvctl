@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"path"
 	"strings"
 
@@ -118,13 +119,23 @@ func Fetch(ctx context.Context, a Auth, ref, digest string) (*Contract, error) {
 	if err != nil {
 		return nil, fail("E_INFRA_ARTIFACT", fmt.Sprintf("invalid artifact reference %q", ref+"@"+digest), "use host/repository and a sha256 digest")
 	}
-	img, err := remote.Image(r, append(opts, remote.WithContext(ctx))...)
+	desc, err := remote.Get(r, append(opts, remote.WithContext(ctx))...)
 	if err != nil {
 		return nil, fail("E_INFRA_ARTIFACT", a.transportMsg(err, "pulling "+ref+"@"+digest), "check the artifact reference and registry credentials")
+	}
+	if desc.MediaType != types.OCIManifestSchema1 {
+		return nil, fail("E_INFRA_ARTIFACT", fmt.Sprintf("artifact manifest has media type %q, want %q", desc.MediaType, types.OCIManifestSchema1), "publish it with `cvctl publish`")
+	}
+	img, err := desc.Image()
+	if err != nil {
+		return nil, fail("E_INFRA_ARTIFACT", a.transportMsg(err, "reading artifact"), "check the artifact reference")
 	}
 	m, err := img.Manifest()
 	if err != nil {
 		return nil, fail("E_INFRA_ARTIFACT", a.transportMsg(err, "reading manifest"), "check the artifact reference")
+	}
+	if m.MediaType != types.OCIManifestSchema1 {
+		return nil, fail("E_INFRA_ARTIFACT", fmt.Sprintf("artifact manifest has media type %q, want %q", m.MediaType, types.OCIManifestSchema1), "publish it with `cvctl publish`")
 	}
 	if string(m.Config.MediaType) != ContractType {
 		return nil, fail("E_INFRA_ARTIFACT", "artifact is not a cvctl contract", "publish it with `cvctl publish`")
@@ -190,6 +201,21 @@ func Extract(fsys sys.FS, instDir string, c *Contract) error {
 			return fail("E_INFRA_ARTIFACT", infra+" is not a directory", "remove it and retry")
 		}
 		hadInfra = true
+	} else if errors.Is(err, fs.ErrNotExist) {
+		// A crash between the two renames leaves only infra.prev.
+		if _, perr := fsys.Lstat(prev); perr == nil {
+			if rerr := fsys.Rename(prev, infra); rerr != nil {
+				return fail("E_INFRA_ARTIFACT", fmt.Sprintf("cannot restore %s: %v", infra, rerr), "move infra.prev back to infra by hand")
+			}
+			hadInfra = true
+		}
+	}
+	if ents, err := fsys.ReadDir(instDir); err == nil {
+		for _, e := range ents {
+			if strings.HasPrefix(e.Name(), ".infra-") {
+				_ = fsys.RemoveAll(path.Join(instDir, e.Name()))
+			}
+		}
 	}
 
 	for file := range c.Files {
@@ -202,7 +228,7 @@ func Extract(fsys sys.FS, instDir string, c *Contract) error {
 		return fail("E_INFRA_ARTIFACT", "cannot create a temporary directory name", "retry")
 	}
 	tmp := path.Join(instDir, ".infra-"+hex.EncodeToString(rnd[:]))
-	if err := fsys.MkdirAll(tmp, 0o750, infraOwner); err != nil {
+	if err := fsys.Mkdir(tmp, 0o750, infraOwner); err != nil {
 		return fail("E_INFRA_ARTIFACT", fmt.Sprintf("cannot create %s: %v", tmp, err), "check ownership of the instance directory")
 	}
 	for _, file := range fileOrder {

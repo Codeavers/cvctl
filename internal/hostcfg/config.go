@@ -71,6 +71,13 @@ func oneOf(vals ...string) func(string) error {
 	}
 }
 
+func validRegistryHost(v string) error {
+	if strings.ContainsAny(v, "/ \t\r\n") || strings.Contains(v, "://") {
+		return errors.New("must be a host or host:port without a scheme, path or spaces")
+	}
+	return nil
+}
+
 func validBool(v string) error { return oneOf("true", "false")(v) }
 
 func validLabel(v string) error {
@@ -100,6 +107,7 @@ var validators = map[string]func(string) error{
 	"STORAGE":         oneOf("local", "s3"),
 	"NOTIFY":          oneOf("telegram", "none"),
 	"EDGE_SUBNET":     validEdgeSubnet,
+	"REGISTRY_HOST":   validRegistryHost,
 
 	"TIMEOUT_FETCH":  validTimeout,
 	"TIMEOUT_PULL":   validTimeout,

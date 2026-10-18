@@ -193,6 +193,17 @@ func (f *FS) Remove(p string) error {
 	return nil
 }
 
+func (f *FS) Mkdir(p string, mode os.FileMode, o sys.Owner) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p = path.Clean(p)
+	if _, ok := f.m[p]; ok {
+		return &fs.PathError{Op: "mkdir", Path: p, Err: fs.ErrExist}
+	}
+	f.put(p, nil, mode, o, true)
+	return nil
+}
+
 func (f *FS) RemoveAll(p string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -211,6 +222,13 @@ func (f *FS) Rename(oldp, newp string) error {
 	oldp, newp = path.Clean(oldp), path.Clean(newp)
 	if _, ok := f.m[oldp]; !ok {
 		return &fs.PathError{Op: "rename", Path: oldp, Err: fs.ErrNotExist}
+	}
+	if d, ok := f.m[newp]; ok && d.info.IsDir {
+		for k := range f.m {
+			if strings.HasPrefix(k, newp+"/") {
+				return &fs.PathError{Op: "rename", Path: newp, Err: syscall.ENOTEMPTY}
+			}
+		}
 	}
 	moved := map[string]*entry{}
 	for k, e := range f.m {

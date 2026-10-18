@@ -368,3 +368,15 @@ func TestTokenHost(t *testing.T) {
 		t.Fatalf("explicit: %q", got)
 	}
 }
+
+func TestRegistryHostValidation(t *testing.T) {
+	c := hostcfg.NewConfig()
+	for _, bad := range []string{"ghcr.io/x", "https://ghcr.io", "a b"} {
+		if err := c.Set("REGISTRY_HOST", bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	if err := c.Set("REGISTRY_HOST", "localhost:5000"); err != nil {
+		t.Fatal(err)
+	}
+}

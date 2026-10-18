@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/name"
 	ggcrreg "github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -303,3 +304,63 @@ func TestTokenOnlyToTokenHost(t *testing.T) {
 		t.Fatalf("credentials leaked to other host: %v", seenB)
 	}
 }
+
+func TestFetchRejectsImageIndex(t *testing.T) {
+	host, a := newRegistry(t, nil)
+	ctx := context.Background()
+	child, err := infraoci.Publish(ctx, a, host+"/infra/app:v1", goodFiles())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cref, _ := name.ParseReference(host+"/infra/app@"+child, name.Insecure)
+	img, err := remote.Image(cref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := mutate.AppendManifests(empty.Index, mutate.IndexAddendum{
+		Add:        img,
+		Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "linux", Architecture: "amd64"}},
+	})
+	iref, _ := name.ParseReference(host+"/infra/app:idx", name.Insecure)
+	if err := remote.WriteIndex(iref, idx); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := idx.Digest()
+	_, err = infraoci.Fetch(ctx, a, host+"/infra/app", d.String())
+	wantCode(t, err, "E_INFRA_ARTIFACT")
+}
+
+func TestExtractRecoversInterruptedSwap(t *testing.T) {
+	fsys := systest.NewFS()
+	_ = fsys.MkdirAll("/srv/deploy/i/infra.prev", 0o750, sys.Owner{})
+	_ = fsys.WriteFile("/srv/deploy/i/infra.prev/compose.yml", []byte("old"), 0o640, sys.Owner{})
+	_ = fsys.MkdirAll("/srv/deploy/i/.infra-dead", 0o750, sys.Owner{})
+	err := infraoci.Extract(fsys, "/srv/deploy/i", &infraoci.Contract{Files: goodFiles()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p := range fsys.Files() {
+		if strings.Contains(p, ".infra-") || strings.Contains(p, "infra.prev") {
+			t.Fatalf("leftover %s", p)
+		}
+	}
+	if _, err := fsys.Stat("/srv/deploy/i/infra/compose.yml"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExtractRestoreFailureReported(t *testing.T) {
+	base := systest.NewFS()
+	_ = base.MkdirAll("/srv/deploy/i/infra.prev", 0o750, sys.Owner{})
+	fsys := &renameFailFS{FS: base, failNew: true}
+	_ = fsys
+	err := infraoci.Extract(failAllRename{base}, "/srv/deploy/i", &infraoci.Contract{Files: goodFiles()})
+	wantCode(t, err, "E_INFRA_ARTIFACT")
+	if !strings.Contains(err.Error(), "restore") {
+		t.Fatalf("restore failure not reported: %v", err)
+	}
+}
+
+type failAllRename struct{ *systest.FS }
+
+func (failAllRename) Rename(string, string) error { return errors.New("denied") }

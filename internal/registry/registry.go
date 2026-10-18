@@ -79,7 +79,11 @@ func SameHost(a, b string) bool {
 	norm := func(h string) string {
 		h = strings.ToLower(strings.TrimSpace(h))
 		h = strings.TrimPrefix(h, "http://")
-		return strings.TrimPrefix(h, "https://")
+		h = strings.TrimPrefix(h, "https://")
+		if h == "docker.io" || h == "registry-1.docker.io" {
+			return "index.docker.io"
+		}
+		return h
 	}
 	a, b = norm(a), norm(b)
 	return a != "" && a == b
