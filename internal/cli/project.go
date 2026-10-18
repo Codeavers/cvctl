@@ -60,7 +60,7 @@ var newProjectEnv = func(o projectOpts) (*project.Env, error) {
 	var regResolver registry.Resolver
 	if cfg != nil {
 		token, _ := secrets.Get("registry_token")
-		regResolver = registry.New(cfg.RegistryUser, token, registry.InsecureHostsFromEnv())
+		regResolver = registry.New(cfg.RegistryUser, token, cfg.TokenHost(), registry.InsecureHostsFromEnv())
 	}
 
 	store := state.NewStore(fsys, "/var/lib/cvctl")

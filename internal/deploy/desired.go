@@ -91,7 +91,7 @@ func SourceDepsWithRoots(inst string, run sys.Runner, host *hostcfg.Config, secr
 	if secrets != nil {
 		token, _ = secrets.Get("registry_token")
 	}
-	resolver := registry.New(user, token, registry.InsecureHostsFromEnv())
+	resolver := registry.New(user, token, host.TokenHost(), registry.InsecureHostsFromEnv())
 
 	return Deps{
 		Repo:     repo,

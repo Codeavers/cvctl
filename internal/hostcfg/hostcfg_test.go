@@ -351,3 +351,20 @@ func TestTimeouts(t *testing.T) {
 		}
 	}
 }
+
+func TestTokenHost(t *testing.T) {
+	c := hostcfg.NewConfig()
+	if got := c.TokenHost(); got != "" {
+		t.Fatalf("empty config: %q", got)
+	}
+	_ = c.Set("REGISTRIES", " ghcr.io/codeavers , other.io/x")
+	if got := c.TokenHost(); got != "ghcr.io" {
+		t.Fatalf("default: %q", got)
+	}
+	if err := c.Set("REGISTRY_HOST", "other.io"); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.TokenHost(); got != "other.io" {
+		t.Fatalf("explicit: %q", got)
+	}
+}

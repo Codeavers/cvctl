@@ -69,14 +69,41 @@ type Resolver interface {
 type resolver struct {
 	user          string
 	token         string
+	tokenHost     string
 	insecureHosts []string
 }
 
-// New returns a Resolver using go-containerregistry.
-func New(user, token string, insecureHosts []string) Resolver {
+// SameHost reports whether two registry hosts are equal, ignoring case and any
+// scheme; a port is part of the host, so "reg.io" and "reg.io:5000" differ.
+func SameHost(a, b string) bool {
+	norm := func(h string) string {
+		h = strings.ToLower(strings.TrimSpace(h))
+		h = strings.TrimPrefix(h, "http://")
+		return strings.TrimPrefix(h, "https://")
+	}
+	a, b = norm(a), norm(b)
+	return a != "" && a == b
+}
+
+// AuthFor returns Basic credentials only when host is tokenHost; every other
+// host is anonymous so the registry token never leaves its own registry.
+func AuthFor(user, token, tokenHost, host string) authn.Authenticator {
+	if token == "" || !SameHost(host, tokenHost) {
+		return authn.Anonymous
+	}
+	if user == "" {
+		user = "cvctl"
+	}
+	return &authn.Basic{Username: user, Password: token}
+}
+
+// New returns a Resolver using go-containerregistry. The token is sent only
+// to tokenHost.
+func New(user, token, tokenHost string, insecureHosts []string) Resolver {
 	return &resolver{
 		user:          user,
 		token:         token,
+		tokenHost:     tokenHost,
 		insecureHosts: insecureHosts,
 	}
 }
@@ -118,18 +145,7 @@ func (r *resolver) Digest(ctx context.Context, image, tag string) (string, error
 
 	var remoteOpts []remote.Option
 	remoteOpts = append(remoteOpts, remote.WithContext(ctx))
-	if r.token != "" {
-		u := r.user
-		if u == "" {
-			u = "cvctl"
-		}
-		remoteOpts = append(remoteOpts, remote.WithAuth(&authn.Basic{
-			Username: u,
-			Password: r.token,
-		}))
-	} else {
-		remoteOpts = append(remoteOpts, remote.WithAuth(authn.Anonymous))
-	}
+	remoteOpts = append(remoteOpts, remote.WithAuth(AuthFor(r.user, r.token, r.tokenHost, regHost)))
 
 	desc, err := remote.Head(ref, remoteOpts...)
 	if err != nil {
@@ -254,4 +270,9 @@ func InsecureHostsFromEnv() []string {
 		}
 	}
 	return hosts
+}
+
+// IsInsecure reports whether host is in the insecure (plain HTTP) list.
+func IsInsecure(host string, insecureHosts []string) bool {
+	return isInsecure(host, insecureHosts)
 }

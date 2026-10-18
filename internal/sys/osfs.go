@@ -25,6 +25,10 @@ func (osFS) Remove(path string) error {
 	return nil
 }
 
+func (osFS) Rename(oldpath, newpath string) error { return os.Rename(oldpath, newpath) }
+
+func (osFS) RemoveAll(path string) error { return os.RemoveAll(path) }
+
 func (osFS) ReadDir(path string) ([]os.DirEntry, error) {
 	return os.ReadDir(path)
 }

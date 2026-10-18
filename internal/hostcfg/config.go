@@ -52,6 +52,7 @@ type Config struct {
 	TelegramThread     string
 	Registries         string
 	RegistryUser       string
+	RegistryHost       string
 	EdgeSubnet         string
 	vals               map[string]string
 	extra              map[string]string // host.env entries cvctl does not know; kept verbatim on Save
@@ -165,6 +166,23 @@ func validEdgeSubnet(v string) error {
 	return nil
 }
 
+// TokenHost is the only registry host that receives the registry token:
+// CVCTL_REGISTRY_HOST, else the host of the first CVCTL_REGISTRIES entry.
+func (c *Config) TokenHost() string {
+	if c == nil {
+		return ""
+	}
+	if c.RegistryHost != "" {
+		return c.RegistryHost
+	}
+	for _, r := range strings.Split(c.Registries, ",") {
+		if h := strings.TrimSpace(strings.SplitN(strings.TrimSpace(r), "/", 2)[0]); h != "" {
+			return h
+		}
+	}
+	return ""
+}
+
 // EdgeSubnetOrDefault returns the configured proxy subnet or the default.
 func (c *Config) EdgeSubnetOrDefault() string {
 	if c != nil && c.EdgeSubnet != "" {
@@ -185,7 +203,7 @@ func (c *Config) EdgeGateway() string {
 var knownKeys = []string{
 	"HOST_NAME", "EDGE_MODE", "PROXY_PORT", "ADMIN_USER", "SSH_MANAGE", "FIREWALL_MANAGE",
 	"ACME_EMAIL", "ACME_CHALLENGE", "STORAGE", "S3_ENDPOINT", "S3_BUCKET", "S3_REGION", "S3_ENDPOINT_INTERNAL",
-	"NOTIFY", "TELEGRAM_CHAT_ID", "TELEGRAM_THREAD_ID", "REGISTRIES", "REGISTRY_USER",
+	"NOTIFY", "TELEGRAM_CHAT_ID", "TELEGRAM_THREAD_ID", "REGISTRIES", "REGISTRY_USER", "REGISTRY_HOST",
 	"EDGE_SUBNET", "TIMEOUT_FETCH", "TIMEOUT_PULL", "TIMEOUT_HOOK", "TIMEOUT_DEPLOY",
 }
 
@@ -280,6 +298,8 @@ func (c *Config) sync(key, val string) {
 		c.Registries = val
 	case "REGISTRY_USER":
 		c.RegistryUser = val
+	case "REGISTRY_HOST":
+		c.RegistryHost = val
 	case "EDGE_SUBNET":
 		c.EdgeSubnet = val
 	}
