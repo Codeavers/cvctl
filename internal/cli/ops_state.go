@@ -353,7 +353,7 @@ func (e *OpsEnv) s3Warnings(instances []string) []string {
 				warnings = append(warnings, fmt.Sprintf("%s: backups use the host keys; run cvctl project update %s", inst, inst))
 			}
 			if e.Host != nil && e.Host.Storage == "s3" && (d.Backup.Ext["access_key"] == "" || d.Backup.Ext["secret_key"] == "") {
-				warnings = append(warnings, fmt.Sprintf("%s: backups use the host S3 credentials; any instance can delete them (set per-instance credentials)", inst))
+				warnings = append(warnings, fmt.Sprintf("%s: backups use the host S3 credentials; any instance can delete them; per-instance backup credentials (--ext backup.*) can only be set at project add", inst))
 			}
 		}
 		for _, ds := range p.Data {

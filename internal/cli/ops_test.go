@@ -1321,7 +1321,7 @@ func TestStatusWarnsHostS3CredentialsForBackups(t *testing.T) {
 	t.Cleanup(func() { newOpsEnv = oldEnv })
 	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
 
-	const want = "demo-dev: backups use the host S3 credentials; any instance can delete them (set per-instance credentials)"
+	const want = "demo-dev: backups use the host S3 credentials; any instance can delete them; per-instance backup credentials (--ext backup.*) can only be set at project add"
 	code, out, errb := run(t, "status")
 	if code != 0 || !strings.Contains(out, "warning: "+want) {
 		t.Fatalf("code=%d out=%s err=%s", code, out, errb)
