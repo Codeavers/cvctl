@@ -4,7 +4,7 @@ networks:
     internal: true
   edge:
     external: true
-    name: cvctl-edge
+    name: proj-dev_edge
 services:
   api:
     cap_drop:
@@ -26,7 +26,7 @@ services:
       data: {}
       edge:
         aliases:
-          - proj-dev-api
+          - proj-dev--api
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

@@ -7,11 +7,22 @@ import (
 	"path/filepath"
 
 	"github.com/codeavers/cvctl/internal/output"
+	"github.com/codeavers/cvctl/internal/render"
 	"github.com/codeavers/cvctl/internal/sys"
 )
 
 // resticExitNoRepo is restic's exit code for a repository that does not exist.
 const resticExitNoRepo = 10
+
+// backupNet makes sure the instance's internal backup network exists: backup
+// containers run from the host CLI, before or without a compose up.
+func (r *Runner) backupNet(ctx context.Context, inst string) (string, error) {
+	name := render.NetworkBackup(inst)
+	if err := sys.EnsureNetwork(ctx, r.Run, name, true); err != nil {
+		return "", err
+	}
+	return name, nil
+}
 
 func (r *Runner) resticEnvPath(inst, svc string) string {
 	return filepath.Join(r.instanceDir(inst), "restic-"+svc+".env")
@@ -45,8 +56,8 @@ func (r *Runner) writeResticEnv(inst, svc string) (string, error) {
 	return path, nil
 }
 
-func (r *Runner) resticCmd(envFile, volume string, args ...string) sys.Cmd {
-	a := []string{"run", "--rm", "--network", backupNetwork}
+func (r *Runner) resticCmd(inst, envFile, volume string, args ...string) sys.Cmd {
+	a := []string{"run", "--rm", "--network", render.NetworkBackup(inst)}
 	if volume != "" {
 		a = append(a, "-v", volume+":/data:ro")
 	}
@@ -59,18 +70,21 @@ func (r *Runner) resticBackup(ctx context.Context, inst string, t Target) error 
 	if err != nil {
 		return err
 	}
-	if err := r.resticInit(ctx, envFile); err != nil {
+	if _, err := r.backupNet(ctx, inst); err != nil {
 		return err
 	}
-	if _, err := r.exec(ctx, r.resticCmd(envFile, t.Volume, "backup", "/data", "--host", r.Host.Host, "--tag", inst)); err != nil {
+	if err := r.resticInit(ctx, inst, envFile); err != nil {
 		return err
 	}
-	_, err = r.exec(ctx, r.resticCmd(envFile, "", "forget", "--keep-daily", "7", "--keep-weekly", "4", "--prune"))
+	if _, err := r.exec(ctx, r.resticCmd(inst, envFile, t.Volume, "backup", "/data", "--host", r.Host.Host, "--tag", inst)); err != nil {
+		return err
+	}
+	_, err = r.exec(ctx, r.resticCmd(inst, envFile, "", "forget", "--keep-daily", "7", "--keep-weekly", "4", "--prune"))
 	return err
 }
 
-func (r *Runner) resticInit(ctx context.Context, envFile string) error {
-	cmd := r.resticCmd(envFile, "", "snapshots", "--json")
+func (r *Runner) resticInit(ctx context.Context, inst, envFile string) error {
+	cmd := r.resticCmd(inst, envFile, "", "snapshots", "--json")
 	res, err := r.Run.Run(ctx, cmd)
 	if err == nil && res.ExitCode == 0 {
 		return nil
@@ -78,7 +92,7 @@ func (r *Runner) resticInit(ctx context.Context, envFile string) error {
 	if err != nil || res.ExitCode != resticExitNoRepo {
 		return r.cmdFailed(cmd, res, err)
 	}
-	_, err = r.exec(ctx, r.resticCmd(envFile, "", "init"))
+	_, err = r.exec(ctx, r.resticCmd(inst, envFile, "", "init"))
 	return err
 }
 
@@ -87,7 +101,10 @@ func (r *Runner) resticList(ctx context.Context, inst string, t Target) ([]Snaps
 	if err != nil {
 		return nil, err
 	}
-	res, err := r.exec(ctx, r.resticCmd(envFile, "", "snapshots", "--json"))
+	if _, err := r.backupNet(ctx, inst); err != nil {
+		return nil, err
+	}
+	res, err := r.exec(ctx, r.resticCmd(inst, envFile, "", "snapshots", "--json"))
 	if err != nil {
 		return nil, err
 	}

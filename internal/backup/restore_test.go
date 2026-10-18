@@ -311,7 +311,7 @@ func TestRestoreResticSnapshot(t *testing.T) {
 	if _, err := g.r.Restore(context.Background(), "app-prod", "files", "a1b2c3d4"); err != nil {
 		t.Fatal(err)
 	}
-	want := "docker run --rm --network cvctl-backup -v " + vol + ":/restore --env-file /srv/deploy/app-prod/restic-files.env restic/restic:0.19.1 restore a1b2c3d4:/data --target /restore"
+	want := "docker run --rm --network app-prod_backup -v " + vol + ":/restore --env-file /srv/deploy/app-prod/restic-files.env restic/restic:0.19.1 restore a1b2c3d4:/data --target /restore"
 	if g.index(want) < 0 {
 		t.Fatalf("missing %q in %v", want, g.calls())
 	}
@@ -507,7 +507,7 @@ func TestVerifyScriptHasNoPersistedRecoverySettings(t *testing.T) {
 	if _, err := g.r.Verify(context.Background(), "app-prod", "db"); err != nil {
 		t.Fatal(err)
 	}
-	run := g.calls()[1]
+	run := g.calls()[2]
 	if strings.Contains(run, "postgresql.auto.conf") || !strings.Contains(run, `-c "restore_command=wal-g wal-fetch %f %p"`) || !strings.Contains(run, "-c recovery_target_action=promote") {
 		t.Fatalf("run:\n%s", run)
 	}

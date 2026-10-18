@@ -1,16 +1,16 @@
 http:
   routers:
-    proj-dev-api:
+    proj-dev--api:
       entryPoints:
         - websecure
       middlewares:
         - cvctl-default@file
       rule: Host(`api.example.com`)
-      service: proj-dev-api
+      service: proj-dev--api
       tls:
         certResolver: le
   services:
-    proj-dev-api:
+    proj-dev--api:
       loadBalancer:
         servers:
-          - url: http://proj-dev-api:3000
+          - url: http://proj-dev--api:3000

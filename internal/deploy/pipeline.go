@@ -89,6 +89,9 @@ type Deployer struct {
 	Catalog    kinds.Catalog
 	Clock      func() time.Time
 	Health     func(ctx context.Context, inst, override string) error
+	// Run executes the docker network commands; Wire sets it. Nil skips them
+	// (unit tests of unrelated flows).
+	Run sys.Runner
 	// Allowed lists permitted image registries. Nil disables the post-checkout
 	// image check; Wire sets it (non-nil) from the host configuration.
 	Allowed []string
@@ -98,6 +101,38 @@ type Deployer struct {
 	RenderOverride func(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o render.Options) ([]byte, error)
 	RenderTraefik  func(p *contract.Project, d *instance.Decisions, o render.Options) ([]byte, error)
 	ProbeS3        func(ctx context.Context, c objstore.Config, b []objstore.BucketCheck) error
+}
+
+// traefikContainer is the host proxy container; it joins each instance's edge
+// network after the instance is up.
+const traefikContainer = "cvctl-traefik"
+
+// ensureNetworks creates the external networks the generated override refers
+// to. The backup network exists only when a local service is backed up, the
+// same condition the override uses to declare it.
+func (d *Deployer) ensureNetworks(ctx context.Context, inst string, p *contract.Project, dec *instance.Decisions) error {
+	if d.Run == nil {
+		return nil
+	}
+	if err := sys.EnsureNetwork(ctx, d.Run, render.NetworkEdge(inst), false); err != nil {
+		return err
+	}
+	if d.Backup == nil {
+		return nil
+	}
+	for _, ds := range p.Data {
+		if dec.Services[ds.Name].Mode == "local" && (ds.Backup == "wal-g" || ds.Backup == "volume") {
+			return sys.EnsureNetwork(ctx, d.Run, render.NetworkBackup(inst), true)
+		}
+	}
+	return nil
+}
+
+func (d *Deployer) connectTraefik(ctx context.Context, inst string) error {
+	if d.Run == nil {
+		return nil
+	}
+	return sys.ConnectNetwork(ctx, d.Run, render.NetworkEdge(inst), traefikContainer)
 }
 
 func (d *Deployer) deployRoot() string {
@@ -800,6 +835,10 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
 	}
+	if err := d.ensureNetworks(ctx, inst, p, dec); err != nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
+	}
 	if err := stagingCompose.UpData(ctx, localDataServices); err != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 		return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
@@ -883,6 +922,9 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, "deployer misconfigured: Compose returned nil", secrets)
 	}
 	upErr := finalCompose.Up(ctx)
+	if upErr == nil {
+		upErr = d.connectTraefik(ctx, inst)
+	}
 
 	// Step 9: HealthCheck
 	var healthErr error

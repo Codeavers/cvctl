@@ -1,13 +1,13 @@
 networks:
   app: {}
-  cvctl-backup:
+  backup:
     external: true
-    name: cvctl-backup
+    name: proj-dev_backup
   data:
     internal: true
   edge:
     external: true
-    name: cvctl-edge
+    name: proj-dev_edge
 services:
   api:
     cap_drop:
@@ -29,7 +29,7 @@ services:
       data: {}
       edge:
         aliases:
-          - proj-dev-api
+          - proj-dev--api
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -114,7 +114,7 @@ services:
       cvctl.version: "16"
     networks:
       - data
-      - cvctl-backup
+      - backup
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

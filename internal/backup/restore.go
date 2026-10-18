@@ -656,11 +656,15 @@ func (r *Runner) walgRecover(ctx context.Context, inst, svc string, p *contract.
 	if err != nil {
 		return err
 	}
+	net, err := r.backupNet(ctx, inst)
+	if err != nil {
+		return err
+	}
 	name := r.tempName("restore", inst, svc)
 	defer r.cleanup(ctx, name, "")
 
 	args := []string{
-		"run", "-d", "--name", name, "--network", backupNetwork,
+		"run", "-d", "--name", name, "--network", net,
 		"--env-file", render.BackupEnvPath(r.instanceDir(inst), svc),
 		"-v", volume + ":" + pgData,
 		"-e", "PGDATA=" + pgData,
@@ -727,7 +731,11 @@ func (r *Runner) resticRecover(ctx context.Context, inst, svc string, tgt restor
 		return err
 	}
 	// <snapshot>:/data restores the backed-up directory's content at the volume root
-	_, err = r.exec(ctx, r.docker("run", "--rm", "--network", backupNetwork, "-v", volume+":/restore",
+	net, err := r.backupNet(ctx, inst)
+	if err != nil {
+		return err
+	}
+	_, err = r.exec(ctx, r.docker("run", "--rm", "--network", net, "-v", volume+":/restore",
 		"--env-file", envFile, resticImage, "restore", snap+":/data", "--target", "/restore"))
 	return err
 }

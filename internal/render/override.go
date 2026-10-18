@@ -36,7 +36,13 @@ type BackupTarget struct {
 	Host, Endpoint, Bucket, Region, AccessKey, SecretKey, LibsodiumKey, ResticPassword string
 }
 
-const backupNetwork = "cvctl-backup"
+// NetworkEdge is the per-instance network shared with Traefik.
+func NetworkEdge(inst string) string { return inst + "_edge" }
+
+// NetworkBackup is the per-instance internal network shared with the silo.
+func NetworkBackup(inst string) string { return inst + "_backup" }
+
+const backupNetKey = "backup"
 
 // BackupEnvPath is the wal-g env file of one service. WALG_S3_PREFIX differs
 // per service, so each local wal-g service gets its own file.
@@ -326,11 +332,11 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 				"edge": map[string]any{"aliases": []string{routeName(d, ds.Name)}},
 			}
 			if isBackedUp {
-				m[backupNetwork] = map[string]any{}
+				m[backupNetKey] = map[string]any{}
 			}
 			nets = m
 		} else if isBackedUp {
-			nets = []string{"data", backupNetwork}
+			nets = []string{"data", backupNetKey}
 		} else {
 			nets = []string{"data"}
 		}
@@ -378,11 +384,11 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 		"networks": map[string]any{
 			"app":  map[string]any{},
 			"data": map[string]any{"internal": true},
-			"edge": map[string]any{"external": true, "name": "cvctl-edge"},
+			"edge": map[string]any{"external": true, "name": NetworkEdge(d.Instance)},
 		},
 	}
 	if usesBackupNet {
-		doc["networks"].(map[string]any)[backupNetwork] = map[string]any{"external": true, "name": backupNetwork}
+		doc["networks"].(map[string]any)[backupNetKey] = map[string]any{"external": true, "name": NetworkBackup(d.Instance)}
 	}
 	if len(volumes) > 0 {
 		doc["volumes"] = volumes
@@ -467,5 +473,5 @@ func substituteAll(k kinds.Kind, in []string, c kinds.Credentials) []string {
 }
 
 func routeName(d *instance.Decisions, service string) string {
-	return d.Instance + "-" + service
+	return d.Instance + "--" + service
 }

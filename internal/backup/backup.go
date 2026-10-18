@@ -31,7 +31,6 @@ const (
 	// pgData is the image default; the render step keeps PGDATA at the volume root.
 	pgData         = "/var/lib/postgresql/data"
 	resticImage    = "restic/restic:0.19.1"
-	backupNetwork  = "cvctl-backup"
 	dockerConfig   = "DOCKER_CONFIG=/var/lib/cvctl/docker"
 	walgRetain     = "7"
 	walgRetainDays = 7

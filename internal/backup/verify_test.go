@@ -55,12 +55,12 @@ func TestVerifyWalgSequenceAndCleanup(t *testing.T) {
 	}
 	name := "cvctl-verify-app-prod-db-1767323045-0a0b0c0d"
 	calls := g.calls()
-	if calls[0] != "docker volume create "+name {
+	if calls[0] != "docker network inspect app-prod_backup" || calls[1] != "docker volume create "+name {
 		t.Fatalf("calls: %v", calls)
 	}
-	run := calls[1]
+	run := calls[2]
 	for _, want := range []string{
-		"docker run -d --name " + name + " --network cvctl-backup --env-file /srv/deploy/app-prod/backup-db.env",
+		"docker run -d --name " + name + " --network app-prod_backup --env-file /srv/deploy/app-prod/backup-db.env",
 		"-v " + name + ":/var/lib/postgresql/data", "-e PGDATA=/var/lib/postgresql/data", "-e PGUSER=app", "-e PGDATABASE=appdb",
 		"--entrypoint sh ghcr.io/codeavers/cvctl-postgres:16 -c ", "gosu postgres wal-g backup-fetch", "recovery.signal", "exec gosu postgres postgres",
 	} {
@@ -163,7 +163,7 @@ func TestVerifyContainerDisablesArchiving(t *testing.T) {
 	if _, err := g.r.Verify(context.Background(), "app-prod", "db"); err != nil {
 		t.Fatal(err)
 	}
-	if run := g.calls()[1]; !strings.Contains(run, "archive_mode=off") {
+	if run := g.calls()[2]; !strings.Contains(run, "archive_mode=off") {
 		t.Fatalf("verify script must disable archiving:\n%s", run)
 	}
 }

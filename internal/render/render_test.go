@@ -738,11 +738,11 @@ func TestOverrideBucketsBackedUp(t *testing.T) {
 	if _, ok := mediaNets["edge"]; !ok {
 		t.Fatal("media missing edge network")
 	}
-	if _, ok := mediaNets["cvctl-backup"]; !ok {
-		t.Fatal("media missing cvctl-backup network")
+	if _, ok := mediaNets["backup"]; !ok {
+		t.Fatal("media missing backup network")
 	}
-	if _, ok := doc.Networks["cvctl-backup"]; !ok {
-		t.Fatal("top level missing cvctl-backup network")
+	if _, ok := doc.Networks["backup"]; !ok {
+		t.Fatal("top level missing backup network")
 	}
 }
 

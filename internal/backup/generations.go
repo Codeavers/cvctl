@@ -49,8 +49,12 @@ func (r *Runner) bucketGenerations(ctx context.Context, inst, svc string, p *con
 	}
 	defer func() { _ = r.FS.Remove(envFile) }()
 
+	net, err := r.backupNet(ctx, inst)
+	if err != nil {
+		return -1, -1, err
+	}
 	ls := func(path string) ([][]string, error) {
-		args := []string{"run", "--rm", "--network", backupNetwork, "--env-file", envFile, "--entrypoint", "wal-g", image, "st", "ls"}
+		args := []string{"run", "--rm", "--network", net, "--env-file", envFile, "--entrypoint", "wal-g", image, "st", "ls"}
 		if path != "" {
 			args = append(args, path)
 		}

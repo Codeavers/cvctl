@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	stLs     = "docker run --rm --network cvctl-backup --env-file /srv/deploy/app-prod/walg-probe-db.env --entrypoint wal-g ghcr.io/codeavers/cvctl-postgres:16 st ls"
+	stLs     = "docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/walg-probe-db.env --entrypoint wal-g ghcr.io/codeavers/cvctl-postgres:16 st ls"
 	lsHeader = "type size last modified                  name\n"
 )
 

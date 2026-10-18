@@ -19,6 +19,7 @@ import (
 
 // Wire sets up the production Compose, Health, and Repo factories on the Deployer.
 func Wire(d *Deployer, run sys.Runner) {
+	d.Run = run
 	d.Allowed = AllowedRegistries(d.Host)
 	if d.Backup == nil {
 		d.Backup = BackupTargetFrom(d.Host, d.Secrets)

@@ -117,7 +117,13 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 			Hint:    "ensure Compose factory returns a valid ComposeAPI",
 		}
 	}
+	if err := d.ensureNetworks(ctx, inst, p, dec); err != nil {
+		return err
+	}
 	if err := finalCompose.Up(ctx); err != nil {
+		return err
+	}
+	if err := d.connectTraefik(ctx, inst); err != nil {
 		return err
 	}
 	// The restored app.env may need buckets or policy grants that a later deploy

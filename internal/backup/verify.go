@@ -183,6 +183,10 @@ func (r *Runner) walgVerify(ctx context.Context, inst string, p *contract.Projec
 	if err != nil {
 		return err
 	}
+	net, err := r.backupNet(ctx, inst)
+	if err != nil {
+		return err
+	}
 	name := r.tempName("verify", inst, t.Service)
 	if _, err := r.exec(ctx, r.docker("volume", "create", name)); err != nil {
 		return err
@@ -191,7 +195,7 @@ func (r *Runner) walgVerify(ctx context.Context, inst string, p *contract.Projec
 
 	envFile := render.BackupEnvPath(r.instanceDir(inst), t.Service)
 	args := []string{
-		"run", "-d", "--name", name, "--network", backupNetwork,
+		"run", "-d", "--name", name, "--network", net,
 		"--env-file", envFile,
 		"-v", name + ":" + pgData,
 		"-e", "PGDATA=" + pgData,
@@ -310,9 +314,13 @@ func (r *Runner) resticVerify(ctx context.Context, inst string, t Target) error 
 	if err != nil {
 		return err
 	}
+	net, err := r.backupNet(ctx, inst)
+	if err != nil {
+		return err
+	}
 	name := r.tempName("verify", inst, t.Service)
 	defer r.cleanup(ctx, name, "")
-	cmd := r.docker("run", "--name", name, "--network", backupNetwork, "--env-file", envFile,
+	cmd := r.docker("run", "--name", name, "--network", net, "--env-file", envFile,
 		"--entrypoint", "sh", resticImage, "-c", resticVerifyScript)
 	res, err := r.exec(ctx, cmd)
 	if err != nil {
