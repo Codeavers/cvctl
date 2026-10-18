@@ -14,7 +14,7 @@ services:
       - /etc/traefik/dynamic:/etc/traefik/dynamic:ro
       - cvctl-traefik-acme:/acme
     networks:
-      - cvctl-edge
+      - cvctl-edge-proxy
     healthcheck:
       test:
         - CMD
@@ -22,7 +22,7 @@ services:
         - healthcheck
         - --ping
 networks:
-  cvctl-edge:
+  cvctl-edge-proxy:
     external: true
 volumes:
   cvctl-traefik-acme: {}

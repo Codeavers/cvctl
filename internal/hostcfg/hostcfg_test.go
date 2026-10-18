@@ -313,3 +313,21 @@ func TestNewConfigAndNewSecrets(t *testing.T) {
 		t.Fatalf("sec s3_access_key mismatch: got %q, ok=%v", v, ok)
 	}
 }
+
+func TestEdgeSubnetValidationAndGateway(t *testing.T) {
+	c := hostcfg.NewConfig()
+	if c.EdgeSubnetOrDefault() != "10.203.0.0/24" || c.EdgeGateway() != "10.203.0.1" {
+		t.Fatalf("defaults: %s %s", c.EdgeSubnetOrDefault(), c.EdgeGateway())
+	}
+	for _, bad := range []string{"nope", "10.0.0.1", "fd00::/64", "10.0.0.0/30"} {
+		if err := c.Set("EDGE_SUBNET", bad); err == nil {
+			t.Fatalf("%q must be rejected", bad)
+		}
+	}
+	if err := c.Set("EDGE_SUBNET", "172.30.4.9/22"); err != nil {
+		t.Fatal(err)
+	}
+	if c.EdgeGateway() != "172.30.4.1" {
+		t.Fatalf("gateway = %s", c.EdgeGateway())
+	}
+}

@@ -235,11 +235,10 @@ func renderTraefikStatic(cfg *hostcfg.Config) ([]byte, error) {
 		eps[EntryWeb] = traefikEntryPoint{
 			Address: ":80",
 			// The front proxy reaches Traefik through docker's port proxy, so the source
-			// is the gateway of the cvctl-edge network. Docker allocates it from any
-			// private range (172.16/12 first, then 192.168/16 on hosts with many
-			// networks), and only private addresses can reach the loopback-bound port.
+			// is the gateway of the fixed-subnet proxy network; trusting more would let
+			// any private-range peer forge X-Forwarded-For.
 			ForwardedHeaders: &traefikForwardedHeaders{
-				TrustedIPs: []string{"127.0.0.1/32", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"},
+				TrustedIPs: []string{"127.0.0.1/32", cfg.EdgeGateway() + "/32"},
 			},
 		}
 	}
@@ -342,14 +341,14 @@ func renderTraefikCompose(cfg *hostcfg.Config) ([]byte, error) {
 					"/etc/traefik/dynamic:/etc/traefik/dynamic:ro",
 					"cvctl-traefik-acme:/acme",
 				},
-				Networks: []string{EdgeNetwork},
+				Networks: []string{ProxyNetwork},
 				Healthcheck: traefikComposeHealthcheck{
 					Test: []string{"CMD", "traefik", "healthcheck", "--ping"},
 				},
 			},
 		},
 		Networks: map[string]traefikComposeNetwork{
-			EdgeNetwork: {External: true},
+			ProxyNetwork: {External: true},
 		},
 		Volumes: map[string]map[string]any{
 			"cvctl-traefik-acme": {},

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/netip"
 	"os"
 	"path"
 	"regexp"
@@ -50,6 +51,7 @@ type Config struct {
 	TelegramThread     string
 	Registries         string
 	RegistryUser       string
+	EdgeSubnet         string
 	vals               map[string]string
 	extra              map[string]string // host.env entries cvctl does not know; kept verbatim on Save
 }
@@ -95,12 +97,45 @@ var validators = map[string]func(string) error{
 	"ACME_CHALLENGE":  oneOf("http", "route53", "cloudflare"),
 	"STORAGE":         oneOf("local", "s3"),
 	"NOTIFY":          oneOf("telegram", "none"),
+	"EDGE_SUBNET":     validEdgeSubnet,
+}
+
+// DefaultEdgeSubnet is the proxy network subnet when CVCTL_EDGE_SUBNET is unset.
+const DefaultEdgeSubnet = "10.203.0.0/24"
+
+func validEdgeSubnet(v string) error {
+	p, err := netip.ParsePrefix(v)
+	if err != nil || !p.Addr().Is4() {
+		return errors.New("must be an IPv4 CIDR such as 10.203.0.0/24")
+	}
+	if p.Bits() > 29 {
+		return errors.New("must be /29 or larger")
+	}
+	return nil
+}
+
+// EdgeSubnetOrDefault returns the configured proxy subnet or the default.
+func (c *Config) EdgeSubnetOrDefault() string {
+	if c != nil && c.EdgeSubnet != "" {
+		return c.EdgeSubnet
+	}
+	return DefaultEdgeSubnet
+}
+
+// EdgeGateway is the first host address of the proxy subnet.
+func (c *Config) EdgeGateway() string {
+	p, err := netip.ParsePrefix(c.EdgeSubnetOrDefault())
+	if err != nil {
+		p = netip.MustParsePrefix(DefaultEdgeSubnet)
+	}
+	return p.Masked().Addr().Next().String()
 }
 
 var knownKeys = []string{
 	"HOST_NAME", "EDGE_MODE", "PROXY_PORT", "ADMIN_USER", "SSH_MANAGE", "FIREWALL_MANAGE",
 	"ACME_EMAIL", "ACME_CHALLENGE", "STORAGE", "S3_ENDPOINT", "S3_BUCKET", "S3_REGION", "S3_ENDPOINT_INTERNAL",
 	"NOTIFY", "TELEGRAM_CHAT_ID", "TELEGRAM_THREAD_ID", "REGISTRIES", "REGISTRY_USER",
+	"EDGE_SUBNET",
 }
 
 func invalid(key string, err error) error {
@@ -194,6 +229,8 @@ func (c *Config) sync(key, val string) {
 		c.Registries = val
 	case "REGISTRY_USER":
 		c.RegistryUser = val
+	case "EDGE_SUBNET":
+		c.EdgeSubnet = val
 	}
 }
 

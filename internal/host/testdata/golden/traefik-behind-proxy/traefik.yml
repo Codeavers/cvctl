@@ -13,9 +13,7 @@ entryPoints:
     forwardedHeaders:
       trustedIPs:
         - 127.0.0.1/32
-        - 10.0.0.0/8
-        - 172.16.0.0/12
-        - 192.168.0.0/16
+        - 10.203.0.1/32
 providers:
   file:
     directory: /etc/traefik/dynamic

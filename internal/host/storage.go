@@ -28,8 +28,6 @@ const (
 	storageNetwork     = "cvctl-storage"
 	storageVolume      = "cvctl-storage-data"
 
-	// BackupNetwork carries backup containers to the local storage service.
-	BackupNetwork      = "cvctl-backup"
 	storageAlias       = "cvctl-storage"
 	localInternalS3URL = "http://cvctl-storage:9000"
 	secretWalgKey      = "walg_libsodium_key"
@@ -112,13 +110,11 @@ func renderStorageCompose() ([]byte, error) {
 				Volumes: []string{storageVolume + ":/data"},
 				Networks: map[string]storageComposeNetwork{
 					storageNetwork: {},
-					BackupNetwork:  {Aliases: []string{storageAlias}},
 				},
 			},
 		},
 		Networks: map[string]map[string]any{
 			storageNetwork: {},
-			BackupNetwork:  {"external": true},
 		},
 		Volumes: map[string]map[string]any{
 			storageVolume: {},
@@ -178,14 +174,18 @@ func (s StorageStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		p.Changes = append(p.Changes, "configure internal storage endpoint")
 		p.Actions = append(p.Actions, Action{Kind: "configure", Target: actionInternalEP})
 	}
-	res, err := e.Run.Run(ctx, sys.Cmd{
-		Name: "docker",
-		Args: []string{"network", "inspect", BackupNetwork},
-		Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
-	})
-	if err != nil || res.ExitCode != 0 {
-		p.Changes = append(p.Changes, "create network "+BackupNetwork)
-		p.Actions = append(p.Actions, Action{Kind: "network-create", Target: BackupNetwork})
+	if networkExists(ctx, e, legacyBackupNetwork) {
+		p.Changes = append(p.Changes, "retire network "+legacyBackupNetwork)
+		p.Actions = append(p.Actions, Action{Kind: "network-remove", Target: legacyBackupNetwork})
+	}
+	if effectiveStorageMode(e.Cfg) == "local" {
+		connected := connectedNetworks(ctx, e, siloContainer)
+		for _, n := range managedNetworks(ctx, e, "_backup") {
+			if !connected[n] {
+				p.Changes = append(p.Changes, "connect storage to "+n)
+				p.Actions = append(p.Actions, Action{Kind: "reconnect", Target: n})
+			}
+		}
 	}
 	return p, nil
 }
@@ -288,16 +288,9 @@ func (s StorageStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 			return "", err
 		}
 	}
-	for _, a := range p.Actions {
-		if a.Kind == "network-create" && a.Target == BackupNetwork {
-			if err := runStorageCmd(ctx, e, sys.Cmd{
-				Name: "docker",
-				Args: []string{"network", "create", BackupNetwork},
-				Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
-			}); err != nil {
-				return "", err
-			}
-		}
+	warn, err := retireLegacyNetwork(ctx, e, legacyBackupNetwork, siloContainer)
+	if err != nil {
+		return "", err
 	}
 
 	if mode == "s3" {
@@ -327,7 +320,7 @@ func (s StorageStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 		if err := objstore.Probe(ctx, store); err != nil {
 			return "", err
 		}
-		return "", nil
+		return warn, nil
 	}
 
 	ak, okAK := e.Secrets.Get("s3_access_key")
@@ -417,6 +410,12 @@ func (s StorageStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 		return "", err
 	}
 
+	for _, n := range managedNetworks(ctx, e, "_backup") {
+		if err := sys.ConnectNetwork(ctx, e.Run, n, siloContainer, storageAlias); err != nil {
+			return "", err
+		}
+	}
+
 	store, err := newStore(storageConfigFor(e.Cfg, mode, ak, sk))
 	if err != nil {
 		return "", err
@@ -430,7 +429,7 @@ func (s StorageStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) 
 		return "", err
 	}
 
-	return "", nil
+	return warn, nil
 }
 
 func ensureBackupKeys(sec *hostcfg.Secrets) error {

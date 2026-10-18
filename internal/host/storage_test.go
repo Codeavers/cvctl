@@ -73,7 +73,7 @@ var alnum40Re = regexp.MustCompile(`^[A-Za-z0-9]{40}$`)
 
 func TestStorageLocalGeneratesKeysOnce(t *testing.T) {
 	r := &systest.Runner{}
-	r.OnPrefix("docker network", sys.Result{ExitCode: 0})
+	r.OnPrefix("docker network", sys.Result{ExitCode: 1})
 	fs := systest.NewFS()
 	cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 	if err != nil {
@@ -171,7 +171,7 @@ func (h *hookedStore) EnsureBucket(ctx context.Context) error {
 
 func TestStorageLocalComposeNoInlineSecrets(t *testing.T) {
 	r := &systest.Runner{}
-	r.OnPrefix("docker network", sys.Result{ExitCode: 0})
+	r.OnPrefix("docker network", sys.Result{ExitCode: 1})
 	fs := systest.NewFS()
 	cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 	if err != nil {
@@ -284,7 +284,7 @@ func TestStorageLocalComposeNoInlineSecrets(t *testing.T) {
 
 func TestStorageS3BucketDenied(t *testing.T) {
 	r := &systest.Runner{}
-	r.OnPrefix("docker network", sys.Result{ExitCode: 0})
+	r.OnPrefix("docker network", sys.Result{ExitCode: 1})
 	fs := systest.NewFS()
 	cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 	if err != nil {
@@ -340,8 +340,8 @@ func TestStorageS3BucketDenied(t *testing.T) {
 func TestStorageUnchangedWhenProbeOK(t *testing.T) {
 	t.Run("s3", func(t *testing.T) {
 		r := &systest.Runner{}
-		r.OnPrefix("docker network", sys.Result{ExitCode: 0})
-		r.OnPrefix("docker network", sys.Result{ExitCode: 0})
+		r.OnPrefix("docker network", sys.Result{ExitCode: 1})
+		r.OnPrefix("docker network", sys.Result{ExitCode: 1})
 		fs := systest.NewFS()
 		cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 		if err != nil {
@@ -382,8 +382,8 @@ func TestStorageUnchangedWhenProbeOK(t *testing.T) {
 
 	t.Run("local", func(t *testing.T) {
 		r := &systest.Runner{}
-		r.OnPrefix("docker network", sys.Result{ExitCode: 0})
-		r.OnPrefix("docker network", sys.Result{ExitCode: 0})
+		r.OnPrefix("docker network", sys.Result{ExitCode: 1})
+		r.OnPrefix("docker network", sys.Result{ExitCode: 1})
 		fs := systest.NewFS()
 		cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 		if err != nil {
@@ -549,42 +549,81 @@ func TestStorageBackupKeysGeneratedOnce(t *testing.T) {
 	}
 }
 
-func TestStorageBackupNetworkCreatedOnce(t *testing.T) {
+const (
+	lsBackupCmd = "docker network ls --filter label=cvctl.managed=true --filter name=_backup --format {{.Name}}"
+	siloNetsCmd = "docker inspect -f {{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}} cvctl-storage-s3-1"
+)
+
+func TestStorageLegacyBackupNetworkRetired(t *testing.T) {
 	env, r, _ := backupEnv(t, "s3", "https://s3.example.com")
-	r.OnPrefix("docker network inspect", sys.Result{ExitCode: 1})
+	r.On("docker network inspect cvctl-backup", sys.Result{Stdout: []byte("[{}]\n")})
+	r.On("docker network inspect -f {{range $k, $v := .Containers}}{{$v.Name}} {{end}} cvctl-backup", sys.Result{})
+	r.On("docker network rm cvctl-backup", sys.Result{})
 	step := StorageStep{PollInterval: time.Millisecond, PollTimeout: 20 * time.Millisecond}
 	plan, err := step.Check(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(plan.Actions, Action{Kind: "network-create", Target: "cvctl-backup"}) {
-		t.Fatalf("missing network-create action: %v", plan.Actions)
+	if !slices.Contains(plan.Actions, Action{Kind: "network-remove", Target: "cvctl-backup"}) {
+		t.Fatalf("missing network-remove action: %v", plan.Actions)
 	}
-	r.OnPrefix("docker network create cvctl-backup", sys.Result{ExitCode: 0})
-	if _, err := step.Apply(context.Background(), env, plan); err != nil {
-		t.Fatal(err)
+	if warn, err := step.Apply(context.Background(), env, plan); err != nil || warn != "" {
+		t.Fatalf("Apply: warn=%q err=%v", warn, err)
 	}
-	if n := countCalls(r, "docker network create cvctl-backup"); n != 1 {
-		t.Fatalf("network create calls = %d, want 1", n)
+	if n := countCalls(r, "docker network rm cvctl-backup"); n != 1 {
+		t.Fatalf("network rm calls = %d, want 1", n)
 	}
 	for _, c := range r.Calls {
 		if c.Name == "docker" && !slices.Contains(c.Env, "DOCKER_CONFIG=/var/lib/cvctl/docker") {
 			t.Fatalf("docker call without DOCKER_CONFIG: %v", c)
 		}
 	}
-	r.OnPrefix("docker network inspect", sys.Result{ExitCode: 0})
-	plan2, err := step.Check(context.Background(), env)
+}
+
+func TestStorageLegacyBackupNetworkInUseWarns(t *testing.T) {
+	env, r, _ := backupEnv(t, "s3", "https://s3.example.com")
+	r.On("docker network inspect cvctl-backup", sys.Result{Stdout: []byte("[{}]\n")})
+	r.On("docker network inspect -f {{range $k, $v := .Containers}}{{$v.Name}} {{end}} cvctl-backup", sys.Result{Stdout: []byte("restic-run ")})
+	step := StorageStep{PollInterval: time.Millisecond, PollTimeout: 20 * time.Millisecond}
+	plan, err := step.Check(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if slices.Contains(plan2.Actions, Action{Kind: "network-create", Target: "cvctl-backup"}) {
-		t.Fatal("network should not be recreated")
+	warn, err := step.Apply(context.Background(), env, plan)
+	if err != nil || !strings.Contains(warn, "restic-run") {
+		t.Fatalf("want warning naming the user: warn=%q err=%v", warn, err)
+	}
+	if n := countCalls(r, "docker network rm cvctl-backup"); n != 0 {
+		t.Fatal("network in use must not be removed")
+	}
+}
+
+func TestStorageSiloReconnectsToBackupNetworks(t *testing.T) {
+	env, r, _ := backupEnv(t, "local", "")
+	r.OnPrefix("docker network", sys.Result{ExitCode: 1})
+	r.On(lsBackupCmd, sys.Result{Stdout: []byte("a_backup\nb_backup\nc_backup_x\n")})
+	r.On(siloNetsCmd, sys.Result{Stdout: []byte("cvctl-storage a_backup \n")})
+	r.OnPrefix("docker network connect", sys.Result{})
+	step := StorageStep{PollInterval: time.Millisecond, PollTimeout: 20 * time.Millisecond}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(plan.Actions, Action{Kind: "reconnect", Target: "b_backup"}) ||
+		slices.Contains(plan.Actions, Action{Kind: "reconnect", Target: "a_backup"}) {
+		t.Fatalf("reconnect actions wrong: %v", plan.Actions)
+	}
+	if _, err := step.Apply(context.Background(), env, plan); err != nil {
+		t.Fatal(err)
+	}
+	if n := countCalls(r, "docker network connect --alias cvctl-storage b_backup cvctl-storage-s3-1"); n != 1 {
+		t.Fatalf("connect b_backup calls = %d, want 1; calls: %v", n, r.Calls)
 	}
 }
 
 func TestStorageCheckIsReadOnlyForBackup(t *testing.T) {
 	env, r, fs := backupEnv(t, "s3", "https://s3.example.com")
-	r.OnPrefix("docker network inspect", sys.Result{ExitCode: 1})
+	r.OnPrefix("docker network", sys.Result{ExitCode: 1})
 	if _, err := (StorageStep{}).Check(context.Background(), env); err != nil {
 		t.Fatal(err)
 	}
@@ -601,9 +640,9 @@ func TestStorageCheckIsReadOnlyForBackup(t *testing.T) {
 	}
 }
 
-func TestStorageLocalComposeHasBackupAlias(t *testing.T) {
+func TestStorageLocalComposeOnlyPrivateNetwork(t *testing.T) {
 	env, r, fs := backupEnv(t, "local", "")
-	r.OnPrefix("docker network", sys.Result{ExitCode: 0})
+	r.OnPrefix("docker network", sys.Result{ExitCode: 1})
 	step := StorageStep{PollInterval: time.Millisecond, PollTimeout: 20 * time.Millisecond}
 	plan, err := step.Check(context.Background(), env)
 	if err != nil {
@@ -633,12 +672,8 @@ func TestStorageLocalComposeHasBackupAlias(t *testing.T) {
 	if _, ok := svc.Networks["cvctl-storage"]; !ok {
 		t.Fatalf("service lost its own network: %v", svc.Networks)
 	}
-	bn := svc.Networks["cvctl-backup"]
-	if bn == nil || !slices.Contains(bn.Aliases, "cvctl-storage") {
-		t.Fatalf("missing cvctl-backup alias: %+v", svc.Networks)
-	}
-	if !cp.Networks["cvctl-backup"].External {
-		t.Fatal("cvctl-backup must be external")
+	if len(svc.Networks) != 1 || len(cp.Networks) != 1 {
+		t.Fatalf("silo compose must only own its private network: %v", svc.Networks)
 	}
 }
 
@@ -650,7 +685,7 @@ func TestStorageInternalEndpointPerMode(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.mode, func(t *testing.T) {
 			env, r, fs := backupEnv(t, tc.mode, tc.ep)
-			r.OnPrefix("docker network", sys.Result{ExitCode: 0})
+			r.OnPrefix("docker network", sys.Result{ExitCode: 1})
 			step := StorageStep{PollInterval: time.Millisecond, PollTimeout: 20 * time.Millisecond}
 			plan, err := step.Check(context.Background(), env)
 			if err != nil {
@@ -682,7 +717,7 @@ func TestStorageInternalEndpointFollowsModeChanges(t *testing.T) {
 		t.Run(tc.mode, func(t *testing.T) {
 			env, r, fs := backupEnv(t, tc.mode, tc.ep)
 			_ = env.Cfg.Set("S3_ENDPOINT_INTERNAL", tc.stale)
-			r.OnPrefix("docker network", sys.Result{ExitCode: 0})
+			r.OnPrefix("docker network", sys.Result{ExitCode: 1})
 			step := StorageStep{PollInterval: time.Millisecond, PollTimeout: 20 * time.Millisecond}
 			plan, err := step.Check(context.Background(), env)
 			if err != nil {
