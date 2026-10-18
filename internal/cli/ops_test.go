@@ -1365,3 +1365,64 @@ func TestStatusWarnsHostKeysOnLocalStorage(t *testing.T) {
 		t.Fatalf("code=%d out=%s", code, out)
 	}
 }
+
+// copyingRepo serves a fixed contract and writes it into infra/ on checkout.
+type copyingRepo struct {
+	*opsStubRepo
+	dst string
+}
+
+func (r *copyingRepo) Checkout(_ context.Context, _ string) error {
+	b, err := os.ReadFile(filepath.Join(r.infraSource, "compose.yml"))
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(r.dst, "compose.yml"), b, 0o644)
+}
+
+// A contract in infra/ that fails rules added later must not block deploying
+// a fixed one.
+func TestDeployRejectedOnDiskContractPicksUpFix(t *testing.T) {
+	_, env := setupOpsFixture(t, "myapp-dev")
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+
+	infraDir := filepath.Join(env.deployRoot(), "myapp-dev", "infra")
+	good := t.TempDir()
+	writeCLIInfra(t, good)
+	b, err := os.ReadFile(filepath.Join(infraDir, "compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := strings.Replace(string(b), "services:\n", "services:\n  evil:\n    image: ghcr.io/codeavers/evil\n    privileged: true\n    labels: { cvctl.role: worker }\n", 1)
+	if bad == string(b) {
+		t.Fatal("fixture compose has no services: line")
+	}
+	if err := os.WriteFile(filepath.Join(infraDir, "compose.yml"), []byte(bad), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repo := &copyingRepo{opsStubRepo: &opsStubRepo{infraSource: good}, dst: infraDir}
+	env.RepoFactory = func(dir, keyPath string) project.RepoLike { return repo }
+	env.Deployer.Repo = func(string) deploy.CheckoutAPI { return repo }
+
+	code, out, errb := run(t, "deploy", "myapp-dev", "--json")
+	if code != 0 {
+		t.Fatalf("code %d out=%s err=%s", code, out, errb)
+	}
+	var res struct {
+		Data struct {
+			Status   string   `json:"status"`
+			Warnings []string `json:"warnings"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("unmarshal: %v out=%s", err, out)
+	}
+	if res.Data.Status != "OK" || len(res.Data.Warnings) != 1 || !strings.Contains(res.Data.Warnings[0], "E_CONTRACT_FIELD_FORBIDDEN") {
+		t.Fatalf("data = %+v", res.Data)
+	}
+	if after, _ := os.ReadFile(filepath.Join(infraDir, "compose.yml")); strings.Contains(string(after), "privileged") {
+		t.Fatal("infra/ still holds the rejected contract")
+	}
+}

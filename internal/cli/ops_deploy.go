@@ -20,6 +20,7 @@ type deployReport struct {
 	Status   state.Status `json:"status"`
 	ID       string       `json:"id,omitempty"`
 	Detail   string       `json:"detail,omitempty"`
+	Warnings []string     `json:"warnings,omitempty"`
 }
 
 type rollbackReport struct {
@@ -81,13 +82,17 @@ func newDeployCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p, err := contract.Load(infraDir, cat)
-			if err != nil {
-				return err
-			}
-			d, err := instance.Read(cvctlEnvPath, p)
-			if err != nil {
-				return err
+			// A contract on disk that fails rules added after it was deployed
+			// must not block deploying a fixed one: d0 is enough for Desired,
+			// and Desired and the pipeline validate the wanted contract.
+			var warnings []string
+			d := d0
+			if p, lErr := contract.Load(infraDir, cat); lErr != nil {
+				warnings = append(warnings, "contract on disk rejected: "+instance.WrapLoadErr(lErr).Error())
+			} else if dp, rErr := instance.Read(cvctlEnvPath, p); rErr != nil {
+				warnings = append(warnings, "contract on disk rejected: "+rErr.Error())
+			} else {
+				d = dp
 			}
 
 			deps := deploy.SourceDepsWithRoots(inst, e.runner(), e.Host, e.Secrets, e.deployRoot(), e.stateRoot(), e.fs())
@@ -142,6 +147,7 @@ func newDeployCmd() *cobra.Command {
 				Status:   res.Status,
 				ID:       res.ID,
 				Detail:   res.Detail,
+				Warnings: warnings,
 			}
 
 			if res.Status == state.StatusFailed {
@@ -153,11 +159,17 @@ func newDeployCmd() *cobra.Command {
 				if asJSON {
 					return &output.DataError{Err: failedErr, Data: rep}
 				}
+				for _, wn := range warnings {
+					fmt.Fprintf(cmd.OutOrStdout(), "warning: %s\n", wn)
+				}
 				fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", inst, res.Status)
 				return failedErr
 			}
 
 			printerFrom(cmd).Result(rep, func(w io.Writer) {
+				for _, wn := range warnings {
+					fmt.Fprintf(w, "warning: %s\n", wn)
+				}
 				fmt.Fprintf(w, "%s: %s\n", inst, res.Status)
 			})
 			return nil

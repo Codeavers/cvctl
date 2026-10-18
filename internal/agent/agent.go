@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,6 +30,16 @@ type Store interface {
 type Deployer interface {
 	Deploy(ctx context.Context, inst string, want state.Desired, opts deploy.Options) (deploy.Result, error)
 }
+
+// OnDiskRejected is returned by a loader, together with decisions read
+// without the project, when the contract in infra/ fails validation.
+type OnDiskRejected struct{ Err error }
+
+func (e *OnDiskRejected) Error() string {
+	return "contract on disk rejected, checking the published contract: " + e.Err.Error()
+}
+
+func (e *OnDiskRejected) Unwrap() error { return e.Err }
 
 // DecisionLog records one structured line per decision.
 type DecisionLog struct {
@@ -121,19 +132,22 @@ func Run(ctx context.Context, cfg Config) error {
 					return nil, nil, cErr
 				}
 			}
+			// The on-disk contract may fail rules added after it was deployed:
+			// d0 still lets Desired fetch a fixed contract, which Desired and
+			// the pipeline validate themselves.
 			p, err := contract.Load(infraDir, cat)
 			if err != nil {
-				return nil, nil, instance.WrapLoadErr(err)
+				return d0, nil, &OnDiskRejected{Err: instance.WrapLoadErr(err)}
 			}
 			dec, err := instance.Read(cvctlEnvPath, p)
 			if err != nil {
-				return nil, nil, err
+				return d0, nil, &OnDiskRejected{Err: err}
 			}
 			if err := instance.CheckDir(dec, cvctlEnvPath); err != nil {
 				return nil, nil, err
 			}
 			if err := instance.Verify(infraDir, p, dec, cat, false); err != nil {
-				return nil, nil, err
+				return d0, nil, &OnDiskRejected{Err: err}
 			}
 			return dec, p, nil
 		}
@@ -158,6 +172,20 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	lastErrors := make(map[string]string)
+	lastWarnings := make(map[string]string)
+
+	recordWarning := func(inst, reason string) {
+		if lastWarnings[inst] != reason {
+			lastWarnings[inst] = reason
+			logDecision(inst, "warn", reason)
+			_ = notif.Send(ctx, notify.Message{
+				Host:  hostName,
+				Level: "warn",
+				Title: fmt.Sprintf("%s running contract rejected", inst),
+				Text:  reason,
+			})
+		}
+	}
 
 	recordError := func(inst, reason string) {
 		if lastErrors[inst] != reason {
@@ -208,9 +236,14 @@ func Run(ctx context.Context, cfg Config) error {
 				}()
 
 				dec, _, err := loadFn(inst)
-				if err != nil {
+				var rejected *OnDiskRejected
+				if errors.As(err, &rejected) && dec != nil {
+					recordWarning(inst, rejected.Error())
+				} else if err != nil {
 					recordError(inst, err.Error())
 					return
+				} else {
+					delete(lastWarnings, inst)
 				}
 
 				src := sourcesFn(dec)
