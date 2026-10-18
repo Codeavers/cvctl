@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -985,5 +986,301 @@ func TestStatusNoBackupWarningWhenLabelSaysNone(t *testing.T) {
 	code, out, errb := run(t, "status", "--json")
 	if code != 0 || strings.Contains(out, "backups are not configured") {
 		t.Fatalf("code=%d out=%s err=%s", code, out, errb)
+	}
+}
+
+const statusS3Compose = `
+services:
+  web:
+    image: ghcr.io/codeavers/web:develop
+    labels:
+      cvctl.role: app
+      cvctl.expose: "3000"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+  media:
+    image: minio/minio:RELEASE.2024-10-13T13-33-44Z
+    labels:
+      cvctl.kind: s3
+      cvctl.version: "2024"
+      cvctl.env: S3
+      cvctl.expose: "9000"
+      cvctl.backup: none
+x-cvctl:
+  health:
+    service: web
+    http: /healthz
+  s3:
+    media:
+      buckets:
+        products:
+          public: true
+        assets:
+          public: true
+        private:
+          public: false
+`
+
+func writeStatusInstance(t *testing.T, tmp, inst, envName, mode string) {
+	t.Helper()
+	instDir := filepath.Join(tmp, inst)
+	infraDir := filepath.Join(instDir, "infra")
+	if err := os.MkdirAll(infraDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(infraDir, "compose.yml"), []byte(statusS3Compose), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(infraDir, "env.spec.yml"), []byte("vars: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dec := instance.Decisions{
+		Instance:    inst,
+		Env:         envName,
+		InfraBranch: "develop",
+		TrackTag:    "develop",
+		InfraPath:   ".",
+		Strategy:    "recreate",
+		Domains:     map[string]string{"web": "app.example.com", "media": "media.example.com"},
+		Digests:     map[string]string{"web": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+		Services: map[string]instance.ServiceDecision{
+			"media": {
+				Mode:    mode,
+				Version: "2024",
+				Creds: kinds.Credentials{
+					User:        "media",
+					Password:    "mediapassword1234567890123456",
+					AppUser:     "media-app",
+					AppPassword: "mediaappsecret1234567890123456",
+					DB:          "media",
+				},
+				External: map[string]string{
+					"endpoint":   "https://s3.amazonaws.com",
+					"region":     "us-east-1",
+					"access_key": "extkey",
+					"secret_key": "extsecret",
+					"bucket":     "extbucket",
+				},
+			},
+		},
+	}
+	if err := os.WriteFile(filepath.Join(instDir, "cvctl.env"), instance.FormatEnv(dec.Entries()), 0o640); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStatusWarningPublicLocalBuckets(t *testing.T) {
+	tmp, env := setupOpsFixture(t, "demo-dev")
+	writeStatusInstance(t, tmp, "demo-dev", "dev", "local")
+
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+
+	const want = "demo-dev: media serves public bucket(s) assets, products from local silo; use external storage in prod"
+
+	code, out, errb := run(t, "status")
+	if code != 0 || !strings.Contains(out, "warning: "+want) {
+		t.Fatalf("human status: code=%d out=%s err=%s", code, out, errb)
+	}
+
+	code, out, errb = run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("json status: code=%d out=%s err=%s", code, out, errb)
+	}
+	var res struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Warnings []string `json:"warnings"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("unmarshal json: %v out=%s", err, out)
+	}
+	if !slices.Contains(res.Data.Warnings, want) {
+		t.Fatalf("expected warning %q in warnings %v", want, res.Data.Warnings)
+	}
+
+	// Verify that in prod, this warning is not generated
+	writeStatusInstance(t, tmp, "demo-prod", "prod", "local")
+	code, out, _ = run(t, "status", "demo-prod", "--json")
+	if code != 0 {
+		t.Fatalf("code=%d out=%s", code, out)
+	}
+	var resProd struct {
+		Data struct {
+			Warnings []string `json:"warnings"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal([]byte(out), &resProd)
+	for _, w := range resProd.Data.Warnings {
+		if strings.Contains(w, "serves public bucket(s)") {
+			t.Fatalf("unexpected public bucket warning in prod: %s", w)
+		}
+	}
+}
+
+func TestStatusWarningExternalS3(t *testing.T) {
+	tmp, env := setupOpsFixture(t, "demo-dev")
+	writeStatusInstance(t, tmp, "demo-dev", "dev", "external")
+
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+
+	const want = "demo-dev: media is external; cvctl does not back it up (use bucket versioning or replication)"
+
+	code, out, errb := run(t, "status")
+	if code != 0 || !strings.Contains(out, "warning: "+want) {
+		t.Fatalf("human status: code=%d out=%s err=%s", code, out, errb)
+	}
+
+	code, out, errb = run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("json status: code=%d out=%s err=%s", code, out, errb)
+	}
+	var res struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Warnings []string `json:"warnings"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("unmarshal json: %v out=%s", err, out)
+	}
+	if !slices.Contains(res.Data.Warnings, want) {
+		t.Fatalf("expected warning %q in warnings %v", want, res.Data.Warnings)
+	}
+}
+
+func TestStatusWarningOrphans(t *testing.T) {
+	tmp, env := setupOpsFixture(t, "demo-dev")
+	writeStatusInstance(t, tmp, "demo-dev", "dev", "local")
+
+	instStateDir := filepath.Join(env.stateRoot(), "demo-dev")
+	if err := os.MkdirAll(instStateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orphansJSON := `{"media": ["zebra-bucket", "alpha-bucket"]}`
+	if err := os.WriteFile(filepath.Join(instStateDir, "s3-orphans.json"), []byte(orphansJSON), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+
+	const want = "demo-dev: media has buckets no longer declared: alpha-bucket, zebra-bucket"
+
+	code, out, errb := run(t, "status")
+	if code != 0 || !strings.Contains(out, "warning: "+want) {
+		t.Fatalf("human status: code=%d out=%s err=%s", code, out, errb)
+	}
+
+	code, out, errb = run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("json status: code=%d out=%s err=%s", code, out, errb)
+	}
+	var res struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Warnings []string `json:"warnings"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("unmarshal json: %v out=%s", err, out)
+	}
+	if !slices.Contains(res.Data.Warnings, want) {
+		t.Fatalf("expected warning %q in warnings %v", want, res.Data.Warnings)
+	}
+}
+
+func TestStatusUnreadableInstanceSkipped(t *testing.T) {
+	tmp, env := setupOpsFixture(t, "good-dev")
+	writeStatusInstance(t, tmp, "good-dev", "dev", "external")
+
+	// Create unreadable/corrupted instance with an orphans file that should be skipped
+	badDir := filepath.Join(tmp, "bad-dev")
+	if err := os.MkdirAll(badDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(badDir, "cvctl.env"), []byte("INVALID MALFORMED ENV"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	badStateDir := filepath.Join(env.stateRoot(), "bad-dev")
+	if err := os.MkdirAll(badStateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(badStateDir, "s3-orphans.json"), []byte(`{"media": ["bad-bucket"]}`), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create instance with unreadable/corrupted contract
+	badContractDir := filepath.Join(tmp, "badcontract-dev")
+	if err := os.MkdirAll(badContractDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	decBad := instance.Decisions{Instance: "badcontract-dev", Env: "dev"}
+	if err := os.WriteFile(filepath.Join(badContractDir, "cvctl.env"), instance.FormatEnv(decBad.Entries()), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+
+	const goodWarn = "good-dev: media is external; cvctl does not back it up (use bucket versioning or replication)"
+
+	// status must succeed (exit 0) and skip bad-dev without error
+	code, out, errb := run(t, "status")
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d out=%s err=%s", code, out, errb)
+	}
+	if !strings.Contains(out, "good-dev") {
+		t.Fatalf("expected output to contain good-dev, got %s", out)
+	}
+	if !strings.Contains(out, "warning: "+goodWarn) {
+		t.Fatalf("expected warning for good-dev, got %s", out)
+	}
+	if strings.Contains(out, "bad-bucket") {
+		t.Fatalf("expected bad-dev s3 warnings to be skipped, got %s", out)
+	}
+
+	code, out, errb = run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("expected json exit 0, got %d out=%s err=%s", code, out, errb)
+	}
+	var res struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Instances []instanceStatusItem `json:"instances"`
+			Warnings  []string             `json:"warnings"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("unmarshal json: %v out=%s", err, out)
+	}
+	if !res.OK {
+		t.Fatalf("expected ok=true, got %s", out)
+	}
+	if !slices.Contains(res.Data.Warnings, goodWarn) {
+		t.Fatalf("expected good-dev warning in warnings: %v", res.Data.Warnings)
+	}
+	for _, w := range res.Data.Warnings {
+		if strings.Contains(w, "bad-bucket") || strings.Contains(w, "bad-dev") || strings.Contains(w, "badcontract-dev") {
+			t.Fatalf("unexpected warning for bad instances: %s", w)
+		}
+	}
+
+	// Calling status directly on unreadable instances also succeeds and skips s3 warnings
+	code, out, errb = run(t, "status", "bad-dev", "--json")
+	if code != 0 {
+		t.Fatalf("expected json exit 0 for bad-dev, got %d out=%s err=%s", code, out, errb)
+	}
+	code, out, errb = run(t, "status", "badcontract-dev", "--json")
+	if code != 0 {
+		t.Fatalf("expected json exit 0 for badcontract-dev, got %d out=%s err=%s", code, out, errb)
 	}
 }
