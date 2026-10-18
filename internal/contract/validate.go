@@ -72,10 +72,6 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 			add("E_CONTRACT_NO_ROLE", name, "service has neither cvctl.role nor cvctl.kind",
 				fmt.Sprintf("add label %s: app|worker, or %s: <kind>", LabelRole, LabelKind))
 		}
-		if len(svc.Ports) > 0 {
-			add("E_CONTRACT_PORTS_PUBLISHED", name, "service publishes host ports",
-				"remove ports: and use expose: so the proxy reaches it over the docker network")
-		}
 		if isApp[name] {
 			if svc.Image == "" {
 				add("E_CONTRACT_NO_IMAGE", name, "app service has no image",

@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -53,15 +54,21 @@ func TestValidateFixtures(t *testing.T) {
 	for name, want := range cases {
 		t.Run(name, func(t *testing.T) {
 			dir := filepath.Join("testdata", name)
+			var issues []output.Issue
 			p, err := Load(dir, cat)
-			if err != nil {
+			var ie *output.IssuesError
+			if errors.As(err, &ie) {
+				// The raw allowlist rejects before compose-go loads the file.
+				issues = ie.Issues
+			} else if err != nil {
 				t.Fatal(err)
+			} else {
+				spec, err := envspec.Load(filepath.Join(dir, "env.spec.yml"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				issues = Validate(p, cat, spec)
 			}
-			spec, err := envspec.Load(filepath.Join(dir, "env.spec.yml"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			issues := Validate(p, cat, spec)
 			if want == "" {
 				if len(issues) != 0 {
 					t.Fatalf("unexpected issues: %+v", issues)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/codeavers/cvctl/internal/contract"
@@ -456,5 +457,65 @@ services:
 	}
 	if len(ie.Issues) == 0 || ie.Issues[0].Code != "E_CONTRACT_FIELD_FORBIDDEN" {
 		t.Fatalf("expected E_CONTRACT_FIELD_FORBIDDEN in IssuesError, got %+v", ie.Issues)
+	}
+}
+
+func TestCheckFieldsRejectsYAMLIndirection(t *testing.T) {
+	cases := map[string]string{
+		"alias service": `x-cvctl:
+  t: &a {image: a, privileged: true, labels: {cvctl.role: app}}
+services:
+  api: *a
+`,
+		"merge key": `services:
+  api:
+    <<: {privileged: true}
+    image: a
+    labels: {cvctl.role: app}
+`,
+		"anchored labels": `services:
+  api:
+    image: a
+    labels: &l {cvctl.role: app}
+  web:
+    image: b
+    labels: *l
+`,
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			issues := contract.CheckFields([]byte(raw))
+			found := false
+			for _, is := range issues {
+				if is.Code == "E_CONTRACT_FIELD_FORBIDDEN" && strings.Contains(is.Message, "not allowed") {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("expected an anchor/alias/merge issue, got %v", issues)
+			}
+		})
+	}
+}
+
+func TestCheckFieldsPortsAndShapes(t *testing.T) {
+	issues := contract.CheckFields([]byte(`services:
+  api:
+    image: a
+    labels: {cvctl.role: app}
+    ports: ["80:80"]
+  db:
+    labels: {cvctl.kind: postgres}
+    deploy: 512m
+`))
+	codes := map[string]bool{}
+	for _, is := range issues {
+		codes[is.Code+" "+is.Message] = true
+	}
+	if !codes["E_CONTRACT_PORTS_PUBLISHED service publishes host ports"] {
+		t.Fatalf("ports not rejected: %v", issues)
+	}
+	if !codes["E_CONTRACT_FIELD_FORBIDDEN services.db.deploy"] {
+		t.Fatalf("non-mapping deploy not rejected: %v", issues)
 	}
 }

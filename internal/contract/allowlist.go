@@ -19,7 +19,6 @@ var appAllowedFields = map[string]bool{
 	"deploy":            true,
 	"stop_grace_period": true,
 	"depends_on":        true,
-	"ports":             true,
 }
 
 var dataAllowedFields = map[string]bool{
@@ -43,6 +42,9 @@ func CheckFields(raw []byte) []output.Issue {
 	}
 
 	var issues []output.Issue
+	// Anchors and aliases would let a service reuse a mapping the walk below
+	// never visits as a service; compose-go resolves them after this check.
+	checkNoAliases(doc, "", &issues)
 	add := func(svc, path string) {
 		issues = append(issues, output.Issue{
 			Code:    "E_CONTRACT_FIELD_FORBIDDEN",
@@ -64,6 +66,7 @@ func CheckFields(raw []byte) []output.Issue {
 
 		if key == "services" {
 			if vNode.Kind != yaml.MappingNode {
+				add("", "services")
 				continue
 			}
 			for s := 0; s+1 < len(vNode.Content); s += 2 {
@@ -71,10 +74,11 @@ func CheckFields(raw []byte) []output.Issue {
 				svcNode := vNode.Content[s+1]
 				svcName := svcNameNode.Value
 				if svcNode.Kind != yaml.MappingNode {
+					add(svcName, "services."+svcName)
 					continue
 				}
 
-				checkServiceFields(svcName, svcNode, add)
+				checkServiceFields(svcName, svcNode, add, &issues)
 			}
 		}
 	}
@@ -83,7 +87,7 @@ func CheckFields(raw []byte) []output.Issue {
 	return issues
 }
 
-func checkServiceFields(svcName string, svcNode *yaml.Node, add func(svc, path string)) {
+func checkServiceFields(svcName string, svcNode *yaml.Node, add func(svc, path string), portsIssues *[]output.Issue) {
 	isData := isDataService(svcNode)
 	allowed := appAllowedFields
 	if isData {
@@ -96,6 +100,15 @@ func checkServiceFields(svcName string, svcNode *yaml.Node, add func(svc, path s
 		field := fNode.Value
 		path := "services." + svcName + "." + field
 
+		if field == "ports" {
+			*portsIssues = append(*portsIssues, output.Issue{
+				Code:    "E_CONTRACT_PORTS_PUBLISHED",
+				Service: svcName,
+				Message: "service publishes host ports",
+				Hint:    "remove ports: and use cvctl.expose so the proxy reaches it over the docker network",
+			})
+			continue
+		}
 		if !allowed[field] {
 			add(svcName, path)
 			continue
@@ -134,6 +147,10 @@ func isDataService(svcNode *yaml.Node) bool {
 }
 
 func checkLabels(svcName, path string, lNode *yaml.Node, add func(svc, path string)) {
+	if lNode.Kind != yaml.MappingNode && lNode.Kind != yaml.SequenceNode {
+		add(svcName, path)
+		return
+	}
 	if lNode.Kind == yaml.MappingNode {
 		for i := 0; i+1 < len(lNode.Content); i += 2 {
 			lk := lNode.Content[i].Value
@@ -154,6 +171,7 @@ func checkLabels(svcName, path string, lNode *yaml.Node, add func(svc, path stri
 
 func checkDeploy(svcName, path string, dNode *yaml.Node, add func(svc, path string)) {
 	if dNode.Kind != yaml.MappingNode {
+		add(svcName, path)
 		return
 	}
 	for i := 0; i+1 < len(dNode.Content); i += 2 {
@@ -165,6 +183,7 @@ func checkDeploy(svcName, path string, dNode *yaml.Node, add func(svc, path stri
 			continue
 		}
 		if dv.Kind != yaml.MappingNode {
+			add(svcName, dPath)
 			continue
 		}
 		for r := 0; r+1 < len(dv.Content); r += 2 {
@@ -176,6 +195,7 @@ func checkDeploy(svcName, path string, dNode *yaml.Node, add func(svc, path stri
 				continue
 			}
 			if rv.Kind != yaml.MappingNode {
+				add(svcName, rPath)
 				continue
 			}
 			for lr := 0; lr+1 < len(rv.Content); lr += 2 {
@@ -186,5 +206,42 @@ func checkDeploy(svcName, path string, dNode *yaml.Node, add func(svc, path stri
 				}
 			}
 		}
+	}
+}
+
+func checkNoAliases(n *yaml.Node, path string, issues *[]output.Issue) {
+	if n.Anchor != "" || n.Kind == yaml.AliasNode {
+		p := path
+		if p == "" {
+			p = "(document)"
+		}
+		*issues = append(*issues, output.Issue{
+			Code:    "E_CONTRACT_FIELD_FORBIDDEN",
+			Message: p + ": YAML anchors and aliases are not allowed",
+			Hint:    "write the values out in full; cvctl does not resolve anchors, aliases or merge keys",
+		})
+		return
+	}
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k := n.Content[i]
+			child := path + "." + k.Value
+			if path == "" {
+				child = k.Value
+			}
+			if k.Value == "<<" || k.Tag == "!!merge" {
+				*issues = append(*issues, output.Issue{
+					Code:    "E_CONTRACT_FIELD_FORBIDDEN",
+					Message: child + ": YAML merge keys are not allowed",
+					Hint:    "write the values out in full; cvctl does not resolve anchors, aliases or merge keys",
+				})
+				continue
+			}
+			checkNoAliases(n.Content[i+1], child, issues)
+		}
+		return
+	}
+	for i, c := range n.Content {
+		checkNoAliases(c, fmt.Sprintf("%s[%d]", path, i), issues)
 	}
 }
