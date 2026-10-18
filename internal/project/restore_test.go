@@ -121,7 +121,10 @@ func newRestoreRig(t *testing.T, envBody string) *restoreRig {
 	store := state.NewStore(osfs, stateRoot)
 	log := &[]string{}
 	cat := testCatalog(t)
+	netRun := &systest.Runner{}
+	netRun.OnPrefix("docker network", sys.Result{})
 	deployer := &deploy.Deployer{
+		Run:        netRun,
 		Backup:     &render.BackupTarget{Host: "h1", Endpoint: "http://s3", Bucket: "bk", Region: "r", AccessKey: "ak-ACCESS-0000", SecretKey: "sk-SECRET-0000", LibsodiumKey: "lib-KEY-00000"},
 		DeployRoot: tmp,
 		TraefikDir: filepath.Join(tmp, "traefik"),

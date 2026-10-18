@@ -315,7 +315,10 @@ func setupTestRig(t *testing.T, envName, instName string) *testRig {
 
 	fixedNow := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 
+	netRun := &systest.Runner{}
+	netRun.OnPrefix("docker network", sys.Result{})
 	deployer := &Deployer{
+		Run:        netRun,
 		DeployRoot: deployRoot,
 		TraefikDir: traefikDir,
 		FS:         osFS,

@@ -20,6 +20,7 @@ import (
 	"github.com/codeavers/cvctl/internal/project"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
+	"github.com/codeavers/cvctl/internal/sys/systest"
 	"github.com/codeavers/cvctl/kinds"
 )
 
@@ -137,7 +138,10 @@ func setupOpsFixture(t *testing.T, inst string) (string, *OpsEnv) {
 	}
 
 	hcfg := &hostcfg.Config{Registries: "ghcr.io/codeavers"}
+	netRun := &systest.Runner{}
+	netRun.OnPrefix("docker network", sys.Result{})
 	dep := &deploy.Deployer{
+		Run:        netRun,
 		DeployRoot: tmp,
 		TraefikDir: filepath.Join(tmp, "traefik"),
 		FS:         sys.NewOSFS(),

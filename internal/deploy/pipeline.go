@@ -89,8 +89,7 @@ type Deployer struct {
 	Catalog    kinds.Catalog
 	Clock      func() time.Time
 	Health     func(ctx context.Context, inst, override string) error
-	// Run executes the docker network commands; Wire sets it. Nil skips them
-	// (unit tests of unrelated flows).
+	// Run executes the docker network commands; Wire sets it.
 	Run sys.Runner
 	// Allowed lists permitted image registries. Nil disables the post-checkout
 	// image check; Wire sets it (non-nil) from the host configuration.
@@ -112,7 +111,7 @@ const traefikContainer = "cvctl-traefik"
 // same condition the override uses to declare it.
 func (d *Deployer) ensureNetworks(ctx context.Context, inst string, p *contract.Project, dec *instance.Decisions) error {
 	if d.Run == nil {
-		return nil
+		return errNoRunner()
 	}
 	if err := sys.EnsureNetwork(ctx, d.Run, render.NetworkEdge(inst), false); err != nil {
 		return err
@@ -128,9 +127,17 @@ func (d *Deployer) ensureNetworks(ctx context.Context, inst string, p *contract.
 	return nil
 }
 
+func errNoRunner() error {
+	return &output.Error{
+		Code:    "E_DEPLOY_MISCONFIGURED",
+		Message: "deployer misconfigured: no command runner",
+		Hint:    "deployer has no command runner",
+	}
+}
+
 func (d *Deployer) connectTraefik(ctx context.Context, inst string) error {
 	if d.Run == nil {
-		return nil
+		return errNoRunner()
 	}
 	return sys.ConnectNetwork(ctx, d.Run, render.NetworkEdge(inst), traefikContainer)
 }
@@ -923,7 +930,10 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 	upErr := finalCompose.Up(ctx)
 	if upErr == nil {
-		upErr = d.connectTraefik(ctx, inst)
+		// Traefik being unreachable says nothing about the new release: retry, do not roll back.
+		if err := d.connectTraefik(ctx, inst); err != nil {
+			return d.failTransient(ctx, inst, st, want, deployID, actor, now, err.Error(), secrets)
+		}
 	}
 
 	// Step 9: HealthCheck

@@ -34,7 +34,7 @@ func (e *OpsEnv) backupRunner() *backup.Runner {
 	run := e.runner()
 	d := e.Deployer
 	if d == nil {
-		d = &deploy.Deployer{DeployRoot: e.deployRoot(), FS: e.fs()}
+		d = &deploy.Deployer{DeployRoot: e.deployRoot(), FS: e.fs(), Run: run}
 	}
 	host := ""
 	if e.Host != nil {

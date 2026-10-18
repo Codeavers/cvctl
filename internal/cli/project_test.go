@@ -593,7 +593,10 @@ func setupRestoreDeployFailure(t *testing.T) {
 	}
 	osfs := sys.NewOSFS()
 	stateRoot := filepath.Join(tmp, "state")
+	netRun := &systest.Runner{}
+	netRun.OnPrefix("docker network", sys.Result{})
 	deployer := &deploy.Deployer{
+		Run:        netRun,
 		DeployRoot: tmp,
 		TraefikDir: filepath.Join(tmp, "traefik"),
 		StateRoot:  stateRoot,
