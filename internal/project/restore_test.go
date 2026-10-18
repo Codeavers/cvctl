@@ -299,7 +299,7 @@ func TestUpdateRecordsMissingInfraURL(t *testing.T) {
 	run := &systest.Runner{}
 	run.OnPrefix("git -C "+rig.infraDir+" remote get-url origin", sys.Result{Stdout: []byte("git@github.com:org/demo-infra.git\n")})
 	rig.env.Run = run
-	if _, err := Update(context.Background(), rig.env, "demo-dev"); err != nil {
+	if _, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(rig.instDir, "cvctl.env"))
@@ -433,7 +433,7 @@ func TestUpdateStripsCredentialsFromRecordedURL(t *testing.T) {
 	run := &systest.Runner{}
 	run.OnPrefix("git -C "+rig.infraDir+" remote get-url origin", sys.Result{Stdout: []byte("https://x:ghp_SECRET@github.com/org/demo-infra.git\n")})
 	rig.env.Run = run
-	res, err := Update(context.Background(), rig.env, "demo-dev")
+	res, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

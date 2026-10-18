@@ -141,17 +141,21 @@ func parseExt(extFlags []string) (map[string]map[string]string, error) {
 		if !found {
 			return nil, &output.UsageError{Err: &output.Error{
 				Code:    "E_USAGE_EXT",
-				Message: fmt.Sprintf("invalid --ext flag %q: expected <svc>.<field>=<value>", s),
+				Message: "invalid --ext flag: expected <svc>.<field>=<value>",
 				Hint:    "pass --ext <svc>.<field>=<value>, for example --ext media.region=auto",
 			}}
 		}
-		svc, field, found := strings.Cut(target, ".")
+		svc, field, foundDot := strings.Cut(target, ".")
 		svc = strings.TrimSpace(svc)
 		field = strings.TrimSpace(field)
-		if !found || svc == "" || field == "" {
+		if !foundDot || svc == "" || field == "" {
+			msg := "invalid --ext flag: expected <svc>.<field>=<value>"
+			if strings.TrimSpace(target) != "" {
+				msg = fmt.Sprintf("invalid --ext flag %q: expected <svc>.<field>=<value>", target)
+			}
 			return nil, &output.UsageError{Err: &output.Error{
 				Code:    "E_USAGE_EXT",
-				Message: fmt.Sprintf("invalid --ext flag %q: expected <svc>.<field>=<value>", s),
+				Message: msg,
 				Hint:    "pass --ext <svc>.<field>=<value>, for example --ext media.region=auto",
 			}}
 		}
