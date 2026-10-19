@@ -64,6 +64,12 @@ sudo cvctl project add oci://ghcr.io/<org>/<repo>-infra --env dev \
   --env-file /srv/deploy/<project>/dev/.env --domain web=app.example.com
 ```
 
+## project list
+
+`cvctl project list [--json]` reads each instance's `cvctl.env` and installed contract (no network,
+no docker) and prints its env, contract source, tracked tag, domains, data service modes and
+whether it is paused. An instance whose contract cannot be read is listed with the error.
+
 ## Timeouts
 
 Defaults and `host.env` keys: fetch 2m (`CVCTL_TIMEOUT_FETCH`), pull 10m (`CVCTL_TIMEOUT_PULL`),

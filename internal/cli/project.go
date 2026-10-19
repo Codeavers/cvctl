@@ -179,6 +179,7 @@ func newProjectCmd() *cobra.Command {
 	cmd.AddCommand(newProjectAddCmd())
 	cmd.AddCommand(newProjectUpdateCmd())
 	cmd.AddCommand(newProjectRestoreCmd())
+	cmd.AddCommand(newProjectListCmd())
 	return cmd
 }
 
