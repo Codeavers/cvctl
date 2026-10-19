@@ -34,9 +34,12 @@ Edge aliases, routers and services are named `<inst>--<svc>`, so instance names 
 A project can take its contract from an OCI artifact instead of git:
 
 ```
-cvctl project add <name> oci://ghcr.io/<org>/<repo>-infra:develop
 cvctl publish ./infra ghcr.io/<org>/<repo>-infra:develop
+cvctl project add oci://ghcr.io/<org>/<repo>-infra --env dev
 ```
+
+`project add` takes the repository without a tag or digest: the instance follows `develop` in dev
+and `main` in prod, the same tags `publish` pushes.
 
 `publish` runs the `lint` checks, then pushes `compose.yml`, `env.spec.yml` and, if present,
 `deploy/prod.env` (as `prod.env`) and prints the digest (`--json`: `{"ref":...,"digest":...}`).
