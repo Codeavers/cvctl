@@ -659,3 +659,63 @@ func TestProjectRestoreCLIDeployFailureJSONIncludesVolumes(t *testing.T) {
 		t.Fatalf("code=%d env=%+v out=%s", code, env, out)
 	}
 }
+
+func TestProjectAddEnvFileJSONNamesOnly(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra-source")
+	writeCLIInfra(t, infraDir)
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &cliStubRepo{infraSource: infraDir}
+	oldEnv := newProjectEnv
+	t.Cleanup(func() { newProjectEnv = oldEnv })
+	newProjectEnv = func(o projectOpts) (*project.Env, error) {
+		return &project.Env{
+			FS:         sys.NewOSFS(),
+			DeployRoot: tmp,
+			StateRoot:  filepath.Join(tmp, "state"),
+			Catalog:    cat,
+			RepoFactory: func(dir, _ string) project.RepoLike {
+				r := *stub
+				r.dir = dir
+				return &r
+			},
+		}, nil
+	}
+	envPath := filepath.Join(tmp, "old.env")
+	if err := os.WriteFile(envPath, []byte("DB_URL=postgres://u:hunter2@old/db\nCOMPOSE_FILE=a.yml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errb := run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--env-file", envPath, "--json")
+	if code != 0 {
+		t.Fatalf("code %d: out=%s err=%s", code, out, errb)
+	}
+	if strings.Contains(out+errb, "hunter2") {
+		t.Fatalf("output leaks a value: %s %s", out, errb)
+	}
+	var env struct {
+		Data struct {
+			EnvFile struct {
+				Used    []string `json:"used"`
+				Ignored []string `json:"ignored"`
+			} `json:"env_file"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("json: %v (%s)", err, out)
+	}
+	want := []string{"COMPOSE_FILE (not in env.spec)", "DB_URL (source service)"}
+	if len(env.Data.EnvFile.Used) != 0 || strings.Join(env.Data.EnvFile.Ignored, "|") != strings.Join(want, "|") {
+		t.Fatalf("env_file = %+v", env.Data.EnvFile)
+	}
+}
+
+func TestProjectAddEnvFileMissing(t *testing.T) {
+	code, _, errb := run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--env-file", filepath.Join(t.TempDir(), "nope.env"))
+	if code != 2 || !strings.Contains(errb, "E_USAGE_ENV_FILE") {
+		t.Fatalf("code %d err=%s, want exit 2 with E_USAGE_ENV_FILE", code, errb)
+	}
+}

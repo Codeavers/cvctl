@@ -50,6 +50,20 @@ the host side is `E_INFRA_ARTIFACT`. Layers are capped at 1 MiB. Hosts in
 [docs/ci/publish-contract.yml](docs/ci/publish-contract.yml); the cvctl package must grant read
 access to the project repository (Package settings, Manage Actions access).
 
+## Migrating an existing deploy
+
+`project add --env-file <path>` reads an existing `.env` (docker compose rules; no host
+environment expansion) and takes only the env.spec vars with source `random` or `prompt`, under
+the same names. `service`, `fixed` and `template` vars come from cvctl and the contract, and keys
+outside env.spec never reach `app.env`. `--set` wins over the file. The output lists the keys
+used and ignored, never their values. Errors: `E_USAGE_ENV_FILE`; a multi-line value is
+`E_ENVSPEC_VALUE`.
+
+```
+sudo cvctl project add oci://ghcr.io/<org>/<repo>-infra --env dev \
+  --env-file /srv/deploy/<project>/dev/.env --domain web=app.example.com
+```
+
 ## Timeouts
 
 Defaults and `host.env` keys: fetch 2m (`CVCTL_TIMEOUT_FETCH`), pull 10m (`CVCTL_TIMEOUT_PULL`),

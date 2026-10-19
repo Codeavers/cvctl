@@ -35,6 +35,8 @@ type projectReport struct {
 	DeployKeyPub string       `json:"deploy_key_pub,omitempty"`
 	Missing      []string     `json:"missing,omitempty"`
 	Warnings     []string     `json:"warnings,omitempty"`
+	// EnvFile names the keys taken from and ignored in --env-file, never their values.
+	EnvFile *project.EnvFileReport `json:"env_file,omitempty"`
 }
 
 // newProjectEnv builds the environment; tests replace it with fakes.
@@ -202,10 +204,17 @@ func newProjectAddCmd() *cobra.Command {
 			setFlags, _ := cmd.Flags().GetStringArray("set")
 			domainFlags, _ := cmd.Flags().GetStringArray("domain")
 			extFlags, _ := cmd.Flags().GetStringArray("ext")
+			envFile, _ := cmd.Flags().GetString("env-file")
 
 			setMap, err := parseSet(setFlags)
 			if err != nil {
 				return err
+			}
+			var envFileVals map[string]string
+			if envFile != "" {
+				if envFileVals, err = project.ReadEnvFile(envFile); err != nil {
+					return err
+				}
 			}
 			domainMap, err := parseDomains(domainFlags)
 			if err != nil {
@@ -233,6 +242,7 @@ func newProjectAddCmd() *cobra.Command {
 				Strategy:  strategy,
 				InfraPath: infraPath,
 				Set:       setMap,
+				EnvFile:   envFileVals,
 				Domains:   domainMap,
 				Ext:       extMap,
 			})
@@ -246,6 +256,7 @@ func newProjectAddCmd() *cobra.Command {
 				DeployKeyPub: res.DeployKeyPub,
 				Missing:      res.Deploy.Missing,
 				Warnings:     res.Warnings,
+				EnvFile:      res.EnvFile,
 			}
 
 			if res.Deploy.Status == state.StatusFailed {
@@ -275,6 +286,7 @@ func newProjectAddCmd() *cobra.Command {
 	cmd.Flags().String("infra-path", "", "contract directory inside the infra git repo (monorepos)")
 	cmd.Flags().Bool("non-interactive", false, "never prompt; use defaults and --set values")
 	cmd.Flags().StringArray("set", nil, "pre-seed app.env values (KEY=VALUE, repeatable)")
+	cmd.Flags().String("env-file", "", "existing .env to take env.spec random and prompt values from (same names; --set wins)")
 	cmd.Flags().StringArray("domain", nil, "domain for exposed service (svc=host, repeatable)")
 	cmd.Flags().StringArray("ext", nil, "pre-seed external service configuration (svc.field=value, repeatable)")
 	return cmd
@@ -410,6 +422,12 @@ new backup generation so the restored timeline never mixes with the old one.`,
 }
 
 func writeProjectHuman(w io.Writer, rep projectReport) {
+	if rep.EnvFile != nil {
+		fmt.Fprintf(w, "env-file: used %d: %s\n", len(rep.EnvFile.Used), strings.Join(rep.EnvFile.Used, ", "))
+		if len(rep.EnvFile.Ignored) > 0 {
+			fmt.Fprintf(w, "env-file: ignored %d: %s\n", len(rep.EnvFile.Ignored), strings.Join(rep.EnvFile.Ignored, ", "))
+		}
+	}
 	defer func() {
 		for _, warn := range rep.Warnings {
 			fmt.Fprintf(w, "warning: %s\n", warn)

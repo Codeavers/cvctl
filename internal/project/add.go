@@ -140,8 +140,11 @@ type AddOptions struct {
 	// InfraPath is the contract directory inside a git infra repo (monorepos).
 	InfraPath string
 	Set       map[string]string
-	Domains   map[string]string
-	Ext       map[string]map[string]string
+	// EnvFile holds the values read from an existing .env (ReadEnvFile); only the
+	// random and prompt vars of env.spec are taken from it.
+	EnvFile map[string]string
+	Domains map[string]string
+	Ext     map[string]map[string]string
 }
 
 type UpdateOptions struct {
@@ -154,6 +157,8 @@ type AddResult struct {
 	DeployKeyPub string
 	Decisions    *instance.Decisions
 	Warnings     []string
+	// EnvFile is nil when no env file was given.
+	EnvFile *EnvFileReport
 }
 
 func sanitizeName(s string) string {
@@ -1092,6 +1097,18 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	}
 
 	appEnvValues := make(map[string]string)
+	var envFileRep *EnvFileReport
+	if opts.EnvFile != nil {
+		taken, rep, err := selectEnvFile(spec, opts.EnvFile, opts.Set)
+		if err != nil {
+			cleanupInst()
+			return nil, err
+		}
+		for k, v := range taken {
+			appEnvValues[k] = v
+		}
+		envFileRep = &rep
+	}
 	for k, v := range opts.Set {
 		appEnvValues[k] = v
 	}
@@ -1152,6 +1169,7 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		DeployKeyPub: pubKey,
 		Decisions:    d,
 		Warnings:     warnings,
+		EnvFile:      envFileRep,
 	}, nil
 }
 
