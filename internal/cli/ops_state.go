@@ -91,25 +91,7 @@ func newStatusCmd() *cobra.Command {
 				}
 				instances = []string{inst}
 			} else {
-				seen := make(map[string]bool)
-				if storeInsts, err := e.Store.Instances(); err == nil {
-					for _, name := range storeInsts {
-						if e.checkInstance(name) == nil {
-							seen[name] = true
-						}
-					}
-				}
-				if entries, err := e.fs().ReadDir(e.deployRoot()); err == nil {
-					for _, ent := range entries {
-						if ent.IsDir() && e.checkInstance(ent.Name()) == nil {
-							seen[ent.Name()] = true
-						}
-					}
-				}
-				for name := range seen {
-					instances = append(instances, name)
-				}
-				slices.Sort(instances)
+				instances = e.allInstances()
 			}
 
 			now := time.Now()
@@ -395,4 +377,29 @@ func (e *OpsEnv) s3Warnings(instances []string) []string {
 		}
 	}
 	return warnings
+}
+
+// allInstances lists the instances known to the state store or present under the deploy root.
+func (e *OpsEnv) allInstances() []string {
+	seen := make(map[string]bool)
+	if storeInsts, err := e.Store.Instances(); err == nil {
+		for _, name := range storeInsts {
+			if e.checkInstance(name) == nil {
+				seen[name] = true
+			}
+		}
+	}
+	if entries, err := e.fs().ReadDir(e.deployRoot()); err == nil {
+		for _, ent := range entries {
+			if ent.IsDir() && e.checkInstance(ent.Name()) == nil {
+				seen[ent.Name()] = true
+			}
+		}
+	}
+	instances := make([]string, 0, len(seen))
+	for name := range seen {
+		instances = append(instances, name)
+	}
+	slices.Sort(instances)
+	return instances
 }
