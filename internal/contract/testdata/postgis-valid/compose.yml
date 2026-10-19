@@ -1,0 +1,14 @@
+x-cvctl:
+  health: { service: api, http: /health, timeout: 90s }
+
+services:
+  api:
+    image: ghcr.io/org/project-api
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+    labels:
+      cvctl.role: app
+      cvctl.expose: "3000"
+    deploy: { resources: { limits: { memory: 512m } } }
+  geo-db:
+    labels: { cvctl.kind: postgis, cvctl.version: "16", cvctl.env: DATABASE }

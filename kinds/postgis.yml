@@ -1,0 +1,22 @@
+name: postgis
+image: ghcr.io/codeavers/cvctl-postgis:{version}
+versions: ["16", "17"]
+default_version: "16"
+port: 5432
+volume_path: /var/lib/postgresql/data
+command: ["postgres","-c","wal_level=replica"]
+backup_command_args: ["-c","archive_mode=on","-c","archive_command=wal-g wal-push %p","-c","archive_timeout=60"]
+container_env:
+  POSTGRES_USER: "{user}"
+  POSTGRES_PASSWORD: "{password}"
+  POSTGRES_DB: "{db}"
+  PGUSER: "{user}"
+  PGDATABASE: "{db}"
+  PGHOST: "/var/run/postgresql"
+env:
+  URL: "postgres://{user}:{password}@{host}:{port}/{db}"
+backup: wal-g
+external: [url]
+health: ["CMD-SHELL", "pg_isready -U {user} -d {db}"]
+restore_check: "select count(*) from information_schema.tables where table_schema='public'"
+cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]

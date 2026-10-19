@@ -132,6 +132,11 @@ $ cvctl render --instance-dir /srv/deploy/demo-dev --json
 
 `examples/demo` is a complete sample project (an API, a worker, Postgres, Redis and S3).
 
+## Data kinds
+
+A service declares `cvctl.kind` to get a managed data service: `postgres` (15, 16, 17), `postgis`
+(Postgres with PostGIS, 16, 17; same WAL-G backups and PITR as `postgres`), `redis` and `s3`.
+
 ## S3 buckets
 
 An `s3` service declares its buckets in `x-cvctl.s3.<service>.buckets`, each public or private

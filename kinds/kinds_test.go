@@ -32,7 +32,7 @@ func mustLoad(t *testing.T) Catalog {
 
 func TestLoadEmbedded(t *testing.T) {
 	c := mustLoad(t)
-	for _, n := range []string{"postgres", "redis", "s3"} {
+	for _, n := range []string{"postgres", "postgis", "redis", "s3"} {
 		if _, ok := c[n]; !ok {
 			t.Errorf("missing kind %s", n)
 		}
@@ -266,5 +266,24 @@ func TestLoadRejectsPasswordInShellHealth(t *testing.T) {
 	ok := base + "command: [serve, \"{password}\", \"{app_password}\"]\nhealth: [CMD, ping, \"{password}\", \"{app_password}\"]\n"
 	if _, err := LoadFS(fstest.MapFS{"a.yml": {Data: []byte(ok)}}); err != nil {
 		t.Errorf("CMD form rejected: %v", err)
+	}
+}
+
+func TestPostgisKind(t *testing.T) {
+	c := mustLoad(t)
+	pg, gis := c["postgres"], c["postgis"]
+	if gis.Backup != "wal-g" || gis.DefaultVersion != "16" || gis.Port != pg.Port || gis.VolumePath != pg.VolumePath {
+		t.Errorf("postgis = %+v", gis)
+	}
+	if !reflect.DeepEqual(gis.Command, pg.Command) || !reflect.DeepEqual(gis.BackupCommandArgs, pg.BackupCommandArgs) ||
+		!reflect.DeepEqual(gis.Health, pg.Health) || !reflect.DeepEqual(gis.CapAdd, pg.CapAdd) || gis.RestoreCheck != pg.RestoreCheck {
+		t.Errorf("postgis diverges from postgres: %+v", gis)
+	}
+	img, err := gis.ImageFor("17")
+	if err != nil || img != "ghcr.io/codeavers/cvctl-postgis:17" {
+		t.Errorf("img=%q err=%v", img, err)
+	}
+	if _, err := gis.ImageFor("15"); err == nil {
+		t.Errorf("postgis 15 accepted")
 	}
 }

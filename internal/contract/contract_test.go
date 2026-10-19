@@ -45,6 +45,7 @@ func TestValidateFixtures(t *testing.T) {
 		"spec-template-domain":   "E_CONTRACT_SPEC_TEMPLATE_REF",
 		"spec-template-var":      "E_CONTRACT_SPEC_TEMPLATE_REF",
 		"verify-service":         "E_CONTRACT_VERIFY_SERVICE",
+		"postgis-valid":          "",
 		"s3-valid":               "",
 		"s3-not-s3":              "E_CONTRACT_S3_NOT_S3",
 		"s3-bucket-name":         "E_CONTRACT_S3_BUCKET_NAME",
