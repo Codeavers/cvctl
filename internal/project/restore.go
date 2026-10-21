@@ -182,10 +182,40 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 	instDir := filepath.Join(e.deployRoot(), inst)
 	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
 
+	hasEnv := fileExists(e.fs(), cvctlEnvPath)
+	if !hasEnv && e.Data == nil {
+		return nil, &output.Error{
+			Code:    "E_RESTORE_NO_SECRETS",
+			Message: fmt.Sprintf("%s is missing", cvctlEnvPath),
+			Hint:    "run cvctl secrets import <bundle> first",
+		}
+	}
+	if e.Data == nil || e.Deployer == nil || e.Deployer.Store == nil {
+		return nil, &output.Error{
+			Code:    "E_RESTORE_MISCONFIGURED",
+			Message: "project restore is not wired (data restorer, deployer or state store missing)",
+			Hint:    "this is a cvctl bug; report it",
+		}
+	}
+
+	// Held throughout, and taken before any env file is fetched or written, so
+	// a concurrent holder never sees a half-restored instance; wal-g retention
+	// of a backup timer also cannot delete the base backup being fetched. The
+	// operator retries rather than waits.
+	unlockData, err := e.Deployer.Store.LockData()
+	if err != nil {
+		return nil, err
+	}
+	defer unlockData()
+	unlock, err := e.Deployer.Store.Lock(inst)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
 	var envWarnings []string
 	var restoredFiles []string
 
-	hasEnv := fileExists(e.fs(), cvctlEnvPath)
 	if hasEnv {
 		if opts.EnvSnapshot != "" {
 			return nil, &output.UsageError{Err: &output.Error{
@@ -195,13 +225,6 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 			}}
 		}
 	} else {
-		if e.Data == nil {
-			return nil, &output.Error{
-				Code:    "E_RESTORE_NO_SECRETS",
-				Message: fmt.Sprintf("%s is missing", cvctlEnvPath),
-				Hint:    "run cvctl secrets import <bundle> first",
-			}
-		}
 		rootPrefix, err := e.secretsRoot()
 		if err != nil {
 			return nil, err
@@ -220,6 +243,20 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 		}
 		written, err := secrets.Restore(e.fs(), rootPrefix, entries, false)
 		if err != nil {
+			var oe *output.Error
+			if errors.As(err, &oe) && oe.Code == "E_SECRETS_EXISTS" {
+				var leftovers []string
+				for _, en := range entries {
+					if fileExists(e.fs(), rootPrefix+en.Path) {
+						leftovers = append(leftovers, en.Path)
+					}
+				}
+				return nil, &output.Error{
+					Code:    "E_RESTORE_NO_SECRETS",
+					Message: fmt.Sprintf("%s is missing but other env files are left over: %s", cvctlEnvPath, strings.Join(leftovers, ", ")),
+					Hint:    "remove the leftover files listed above or import a bundle with cvctl secrets import --force, then re-run",
+				}
+			}
 			for _, p := range written {
 				_ = e.fs().Remove(rootPrefix + p)
 			}
@@ -261,27 +298,6 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 			Hint:    "run as root (sudo cvctl project restore)",
 		})
 	}
-	if e.Data == nil || e.Deployer == nil || e.Deployer.Store == nil {
-		return failEarly(&output.Error{
-			Code:    "E_RESTORE_MISCONFIGURED",
-			Message: "project restore is not wired (data restorer, deployer or state store missing)",
-			Hint:    "this is a cvctl bug; report it",
-		})
-	}
-
-	// Held throughout so wal-g retention of a backup timer cannot delete the
-	// base backup being fetched; the operator retries rather than waits.
-	unlockData, err := e.Deployer.Store.LockData()
-	if err != nil {
-		return failEarly(err)
-	}
-	defer unlockData()
-	unlock, err := e.Deployer.Store.Lock(inst)
-	if err != nil {
-		return failEarly(err)
-	}
-	defer unlock()
-
 	origEnv, err := e.fs().ReadFile(cvctlEnvPath)
 	if err != nil {
 		return failEarly(err)

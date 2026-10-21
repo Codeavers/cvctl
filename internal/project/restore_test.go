@@ -996,3 +996,86 @@ func TestRestoreNilDataWithMissingCvctlEnv(t *testing.T) {
 		t.Fatalf("hint should mention secrets import: %s", oe.Hint)
 	}
 }
+
+func testEnvEntries() []secrets.Entry {
+	return []secrets.Entry{
+		{Path: "/srv/deploy/demo-dev/cvctl.env", Mode: 0o640, User: "deployer", Group: "deploy", Data: []byte(restoreEnvBase)},
+		{Path: "/srv/deploy/demo-dev/app.env", Mode: 0o640, User: "deployer", Group: "deploy", Data: []byte("APP_SECRET=testsecret\n")},
+		{Path: "/var/lib/cvctl/demo-dev/deploy_key", Mode: 0o600, User: "deployer", Group: "deploy", Data: []byte("KEY_DATA\n")},
+	}
+}
+
+func TestRestoreLocksBeforeFetchingEnvFiles(t *testing.T) {
+	rig := newRestoreRig(t, "")
+	rig.data.envEntries = testEnvEntries()
+	unlock, err := rig.store.Lock("demo-dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	_, err = Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	if err == nil {
+		t.Fatal("expected a lock error")
+	}
+	if len(rig.data.envDumpCalls) != 0 {
+		t.Fatalf("EnvDump ran without the lock: %v", rig.data.envDumpCalls)
+	}
+	for _, p := range []string{
+		filepath.Join(rig.instDir, "cvctl.env"),
+		filepath.Join(rig.instDir, "app.env"),
+		filepath.Join(rig.env.stateRoot(), "demo-dev", "deploy_key"),
+	} {
+		if fileExists(rig.env.fs(), p) {
+			t.Fatalf("%s was written without the lock", p)
+		}
+	}
+}
+
+func TestRestoreLeftoverEnvFilesMapToNoSecrets(t *testing.T) {
+	rig := newRestoreRig(t, "")
+	rig.data.envEntries = testEnvEntries()
+	appPath := filepath.Join(rig.instDir, "app.env")
+	if err := os.WriteFile(appPath, []byte("LEFT=over\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_RESTORE_NO_SECRETS" {
+		t.Fatalf("err=%v", err)
+	}
+	if !strings.Contains(oe.Message, "/srv/deploy/demo-dev/app.env") {
+		t.Fatalf("message lacks the leftover path: %q", oe.Message)
+	}
+	_, leftList, _ := strings.Cut(oe.Message, "left over: ")
+	if strings.Contains(oe.Message, "LEFT=over") || strings.Contains(leftList, rig.instDir) {
+		t.Fatalf("message must name paths only, relative to the root: %q", oe.Message)
+	}
+	const wantHint = "remove the leftover files listed above or import a bundle with cvctl secrets import --force, then re-run"
+	if oe.Hint != wantHint {
+		t.Fatalf("hint=%q", oe.Hint)
+	}
+	if fileExists(rig.env.fs(), filepath.Join(rig.instDir, "cvctl.env")) {
+		t.Fatal("nothing may be written when leftovers exist")
+	}
+}
+
+func TestRestoreFailedDeployKeepsRestoredEnvFiles(t *testing.T) {
+	rig := newRestoreRig(t, "")
+	rig.data.envEntries = testEnvEntries()
+	rig.env.Deployer.Health = func(context.Context, string, string) error { return errors.New("unhealthy") }
+
+	if _, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{}); err == nil {
+		t.Fatal("expected the deploy to fail")
+	}
+	for _, p := range []string{
+		filepath.Join(rig.instDir, "cvctl.env"),
+		filepath.Join(rig.instDir, "app.env"),
+		filepath.Join(rig.env.stateRoot(), "demo-dev", "deploy_key"),
+	} {
+		if !fileExists(rig.env.fs(), p) {
+			t.Errorf("%s must be kept after the deploy started", p)
+		}
+	}
+}
