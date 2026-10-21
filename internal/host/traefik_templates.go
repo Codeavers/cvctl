@@ -113,7 +113,6 @@ type traefikHeadersMiddleware struct {
 	STSIncludeSubdomains bool   `yaml:"stsIncludeSubdomains,omitempty"`
 	ContentTypeNosniff   bool   `yaml:"contentTypeNosniff"`
 	FrameDeny            bool   `yaml:"frameDeny"`
-	ReferrerPolicy       string `yaml:"referrerPolicy"`
 }
 
 type traefikRateLimitMiddleware struct {
@@ -271,7 +270,6 @@ func renderTraefikDynamic(cfg *hostcfg.Config) ([]byte, error) {
 	hdrs := &traefikHeadersMiddleware{
 		ContentTypeNosniff: true,
 		FrameDeny:          true,
-		ReferrerPolicy:     "strict-origin-when-cross-origin",
 	}
 	if mode == "edge" {
 		hdrs.STSSeconds = 31536000

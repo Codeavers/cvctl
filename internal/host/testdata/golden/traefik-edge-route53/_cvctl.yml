@@ -12,7 +12,6 @@ http:
         stsIncludeSubdomains: true
         contentTypeNosniff: true
         frameDeny: true
-        referrerPolicy: strict-origin-when-cross-origin
     cvctl-inflight:
       inFlightReq:
         amount: 100
