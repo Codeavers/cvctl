@@ -82,6 +82,15 @@ echo "Objects under ${HOST_NAME}/${INST}/db/: $objs"
 test "$objs" -gt 0
 echo "Assert 1: one full backup, silo holds objects"
 
+echo "=== 4b. backup now env -> env files snapshot with the host key ==="
+res=$(cvctl backup now "$INST" env --json)
+echo "$res"
+echo "$res" | jq -e '.ok == true and ([.data.results[] | select(.ok != true)] | length == 0)'
+list=$(cvctl backup list "$INST" env --json)
+echo "$list"
+echo "$list" | jq -e '[.data.snapshots[] | select(.strategy == "env")] | length == 1'
+echo "Assert 1b: env files backed up as one snapshot"
+
 echo "=== 5. Rows A and B around the restore point T ==="
 psql_db "insert into items (name) values ('A')" >/dev/null
 sleep 2
