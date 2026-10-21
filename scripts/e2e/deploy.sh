@@ -222,4 +222,90 @@ echo "cvctl-agent service status: $active_status"
 test "$active_status" = "active"
 echo "Assert 17: cvctl-agent systemd unit is active"
 
-echo "ALL 17 ASSERTS PASSED SUCCESSFULLY!"
+echo "=== 18. Blue-green deploys keep serving: no failed request, one container created, failure keeps the old one ==="
+# The agent would deploy the registry pushes below on its own and race the explicit deploys.
+systemctl stop cvctl-agent
+POLL_FILE=$(mktemp)
+POLL_PID=""
+stop_poller() {
+  if [ -n "$POLL_PID" ]; then kill "$POLL_PID" 2>/dev/null || true; wait "$POLL_PID" 2>/dev/null || true; POLL_PID=""; fi
+}
+bg_cleanup() { stop_poller; systemctl start cvctl-agent || true; }
+trap bg_cleanup EXIT
+start_poller() {
+  : > "$POLL_FILE"
+  (
+    while :; do
+      # -w prints 000 when the connection fails, so every attempt adds one line.
+      curl -sk -o /dev/null -w '%{http_code}\n' --max-time 2 --resolve api.e2e.local:443:127.0.0.1 https://api.e2e.local/health >> "$POLL_FILE" || true
+      sleep 0.1
+    done
+  ) &
+  POLL_PID=$!
+  for i in $(seq 1 50); do
+    if [ "$(wc -l < "$POLL_FILE")" -ge 3 ]; then return 0; fi
+    sleep 0.1
+  done
+  echo "poller recorded no samples"; return 1
+}
+assert_all_2xx() {
+  local n bad
+  n=$(wc -l < "$POLL_FILE")
+  bad=$(awk '$1 !~ /^2[0-9][0-9]$/' "$POLL_FILE" | sort | uniq -c | tr '\n' ' ')
+  echo "Poller samples: $n, non-2xx: ${bad:-none}"
+  test "$n" -ge "$1"
+  test -z "$bad"
+}
+api_ids() { docker ps -q --filter label=com.docker.compose.project=demo-dev --filter label=com.docker.compose.service=api --filter label=com.docker.compose.oneoff=False; }
+
+cvctl set-strategy demo-dev blue-green --json | jq -e '.ok == true'
+
+bg_deploy() {
+  local build_id="$1" before after t0 t1 created
+  docker build --build-arg BUILD_ID="$build_id" -t localhost:5000/e2e/api:develop examples/e2e/app
+  docker push localhost:5000/e2e/api:develop
+  before=$(api_ids)
+  test "$(echo "$before" | wc -w)" -eq 1
+  start_poller
+  t0=$(date +%s)
+  cvctl deploy demo-dev --json
+  t1=$(( $(date +%s) + 1 ))
+  sleep 1
+  stop_poller
+  test "$(jqs '.status')" = "OK"
+  assert_all_2xx 20
+  cvctl history demo-dev --json | jq -e '.data.history[0] | .result == "OK" and (.blue_green | index("api") != null)'
+  created=$(docker events --since "$t0" --until "$t1" --filter type=container --filter event=create --filter label=com.docker.compose.project=demo-dev --filter label=com.docker.compose.service=api --filter label=com.docker.compose.oneoff=False --format '{{.ID}}' | wc -l)
+  echo "api containers created during the deploy: $created"
+  test "$created" -eq 1
+  after=$(api_ids)
+  test "$(echo "$after" | wc -w)" -eq 1
+  test "$after" != "$before"
+}
+
+bg_deploy bg1
+echo "Assert 18a: blue-green deploy served only 2xx, history lists api, exactly one api container created, one running"
+bg_deploy bg2
+echo "Assert 18b: a consecutive blue-green deploy behaves the same"
+
+docker build --build-arg BUILD_ID=bg3 --build-arg HEALTH_FAIL=1 -t localhost:5000/e2e/api:develop examples/e2e/app
+docker push localhost:5000/e2e/api:develop
+before=$(api_ids)
+start_poller
+if cvctl deploy demo-dev --json; then echo "deploy of an unhealthy image succeeded"; exit 1; fi
+sleep 1
+stop_poller
+test "$(jqs '.status')" = "FAILED"
+assert_all_2xx 20
+test "$(api_ids)" = "$before"
+test "$(curl -sk --resolve api.e2e.local:443:127.0.0.1 https://api.e2e.local/health)" = "ok hello"
+echo "Assert 18c: unhealthy new version failed the deploy, requests stayed 2xx and the old api container kept running"
+
+docker build --build-arg BUILD_ID=bg4 -t localhost:5000/e2e/api:develop examples/e2e/app
+docker push localhost:5000/e2e/api:develop
+cvctl deploy demo-dev --json
+test "$(jqs '.status')" = "OK"
+test "$(curl -sk --resolve api.e2e.local:443:127.0.0.1 https://api.e2e.local/health)" = "ok hello"
+echo "Assert 18d: a good image after the failure deploys OK"
+
+echo "ALL 18 ASSERTS PASSED SUCCESSFULLY!"

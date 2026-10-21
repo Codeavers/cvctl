@@ -26,6 +26,10 @@ func main() {
 
 func runServe() {
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if os.Getenv("HEALTH_FAIL") == "1" {
+			http.Error(w, "unhealthy", http.StatusInternalServerError)
+			return
+		}
 		greeting := os.Getenv("GREETING")
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "ok %s", greeting)
