@@ -242,14 +242,17 @@ func (r *Runner) instanceDir(inst string) string {
 	return filepath.Join(root, inst)
 }
 
-func (r *Runner) secretsRoot() string {
+func (r *Runner) secretsRoot() (string, error) {
 	if r.DeployRoot == "" || r.DeployRoot == "/srv/deploy" {
-		return ""
+		return "", nil
 	}
 	if strings.HasSuffix(r.DeployRoot, "/srv/deploy") {
-		return strings.TrimSuffix(r.DeployRoot, "/srv/deploy")
+		return strings.TrimSuffix(r.DeployRoot, "/srv/deploy"), nil
 	}
-	return ""
+	return "", &output.Error{
+		Code:    "E_BACKUP_FAILED",
+		Message: fmt.Sprintf("deploy root %s does not end in /srv/deploy", r.DeployRoot),
+	}
 }
 
 func (r *Runner) secrets() []string {
@@ -363,10 +366,6 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 		return nil, notConfigured()
 	}
 	hostRunner := r
-	dataRunner, ts, err := r.targets(ctx, inst, only)
-	if err != nil {
-		return nil, err
-	}
 	unlock, err := r.lockData(ctx, true)
 	if err != nil {
 		return nil, err
@@ -374,26 +373,41 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 	defer unlock()
 	var results []Result
 	var failed, statusErrs []string
+	var targetErr error
 
-	if only == "" || only != "env" {
-		for _, t := range ts {
-			runErr := func() error {
-				// a hung wal-g or restic must not hold the remaining services
-				tctx, cancel := context.WithTimeout(ctx, backupTimeout)
-				defer cancel()
-				if t.Strategy == StrategyWalG {
-					return dataRunner.walgBackup(tctx, inst, t)
-				}
-				return dataRunner.resticBackup(tctx, inst, t)
-			}()
-			res := Result{Instance: inst, Service: t.Service, Strategy: t.Strategy, OK: runErr == nil}
-			if runErr != nil {
-				res.Error = dataRunner.redact(runErr.Error())
-				failed = append(failed, t.Service)
+	if only != "env" {
+		dataRunner, ts, err := r.targets(ctx, inst, only)
+		if err != nil {
+			if only != "" {
+				return nil, err
 			}
-			results = append(results, res)
-			if err := dataRunner.record(ctx, inst, t.Service, res); err != nil {
-				statusErrs = append(statusErrs, fmt.Sprintf("%s: %s", t.Service, dataRunner.redact(err.Error())))
+			targetErr = err
+			results = append(results, Result{
+				Instance: inst,
+				Service:  "",
+				OK:       false,
+				Error:    hostRunner.redact(err.Error()),
+			})
+		} else {
+			for _, t := range ts {
+				runErr := func() error {
+					// a hung wal-g or restic must not hold the remaining services
+					tctx, cancel := context.WithTimeout(ctx, backupTimeout)
+					defer cancel()
+					if t.Strategy == StrategyWalG {
+						return dataRunner.walgBackup(tctx, inst, t)
+					}
+					return dataRunner.resticBackup(tctx, inst, t)
+				}()
+				res := Result{Instance: inst, Service: t.Service, Strategy: t.Strategy, OK: runErr == nil}
+				if runErr != nil {
+					res.Error = dataRunner.redact(runErr.Error())
+					failed = append(failed, t.Service)
+				}
+				results = append(results, res)
+				if err := dataRunner.record(ctx, inst, t.Service, res); err != nil {
+					statusErrs = append(statusErrs, fmt.Sprintf("%s: %s", t.Service, dataRunner.redact(err.Error())))
+				}
 			}
 		}
 	}
@@ -415,10 +429,18 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 		}
 	}
 
-	if len(failed) > 0 {
+	if targetErr != nil || len(failed) > 0 {
+		var msg string
+		if targetErr != nil && len(failed) > 0 {
+			msg = fmt.Sprintf("backup of %s failed: %s; and for: %s", inst, hostRunner.redact(targetErr.Error()), strings.Join(failed, ", "))
+		} else if targetErr != nil {
+			msg = fmt.Sprintf("backup of %s failed: %s", inst, hostRunner.redact(targetErr.Error()))
+		} else {
+			msg = fmt.Sprintf("backup of %s failed for: %s", inst, strings.Join(failed, ", "))
+		}
 		return results, &output.Error{
 			Code:    "E_BACKUP_FAILED",
-			Message: fmt.Sprintf("backup of %s failed for: %s", inst, strings.Join(failed, ", ")),
+			Message: msg,
 			Hint:    "see cvctl backup list and the per-service error; fix the storage or service and retry",
 		}
 	}
@@ -451,7 +473,15 @@ func (r *Runner) BackupService(ctx context.Context, inst, svc string) error {
 		return dataRunner.walgBackup(tctx, inst, ts[0])
 	}
 	if ts[0].Strategy == StrategyEnv {
-		return hostRunner.envBackup(tctx, inst)
+		if err := hostRunner.envBackup(tctx, inst); err != nil {
+			var oe *output.Error
+			if errors.As(err, &oe) {
+				oe.Message = hostRunner.redact(oe.Message)
+				return oe
+			}
+			return errors.New(hostRunner.redact(err.Error()))
+		}
+		return nil
 	}
 	return dataRunner.resticBackup(tctx, inst, ts[0])
 }
@@ -467,7 +497,7 @@ func (r *Runner) List(ctx context.Context, inst, svc string) ([]Snapshot, error)
 		return nil, err
 	}
 	out := []Snapshot{}
-	if svc == "" || svc != "env" {
+	if svc != "env" {
 		for _, t := range ts {
 			var snaps []Snapshot
 			switch t.Strategy {

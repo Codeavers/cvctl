@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/codeavers/cvctl/internal/output"
@@ -12,6 +13,8 @@ import (
 	"github.com/codeavers/cvctl/internal/secrets"
 	"github.com/codeavers/cvctl/internal/sys"
 )
+
+var snapshotIDRe = regexp.MustCompile(`^(latest|[0-9a-f]{4,64})$`)
 
 // resticExitNoRepo is restic's exit code for a repository that does not exist.
 const resticExitNoRepo = 10
@@ -165,7 +168,11 @@ func (r *Runner) resticRepoList(ctx context.Context, inst string, t Target, idx 
 }
 
 func (r *Runner) envBackup(ctx context.Context, inst string) error {
-	entries, warns, err := secrets.CollectInstance(r.FS, r.secretsRoot(), inst)
+	root, err := r.secretsRoot()
+	if err != nil {
+		return err
+	}
+	entries, warns, err := secrets.CollectInstance(r.FS, root, inst)
 	if err != nil {
 		return &output.Error{
 			Code:    "E_BACKUP_FAILED",
@@ -180,6 +187,14 @@ func (r *Runner) envBackup(ctx context.Context, inst string) error {
 			Hint:    "check permissions and files in the instance directory",
 		}
 	}
+	var kept []secrets.Entry
+	for _, e := range entries {
+		switch filepath.Base(e.Path) {
+		case "cvctl.env", "app.env", "deploy_key", "deploy_key.pub":
+			kept = append(kept, e)
+		}
+	}
+	entries = kept
 	if len(entries) == 0 {
 		return &output.Error{
 			Code:    "E_BACKUP_FAILED",
@@ -265,6 +280,16 @@ func (r *Runner) EnvDump(ctx context.Context, inst, snapshot string) ([]secrets.
 	if r.Host == nil {
 		return nil, "", notConfigured()
 	}
+	if snapshot == "" {
+		snapshot = "latest"
+	}
+	if !snapshotIDRe.MatchString(snapshot) {
+		return nil, "", &output.Error{
+			Code:    "E_USAGE_SNAPSHOT",
+			Message: fmt.Sprintf("invalid snapshot ID %q: must be 'latest' or 4-64 hex digits", snapshot),
+			Hint:    "run cvctl backup list <instance> env to find snapshot IDs",
+		}
+	}
 	envFile, err := r.writeResticEnv(inst, "env", 0)
 	if err != nil {
 		return nil, "", err
@@ -275,11 +300,7 @@ func (r *Runner) EnvDump(ctx context.Context, inst, snapshot string) ([]secrets.
 	if _, err := provisionUser(ctx, r.Run, r.Host, inst); err != nil {
 		return nil, "", err
 	}
-	snapArg := "latest"
-	if snapshot != "" && snapshot != "latest" {
-		snapArg = snapshot
-	}
-	cmd := r.resticCmd(inst, envFile, "", "snapshots", "--json", snapArg)
+	cmd := r.resticCmd(inst, envFile, "", "snapshots", "--json", snapshot)
 	res, err := r.Run.Run(ctx, cmd)
 	if err == nil && res.ExitCode == resticExitNoRepo {
 		return nil, "", &output.Error{
