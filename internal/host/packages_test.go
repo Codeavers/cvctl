@@ -15,6 +15,7 @@ import (
 func newPackagesTestEnv() (*Env, *systest.Runner, *systest.FS) {
 	r := &systest.Runner{}
 	fs := systest.NewFS()
+	_ = fs.WriteFile("/etc/os-release", []byte(ubuntu2404), 0o644, sys.Owner{User: "root", Group: "root"})
 	return &Env{Run: r, FS: fs, EUID: 0}, r, fs
 }
 
@@ -410,5 +411,33 @@ func TestComposeVersionParsing(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("isComposeSatisfied(%q) = %v, want %v", tc.input, got, tc.want)
 		}
+	}
+}
+
+func TestDockerRepoUsesHostCodename(t *testing.T) {
+	env, runner, fs := newPackagesTestEnv()
+	_ = fs.WriteFile("/etc/os-release", []byte("ID=ubuntu\nVERSION_ID=\"26.04\"\n"), 0o644, sys.Owner{User: "root", Group: "root"})
+	markAllInstalled(runner)
+	runner.On("install -m 0755 -d /etc/apt/keyrings", sys.Result{})
+	runner.On("curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc", sys.Result{})
+	runner.On("dpkg --print-architecture", sys.Result{Stdout: []byte("arm64\n")})
+	runner.On("apt-get update", sys.Result{})
+	runner.On("apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin", sys.Result{})
+
+	step := PackagesStep{}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := step.Apply(context.Background(), env, plan); err != nil {
+		t.Fatal(err)
+	}
+	data, err := fs.ReadFile("/etc/apt/sources.list.d/docker.list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu resolute stable\n"
+	if string(data) != want {
+		t.Fatalf("docker.list = %q, want %q", data, want)
 	}
 }

@@ -39,8 +39,14 @@ func TestPreflightOK(t *testing.T) {
 	}
 }
 
+func TestPreflightUbuntu2604(t *testing.T) {
+	if _, err := (PreflightStep{}).Check(context.Background(), preflightEnv("ID=ubuntu\nVERSION_ID=\"26.04\"\nVERSION_CODENAME=resolute\n", 0)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPreflightNotUbuntu(t *testing.T) {
-	for _, rel := range []string{"ID=debian\nVERSION_ID=\"12\"\n", "ID=ubuntu\nVERSION_ID=\"22.04\"\n", ""} {
+	for _, rel := range []string{"ID=debian\nVERSION_ID=\"12\"\n", "ID=ubuntu\nVERSION_ID=\"22.04\"\n", "ID=ubuntu\nVERSION_ID=\"25.10\"\n", ""} {
 		_, err := PreflightStep{}.Check(context.Background(), preflightEnv(rel, 0))
 		if c := code(t, err); c != "E_HOST_UNSUPPORTED" {
 			t.Fatalf("%q: %s", rel, c)

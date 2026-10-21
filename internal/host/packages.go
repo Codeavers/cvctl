@@ -179,8 +179,12 @@ func (PackagesStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 			return "", sys.CmdErr("E_DOCKER_REPO", dpkgCmd, res, nil, "check network access to download.docker.com")
 		}
 		arch := strings.TrimSpace(string(res.Stdout))
+		codename, err := ubuntuCodename(e.FS)
+		if err != nil {
+			return "", err
+		}
 
-		dockerListContent := fmt.Sprintf("deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable\n", arch)
+		dockerListContent := fmt.Sprintf("deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n", arch, codename)
 		if err := e.FS.MkdirAll("/etc/apt/sources.list.d", 0o755, sys.Owner{User: "root", Group: "root"}); err != nil {
 			return "", err
 		}
