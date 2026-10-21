@@ -477,13 +477,19 @@ func TestSetStrategy(t *testing.T) {
 	t.Cleanup(func() { newOpsEnv = oldEnv })
 	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
 
-	// blue-green -> E_STRATEGY_UNSUPPORTED
 	code, out, errb := run(t, "set-strategy", "myapp-dev", "blue-green", "--json")
-	if code == 0 {
-		t.Fatalf("expected failure for blue-green, got code=%d out=%s err=%s", code, out, errb)
+	if code != 0 {
+		t.Fatalf("code %d: out=%s err=%s", code, out, errb)
 	}
-	if !strings.Contains(out, "E_STRATEGY_UNSUPPORTED") {
-		t.Errorf("expected E_STRATEGY_UNSUPPORTED in %s", out)
+	cvctlEnvPath := filepath.Join(env.deployRoot(), "myapp-dev", "cvctl.env")
+	data, _ := os.ReadFile(cvctlEnvPath)
+	if !strings.Contains(string(data), "CVCTL_STRATEGY=blue-green") {
+		t.Errorf("expected CVCTL_STRATEGY=blue-green in %s", string(data))
+	}
+
+	code, out, errb = run(t, "set-strategy", "myapp-dev", "rolling", "--json")
+	if code == 0 || !strings.Contains(out, "E_STRATEGY_UNSUPPORTED") {
+		t.Fatalf("expected E_STRATEGY_UNSUPPORTED, got code=%d out=%s", code, out)
 	}
 
 	// recreate -> success and updates cvctl.env
@@ -491,8 +497,7 @@ func TestSetStrategy(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code %d: out=%s err=%s", code, out, errb)
 	}
-	cvctlEnvPath := filepath.Join(env.deployRoot(), "myapp-dev", "cvctl.env")
-	data, _ := os.ReadFile(cvctlEnvPath)
+	data, _ = os.ReadFile(cvctlEnvPath)
 	if !strings.Contains(string(data), "CVCTL_STRATEGY=recreate") {
 		t.Errorf("expected CVCTL_STRATEGY=recreate in %s", string(data))
 	}

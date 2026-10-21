@@ -644,21 +644,14 @@ vars:
 	}
 }
 
-func TestAddBlueGreenUnsupported(t *testing.T) {
+func TestAddStrategyUnknown(t *testing.T) {
 	e := &Env{}
 	_, err := Add(context.Background(), e, "git@github.com:myorg/my-service-infra.git", AddOptions{
-		Strategy: "blue-green",
+		Strategy: "rolling",
 	})
-	if err == nil {
-		t.Fatal("expected error for blue-green strategy, got nil")
-	}
-
 	var oe *output.Error
-	if !errors.As(err, &oe) {
-		t.Fatalf("expected output.Error, got %T: %v", err, err)
-	}
-	if oe.Code != "E_STRATEGY_UNSUPPORTED" {
-		t.Errorf("expected code E_STRATEGY_UNSUPPORTED, got %s", oe.Code)
+	if !errors.As(err, &oe) || oe.Code != "E_STRATEGY_UNSUPPORTED" {
+		t.Fatalf("expected E_STRATEGY_UNSUPPORTED, got %v", err)
 	}
 }
 
@@ -2048,6 +2041,9 @@ func TestAddExtNonInteractiveHappyPath(t *testing.T) {
 		t.Fatalf("Add failed: %v", err)
 	}
 
+	if res.Decisions.Strategy != "blue-green" {
+		t.Errorf("prod default strategy = %q, want blue-green", res.Decisions.Strategy)
+	}
 	sd := res.Decisions.Services["media"]
 	if sd.Mode != "external" {
 		t.Fatalf("expected Mode external, got %q", sd.Mode)

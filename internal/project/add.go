@@ -810,24 +810,6 @@ func runDeploy(ctx context.Context, e *Env, repo RepoLike, d *instance.Decisions
 }
 
 func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResult, error) {
-	if opts.Strategy == "blue-green" {
-		return nil, &output.Error{
-			Code:    "E_STRATEGY_UNSUPPORTED",
-			Message: "blue-green strategy is not supported yet",
-			Hint:    "use recreate strategy",
-		}
-	}
-	if opts.Strategy == "" {
-		opts.Strategy = "recreate"
-	}
-	if opts.Strategy != "recreate" {
-		return nil, &output.Error{
-			Code:    "E_STRATEGY_UNSUPPORTED",
-			Message: fmt.Sprintf("strategy %q is not supported", opts.Strategy),
-			Hint:    "use recreate strategy",
-		}
-	}
-
 	envName := opts.Env
 	if envName == "" {
 		envName = "dev"
@@ -839,6 +821,20 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 				Message: fmt.Sprintf("invalid environment %q: must be dev or prod", opts.Env),
 				Hint:    "use --env dev or --env prod",
 			},
+		}
+	}
+
+	if opts.Strategy == "" {
+		opts.Strategy = "recreate"
+		if envName == "prod" {
+			opts.Strategy = "blue-green"
+		}
+	}
+	if opts.Strategy != "recreate" && opts.Strategy != "blue-green" {
+		return nil, &output.Error{
+			Code:    "E_STRATEGY_UNSUPPORTED",
+			Message: fmt.Sprintf("strategy %q is not supported", opts.Strategy),
+			Hint:    "use recreate or blue-green",
 		}
 	}
 

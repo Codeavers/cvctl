@@ -25,6 +25,7 @@ import (
 type instanceStatusItem struct {
 	Instance string `json:"instance"`
 	Env      string `json:"env"`
+	Strategy string `json:"strategy,omitempty"`
 	Status   string `json:"status"`
 	Commit   string `json:"commit"`
 	Age      string `json:"age"`
@@ -120,9 +121,15 @@ func newStatusCmd() *cobra.Command {
 					envName = "prod"
 				}
 
+				strategy := ""
+				if d, err := instance.Read(filepath.Join(e.deployRoot(), inst, "cvctl.env"), &contract.Project{}); err == nil {
+					strategy = d.Strategy
+				}
+
 				items = append(items, instanceStatusItem{
 					Instance: inst,
 					Env:      envName,
+					Strategy: strategy,
 					Status:   statusStr,
 					Commit:   commitStr,
 					Age:      ageStr,
@@ -150,9 +157,13 @@ func newStatusCmd() *cobra.Command {
 					fmt.Fprintf(w, "warning: %s\n", warn)
 				}
 				tw := tabwriter.NewWriter(w, 0, 8, 2, ' ', 0)
-				fmt.Fprintln(tw, "INSTANCE\tENV\tSTATUS\tCOMMIT\tAGE")
+				fmt.Fprintln(tw, "INSTANCE\tENV\tSTRATEGY\tSTATUS\tCOMMIT\tAGE")
 				for _, it := range items {
-					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", it.Instance, it.Env, it.Status, it.Commit, it.Age)
+					strategy := it.Strategy
+					if strategy == "" {
+						strategy = "-"
+					}
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", it.Instance, it.Env, strategy, it.Status, it.Commit, it.Age)
 				}
 				tw.Flush()
 			})
@@ -199,7 +210,11 @@ func newHistoryCmd() *cobra.Command {
 				fmt.Fprintln(tw, "TIME\tKIND\tRESULT\tACTOR\tDETAIL")
 				for _, ev := range events {
 					at := ev.At.Format("2006-01-02 15:04:05")
-					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", at, ev.Kind, ev.Result, ev.Actor, ev.Detail)
+					detail := ev.Detail
+					if len(ev.BlueGreen) > 0 {
+						detail = strings.TrimSpace(detail + " (blue-green: " + strings.Join(ev.BlueGreen, ",") + ")")
+					}
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", at, ev.Kind, ev.Result, ev.Actor, detail)
 				}
 				tw.Flush()
 			})

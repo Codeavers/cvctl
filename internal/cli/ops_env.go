@@ -279,18 +279,11 @@ func newSetStrategyCmd() *cobra.Command {
 			strategy := args[1]
 			asJSON, _ := cmd.Flags().GetBool("json")
 
-			if strategy == "blue-green" {
-				return &output.Error{
-					Code:    "E_STRATEGY_UNSUPPORTED",
-					Message: "blue-green strategy is not supported yet",
-					Hint:    "use recreate strategy",
-				}
-			}
-			if strategy != "recreate" {
+			if strategy != "recreate" && strategy != "blue-green" {
 				return &output.Error{
 					Code:    "E_STRATEGY_UNSUPPORTED",
 					Message: fmt.Sprintf("strategy %q is not supported", strategy),
-					Hint:    "use recreate strategy",
+					Hint:    "use recreate or blue-green",
 				}
 			}
 

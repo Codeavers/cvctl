@@ -23,6 +23,7 @@ type projectListItem struct {
 	Env      string            `json:"env"`
 	Source   string            `json:"source"`
 	Track    string            `json:"track,omitempty"`
+	Strategy string            `json:"strategy,omitempty"`
 	Domains  map[string]string `json:"domains"`
 	Data     map[string]string `json:"data"`
 	Paused   bool              `json:"paused"`
@@ -72,6 +73,7 @@ func (e *OpsEnv) projectListItem(inst string) projectListItem {
 		return it
 	}
 	it.Env = d0.Env
+	it.Strategy = d0.Strategy
 	if d0.Env == "dev" {
 		it.Track = d0.TrackTag
 	}
@@ -148,7 +150,7 @@ func joinPairs(m map[string]string) string {
 
 func writeProjectList(w io.Writer, rep projectListReport) {
 	tw := tabwriter.NewWriter(w, 0, 8, 2, ' ', 0)
-	fmt.Fprintln(tw, "INSTANCE\tENV\tSOURCE\tTRACK\tDOMAINS\tDATA\tPAUSED")
+	fmt.Fprintln(tw, "INSTANCE\tENV\tSTRATEGY\tSOURCE\tTRACK\tDOMAINS\tDATA\tPAUSED")
 	for _, it := range rep.Instances {
 		paused := "no"
 		if it.Paused {
@@ -158,7 +160,11 @@ func writeProjectList(w io.Writer, rep projectListReport) {
 		if track == "" {
 			track = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", it.Instance, it.Env, it.Source, track, joinPairs(it.Domains), joinPairs(it.Data), paused)
+		strategy := it.Strategy
+		if strategy == "" {
+			strategy = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", it.Instance, it.Env, strategy, it.Source, track, joinPairs(it.Domains), joinPairs(it.Data), paused)
 	}
 	tw.Flush()
 	for _, it := range rep.Instances {
