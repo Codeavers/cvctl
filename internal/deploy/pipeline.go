@@ -102,6 +102,9 @@ type Deployer struct {
 	RenderOverride func(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o render.Options) ([]byte, error)
 	RenderTraefik  func(p *contract.Project, d *instance.Decisions, o render.Options) ([]byte, error)
 	ProbeS3        func(ctx context.Context, c objstore.Config, b []objstore.BucketCheck) error
+	// Sleep waits for the pinned route to settle in a blue-green swap; nil
+	// sleeps for real.
+	Sleep func(ctx context.Context, d time.Duration) error
 }
 
 // traefikContainer is the host proxy container; it joins each instance's edge
@@ -1091,7 +1094,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	if finalCompose == nil {
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, "deployer misconfigured: Compose returned nil", secrets)
 	}
-	upErr := finalCompose.Up(ctx)
+	swapped, upErr := d.bringUp(ctx, p, dec, finalCompose)
 	if upErr == nil {
 		// Traefik being unreachable says nothing about the new release: retry, do not roll back.
 		if err := d.connectTraefik(ctx, inst); err != nil {
@@ -1164,6 +1167,8 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			Result: string(state.StatusOK),
 			Detail: okDetail,
 			Actor:  actor,
+
+			BlueGreen: swapped,
 		}); err != nil {
 			okErrs = append(okErrs, err)
 		}
@@ -1279,6 +1284,8 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			Result: "rollback_failed",
 			Detail: rbRedacted,
 			Actor:  actor,
+
+			BlueGreen: swapped,
 		}); err != nil {
 			errs = append(errs, err)
 		}
@@ -1332,6 +1339,8 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		Result: string(state.StatusFailed),
 		Detail: errText,
 		Actor:  actor,
+
+		BlueGreen: swapped,
 	}); err != nil {
 		errs = append(errs, err)
 	}

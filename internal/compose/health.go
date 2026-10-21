@@ -38,6 +38,17 @@ func normalizeProject(instance string) string {
 	return sb.String()
 }
 
+// Network is the name compose gives the network short (for example "edge")
+// of this project.
+func (p Project) Network(short string) string {
+	return normalizeProject(p.Instance) + "_" + short
+}
+
+// CheckContainer is the package-level CheckContainer bound to this project.
+func (p Project) CheckContainer(ctx context.Context, h contract.HealthSpec, port int, client *http.Client, id string, httpCheck bool) error {
+	return CheckContainer(ctx, p.Run, p, h, port, client, id, httpCheck)
+}
+
 func Health(ctx context.Context, run sys.Runner, p Project, h contract.HealthSpec, port int, client *http.Client) error {
 	return checkHealth(ctx, run, p, h, port, client, "", true)
 }
@@ -114,7 +125,7 @@ func checkHealth(ctx context.Context, run sys.Runner, p Project, h contract.Heal
 	}
 	var ip string
 	if httpCheck {
-		netName := normalizeProject(p.Instance) + "_app"
+		netName := p.Network("app")
 		var err error
 		ip, err = containerIP(ctx, run, ref, netName, "E_HEALTH_FAILED", "check docker daemon status")
 		if err != nil {

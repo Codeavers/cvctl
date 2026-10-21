@@ -102,6 +102,8 @@ type Event struct {
 	Result string    `json:"result"`
 	Detail string    `json:"detail,omitempty"`
 	Actor  string    `json:"actor"`
+	// BlueGreen lists the services swapped without downtime in this deploy.
+	BlueGreen []string `json:"blue_green,omitempty"`
 }
 
 type Store struct {
