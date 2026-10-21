@@ -109,10 +109,10 @@ type traefikChainMiddleware struct {
 }
 
 type traefikHeadersMiddleware struct {
-	STSSeconds           int    `yaml:"stsSeconds,omitempty"`
-	STSIncludeSubdomains bool   `yaml:"stsIncludeSubdomains,omitempty"`
-	ContentTypeNosniff   bool   `yaml:"contentTypeNosniff"`
-	FrameDeny            bool   `yaml:"frameDeny"`
+	STSSeconds           int  `yaml:"stsSeconds,omitempty"`
+	STSIncludeSubdomains bool `yaml:"stsIncludeSubdomains,omitempty"`
+	ContentTypeNosniff   bool `yaml:"contentTypeNosniff"`
+	FrameDeny            bool `yaml:"frameDeny"`
 }
 
 type traefikRateLimitMiddleware struct {
