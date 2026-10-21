@@ -40,7 +40,7 @@ func (f failPrompter) Ask(q hostcfg.Question, _ string) (string, error) {
 }
 
 var initAnswers = map[string]string{
-	"HOST_NAME": "box", "EDGE_MODE": "behind-proxy", "PROXY_PORT": "8081", "ADMIN_USER": "andres",
+	"HOST_NAME": "box", "EDGE_MODE": "behind-proxy", "PROXY_PORT": "8081", "ADMIN_USER": "ops",
 	"SSH_MANAGE": "true", "FIREWALL_MANAGE": "true", "STORAGE": "local", "NOTIFY": "none",
 	"REGISTRIES": "ghcr.io/x", "REGISTRY_USER": "u", "registry_token": "tok",
 }
@@ -55,7 +55,7 @@ func stubInit(t *testing.T, fs *systest.FS, p hostcfg.Prompter, interactive bool
 	sys.Lock = systest.NoopLock
 	newInitEnv = func(o initOpts) (*host.Env, hostcfg.Facts, error) {
 		return &host.Env{FS: fs, Prompt: p, Interactive: interactive && !o.NonInteractive, Adopt: o.Adopt, EUID: testEUID},
-			hostcfg.Facts{Hostname: "box", SudoUser: "andres", Adopt: o.Adopt}, nil
+			hostcfg.Facts{Hostname: "box", SudoUser: "ops", Adopt: o.Adopt}, nil
 	}
 	initSteps = func() []host.Step { return steps }
 }
@@ -80,7 +80,7 @@ func TestInitSavesAnswersBeforeSteps(t *testing.T) {
 
 func seeded() *systest.FS {
 	fs := systest.NewFS()
-	_ = fs.WriteFile("/etc/cvctl/host.env", []byte("CVCTL_HOST_NAME=box\nCVCTL_EDGE_MODE=behind-proxy\nCVCTL_PROXY_PORT=8081\nCVCTL_ADMIN_USER=andres\nCVCTL_SSH_MANAGE=true\nCVCTL_FIREWALL_MANAGE=true\nCVCTL_STORAGE=local\nCVCTL_NOTIFY=none\n"), 0o640, sys.Owner{User: "root", Group: "root"})
+	_ = fs.WriteFile("/etc/cvctl/host.env", []byte("CVCTL_HOST_NAME=box\nCVCTL_EDGE_MODE=behind-proxy\nCVCTL_PROXY_PORT=8081\nCVCTL_ADMIN_USER=ops\nCVCTL_SSH_MANAGE=true\nCVCTL_FIREWALL_MANAGE=true\nCVCTL_STORAGE=local\nCVCTL_NOTIFY=none\n"), 0o640, sys.Owner{User: "root", Group: "root"})
 	return fs
 }
 

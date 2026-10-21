@@ -83,7 +83,7 @@ func fullCfg(t *testing.T) (*hostcfg.Config, *hostcfg.Secrets) {
 	t.Helper()
 	cfg, sec, _ := hostcfg.Load(systest.NewFS(), "/x")
 	for k, v := range map[string]string{
-		"HOST_NAME": "box", "EDGE_MODE": "edge", "ADMIN_USER": "andres", "SSH_MANAGE": "true",
+		"HOST_NAME": "box", "EDGE_MODE": "edge", "ADMIN_USER": "ops", "SSH_MANAGE": "true",
 		"FIREWALL_MANAGE": "true", "ACME_EMAIL": "a@b.co", "ACME_CHALLENGE": "http", "STORAGE": "local",
 		"NOTIFY": "none", "REGISTRIES": "ghcr.io/codeavers", "REGISTRY_USER": "bot",
 	} {
@@ -157,12 +157,12 @@ func TestResolveNonInteractiveMissing(t *testing.T) {
 
 func TestResolveAdoptDefaults(t *testing.T) {
 	cfg, sec, _ := hostcfg.Load(systest.NewFS(), "/x")
-	f := hostcfg.Facts{Hostname: "box", SudoUser: "andres", Adopt: true}
+	f := hostcfg.Facts{Hostname: "box", SudoUser: "ops", Adopt: true}
 	// ACME_EMAIL is not asked in behind-proxy mode, so only optional keys remain.
 	if err := hostcfg.Resolve(cfg, sec, f, nil, false); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.EdgeMode != "behind-proxy" || cfg.FirewallManage || cfg.ProxyPort != 8081 || cfg.HostName != "box" || cfg.AdminUser != "andres" {
+	if cfg.EdgeMode != "behind-proxy" || cfg.FirewallManage || cfg.ProxyPort != 8081 || cfg.HostName != "box" || cfg.AdminUser != "ops" {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 }

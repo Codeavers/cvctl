@@ -59,9 +59,9 @@ func TestSSHAdminRootRefused(t *testing.T) {
 }
 
 func TestSSHAdminNoSudoRefused(t *testing.T) {
-	env, runner, _ := newSSHTestEnv("andres", true, false)
-	runner.On("id -nG andres", sys.Result{
-		Stdout:   []byte("andres users\n"),
+	env, runner, _ := newSSHTestEnv("ops", true, false)
+	runner.On("id -nG ops", sys.Result{
+		Stdout:   []byte("ops users\n"),
 		ExitCode: 0,
 	})
 	step := SSHStep{}
@@ -76,18 +76,18 @@ func TestSSHAdminNoSudoRefused(t *testing.T) {
 	if oe.Code != "E_SSH_ADMIN_NO_SUDO" {
 		t.Errorf("got code %q, want E_SSH_ADMIN_NO_SUDO", oe.Code)
 	}
-	if oe.Hint != "usermod -aG sudo andres" {
-		t.Errorf("got hint %q, want usermod -aG sudo andres", oe.Hint)
+	if oe.Hint != "usermod -aG sudo ops" {
+		t.Errorf("got hint %q, want usermod -aG sudo ops", oe.Hint)
 	}
 }
 
 func TestSSHAdminWithAdminGroupAccepted(t *testing.T) {
-	env, runner, _ := newSSHTestEnv("andres", true, false)
-	runner.On("id -nG andres", sys.Result{
-		Stdout:   []byte("andres admin\n"),
+	env, runner, _ := newSSHTestEnv("ops", true, false)
+	runner.On("id -nG ops", sys.Result{
+		Stdout:   []byte("ops admin\n"),
 		ExitCode: 0,
 	})
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication yes\npermitrootlogin yes\n"),
 		ExitCode: 0,
 	})
@@ -128,9 +128,9 @@ func seedAdminWithKey(r *systest.Runner, fs *systest.FS, adminUser, home, gid, g
 }
 
 func TestSSHNoKeysNonInteractive(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, false)
-	seedAdminWithKey(runner, fs, "andres", "/custom/home/andres", "1000", "andres", "")
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	env, runner, fs := newSSHTestEnv("ops", true, false)
+	seedAdminWithKey(runner, fs, "ops", "/custom/home/ops", "1000", "ops", "")
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication yes\npermitrootlogin yes\n"),
 		ExitCode: 0,
 	})
@@ -153,7 +153,7 @@ func TestSSHNoKeysNonInteractive(t *testing.T) {
 	}
 	var oe *output.Error
 	errors.As(err, &oe)
-	if oe.Hint != "add your public key to ~andres/.ssh/authorized_keys or run cvctl init interactively" {
+	if oe.Hint != "add your public key to ~ops/.ssh/authorized_keys or run cvctl init interactively" {
 		t.Fatalf("unexpected hint: %q", oe.Hint)
 	}
 
@@ -163,9 +163,9 @@ func TestSSHNoKeysNonInteractive(t *testing.T) {
 }
 
 func TestSSHOrderRevertBeforeReload(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, false)
-	seedAdminWithKey(runner, fs, "andres", "/home/andres", "1000", "andres", testEd25519Key)
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	env, runner, fs := newSSHTestEnv("ops", true, false)
+	seedAdminWithKey(runner, fs, "ops", "/home/ops", "1000", "ops", testEd25519Key)
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication yes\npermitrootlogin yes\n"),
 		ExitCode: 0,
 	})
@@ -182,7 +182,7 @@ func TestSSHOrderRevertBeforeReload(t *testing.T) {
 		t.Fatal("expected changes, got none")
 	}
 
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication no\npermitrootlogin no\n"),
 		ExitCode: 0,
 	})
@@ -242,10 +242,10 @@ func TestSSHOrderRevertBeforeReload(t *testing.T) {
 }
 
 func TestSSHSystemdRunFailureRollsBackWithoutReload(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, false)
-	seedAdminWithKey(runner, fs, "andres", "/home/andres", "1000", "andres", testEd25519Key)
+	env, runner, fs := newSSHTestEnv("ops", true, false)
+	seedAdminWithKey(runner, fs, "ops", "/home/ops", "1000", "ops", testEd25519Key)
 	runner.On("sshd -t", sys.Result{ExitCode: 0})
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication no\npermitrootlogin no\n"),
 		ExitCode: 0,
 	})
@@ -277,9 +277,9 @@ func TestSSHSystemdRunFailureRollsBackWithoutReload(t *testing.T) {
 }
 
 func TestSSHInvalidConfigRollsBack(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, false)
-	seedAdminWithKey(runner, fs, "andres", "/home/andres", "1000", "andres", "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY= test@host")
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	env, runner, fs := newSSHTestEnv("ops", true, false)
+	seedAdminWithKey(runner, fs, "ops", "/home/ops", "1000", "ops", "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY= test@host")
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication yes\npermitrootlogin yes\n"),
 		ExitCode: 0,
 	})
@@ -319,9 +319,9 @@ func TestSSHInvalidConfigRollsBack(t *testing.T) {
 }
 
 func TestSSHInvalidConfigStdoutOnly(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, false)
-	seedAdminWithKey(runner, fs, "andres", "/home/andres", "1000", "andres", testEd25519Key)
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	env, runner, fs := newSSHTestEnv("ops", true, false)
+	seedAdminWithKey(runner, fs, "ops", "/home/ops", "1000", "ops", testEd25519Key)
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication yes\npermitrootlogin yes\n"),
 		ExitCode: 0,
 	})
@@ -371,8 +371,8 @@ func (r *removeErrFS) Remove(p string) error {
 }
 
 func TestSSHInvalidConfigRollsBackRemoveError(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, false)
-	seedAdminWithKey(runner, fs, "andres", "/home/andres", "1000", "andres", testEd25519Key)
+	env, runner, fs := newSSHTestEnv("ops", true, false)
+	seedAdminWithKey(runner, fs, "ops", "/home/ops", "1000", "ops", testEd25519Key)
 	env.FS = &removeErrFS{FS: fs, removeErr: errors.New("read-only filesystem")}
 	runner.On("sshd -t", sys.Result{
 		ExitCode: 1,
@@ -396,10 +396,10 @@ func TestSSHInvalidConfigRollsBackRemoveError(t *testing.T) {
 }
 
 func TestSSHDropInNotEffectiveRollsBack(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, false)
-	seedAdminWithKey(runner, fs, "andres", "/home/andres", "1000", "andres", testEd25519Key)
+	env, runner, fs := newSSHTestEnv("ops", true, false)
+	seedAdminWithKey(runner, fs, "ops", "/home/ops", "1000", "ops", testEd25519Key)
 	runner.On("sshd -t", sys.Result{ExitCode: 0})
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication yes\npermitrootlogin no\n"),
 		ExitCode: 0,
 	})
@@ -433,11 +433,11 @@ func TestSSHDropInNotEffectiveRollsBack(t *testing.T) {
 }
 
 func TestSSHEffectiveMismatch(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, false)
+	env, runner, fs := newSSHTestEnv("ops", true, false)
 	wantContent := "PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\nPubkeyAuthentication yes\n"
 	_ = fs.WriteFile("/etc/ssh/sshd_config.d/00-cvctl.conf", []byte(wantContent), 0o644, sys.Owner{User: "root", Group: "root"})
 
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication yes\npermitrootlogin no\n"),
 		ExitCode: 0,
 	})
@@ -453,13 +453,13 @@ func TestSSHEffectiveMismatch(t *testing.T) {
 }
 
 func TestSSHCheckPendingWhenRevertTimerActive(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, false)
+	env, runner, fs := newSSHTestEnv("ops", true, false)
 	_ = fs.WriteFile(sshDropInPath, []byte(sshDropInContent), 0o644, sys.Owner{User: "root", Group: "root"})
 	runner.On("systemctl is-active cvctl-ssh-revert.timer", sys.Result{
 		Stdout:   []byte("active\n"),
 		ExitCode: 0,
 	})
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication no\npermitrootlogin no\n"),
 		ExitCode: 0,
 	})
@@ -478,13 +478,13 @@ func TestSSHCheckPendingWhenRevertTimerActive(t *testing.T) {
 }
 
 func TestSSHConfirmInteractive(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, true)
+	env, runner, fs := newSSHTestEnv("ops", true, true)
 	env.Prompt = hostcfgtest.NewPrompter(t, map[string]string{
 		"admin_ssh_pubkey": "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29t user@host",
 		"confirm_ssh":      "yes",
 	})
-	seedAdminWithKey(runner, fs, "andres", "/srv/admins/andres", "1001", "admins", "")
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	seedAdminWithKey(runner, fs, "ops", "/srv/admins/ops", "1001", "admins", "")
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication yes\npermitrootlogin yes\n"),
 		ExitCode: 0,
 	})
@@ -503,7 +503,7 @@ func TestSSHConfirmInteractive(t *testing.T) {
 		t.Fatal("expected changes, got none")
 	}
 
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication no\npermitrootlogin no\n"),
 		ExitCode: 0,
 	})
@@ -523,29 +523,29 @@ func TestSSHConfirmInteractive(t *testing.T) {
 		t.Fatalf("expected systemctl stop cvctl-ssh-revert.timer to be called; calls=%v", runner.Calls)
 	}
 
-	sshDirInfo, err := fs.Stat("/srv/admins/andres/.ssh")
+	sshDirInfo, err := fs.Stat("/srv/admins/ops/.ssh")
 	if err != nil {
 		t.Fatalf("expected ~/.ssh to be created: %v", err)
 	}
-	if sshDirInfo.Mode != 0o700 || sshDirInfo.User != "andres" || sshDirInfo.Group != "admins" {
-		t.Fatalf("~/.ssh meta: got mode=%04o owner=%s:%s, want 0700 andres:admins", sshDirInfo.Mode, sshDirInfo.User, sshDirInfo.Group)
+	if sshDirInfo.Mode != 0o700 || sshDirInfo.User != "ops" || sshDirInfo.Group != "admins" {
+		t.Fatalf("~/.ssh meta: got mode=%04o owner=%s:%s, want 0700 ops:admins", sshDirInfo.Mode, sshDirInfo.User, sshDirInfo.Group)
 	}
-	akInfo, err := fs.Stat("/srv/admins/andres/.ssh/authorized_keys")
+	akInfo, err := fs.Stat("/srv/admins/ops/.ssh/authorized_keys")
 	if err != nil {
 		t.Fatalf("expected authorized_keys to be created: %v", err)
 	}
-	if akInfo.Mode != 0o600 || akInfo.User != "andres" || akInfo.Group != "admins" {
-		t.Fatalf("authorized_keys meta: got mode=%04o owner=%s:%s, want 0600 andres:admins", akInfo.Mode, akInfo.User, akInfo.Group)
+	if akInfo.Mode != 0o600 || akInfo.User != "ops" || akInfo.Group != "admins" {
+		t.Fatalf("authorized_keys meta: got mode=%04o owner=%s:%s, want 0600 ops:admins", akInfo.Mode, akInfo.User, akInfo.Group)
 	}
 }
 
 func TestSSHDeclinedReverts(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, true)
+	env, runner, fs := newSSHTestEnv("ops", true, true)
 	env.Prompt = hostcfgtest.NewPrompter(t, map[string]string{
 		"confirm_ssh": "no",
 	})
-	seedAdminWithKey(runner, fs, "andres", "/home/andres", "1000", "andres", testEd25519Key)
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	seedAdminWithKey(runner, fs, "ops", "/home/ops", "1000", "ops", testEd25519Key)
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication yes\npermitrootlogin yes\n"),
 		ExitCode: 0,
 	})
@@ -563,7 +563,7 @@ func TestSSHDeclinedReverts(t *testing.T) {
 		t.Fatal("expected changes, got none")
 	}
 
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication no\npermitrootlogin no\n"),
 		ExitCode: 0,
 	})
@@ -616,18 +616,18 @@ func (w *writeCountFS) WriteFile(p string, data []byte, mode os.FileMode, o sys.
 }
 
 func TestSSHStrictModesFixesPermAndOwner(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, false)
-	seedAdminWithKey(runner, fs, "andres", "/home/andres", "1001", "admins", "")
+	env, runner, fs := newSSHTestEnv("ops", true, false)
+	seedAdminWithKey(runner, fs, "ops", "/home/ops", "1001", "admins", "")
 	rootOwner := sys.Owner{User: "root", Group: "root"}
-	_ = fs.MkdirAll("/home/andres/.ssh", 0o755, rootOwner)
+	_ = fs.MkdirAll("/home/ops/.ssh", 0o755, rootOwner)
 	wantKeyContent := testEd25519Key + "\n"
-	_ = fs.WriteFile("/home/andres/.ssh/authorized_keys", []byte(wantKeyContent), 0o644, rootOwner)
+	_ = fs.WriteFile("/home/ops/.ssh/authorized_keys", []byte(wantKeyContent), 0o644, rootOwner)
 
 	wfs := &writeCountFS{FS: fs}
 	env.FS = wfs
 
 	runner.On("sshd -t", sys.Result{ExitCode: 0})
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication no\npermitrootlogin no\n"),
 		ExitCode: 0,
 	})
@@ -642,26 +642,26 @@ func TestSSHStrictModesFixesPermAndOwner(t *testing.T) {
 		t.Fatalf("unexpected Apply error: %v", err)
 	}
 
-	dirInfo, err := fs.Stat("/home/andres/.ssh")
+	dirInfo, err := fs.Stat("/home/ops/.ssh")
 	if err != nil {
 		t.Fatalf("stat ~/.ssh: %v", err)
 	}
-	if dirInfo.Mode != 0o700 || dirInfo.User != "andres" || dirInfo.Group != "admins" {
-		t.Fatalf("~/.ssh meta: got mode=%04o owner=%s:%s, want 0700 andres:admins", dirInfo.Mode, dirInfo.User, dirInfo.Group)
+	if dirInfo.Mode != 0o700 || dirInfo.User != "ops" || dirInfo.Group != "admins" {
+		t.Fatalf("~/.ssh meta: got mode=%04o owner=%s:%s, want 0700 ops:admins", dirInfo.Mode, dirInfo.User, dirInfo.Group)
 	}
-	akInfo, err := fs.Stat("/home/andres/.ssh/authorized_keys")
+	akInfo, err := fs.Stat("/home/ops/.ssh/authorized_keys")
 	if err != nil {
 		t.Fatalf("stat authorized_keys: %v", err)
 	}
-	if akInfo.Mode != 0o600 || akInfo.User != "andres" || akInfo.Group != "admins" {
-		t.Fatalf("authorized_keys meta: got mode=%04o owner=%s:%s, want 0600 andres:admins", akInfo.Mode, akInfo.User, akInfo.Group)
+	if akInfo.Mode != 0o600 || akInfo.User != "ops" || akInfo.Group != "admins" {
+		t.Fatalf("authorized_keys meta: got mode=%04o owner=%s:%s, want 0600 ops:admins", akInfo.Mode, akInfo.User, akInfo.Group)
 	}
-	gotData, err := fs.ReadFile("/home/andres/.ssh/authorized_keys")
+	gotData, err := fs.ReadFile("/home/ops/.ssh/authorized_keys")
 	if err != nil || string(gotData) != wantKeyContent {
 		t.Fatalf("authorized_keys content: got %q, want %q", string(gotData), wantKeyContent)
 	}
-	if wfs.writes["/home/andres/.ssh/authorized_keys"] != 1 {
-		t.Fatalf("expected 1 write to authorized_keys to fix mode/owner, got %d", wfs.writes["/home/andres/.ssh/authorized_keys"])
+	if wfs.writes["/home/ops/.ssh/authorized_keys"] != 1 {
+		t.Fatalf("expected 1 write to authorized_keys to fix mode/owner, got %d", wfs.writes["/home/ops/.ssh/authorized_keys"])
 	}
 
 	// Second apply when mode/owner already match must not rewrite authorized_keys.
@@ -671,15 +671,15 @@ func TestSSHStrictModesFixesPermAndOwner(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("unexpected second Apply error: %v", err)
 	}
-	if wfs.writes["/home/andres/.ssh/authorized_keys"] != 1 {
-		t.Fatalf("expected authorized_keys not to be rewritten when mode/owner already match, got %d writes", wfs.writes["/home/andres/.ssh/authorized_keys"])
+	if wfs.writes["/home/ops/.ssh/authorized_keys"] != 1 {
+		t.Fatalf("expected authorized_keys not to be rewritten when mode/owner already match, got %d writes", wfs.writes["/home/ops/.ssh/authorized_keys"])
 	}
 }
 
 func TestSSHUnsafeHomeRejected(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, false)
-	seedAdminWithKey(runner, fs, "andres", "/home/andres", "1000", "andres", testEd25519Key)
-	_ = fs.MkdirAll("/home/andres", 0o775, sys.Owner{User: "andres", Group: "andres"})
+	env, runner, fs := newSSHTestEnv("ops", true, false)
+	seedAdminWithKey(runner, fs, "ops", "/home/ops", "1000", "ops", testEd25519Key)
+	_ = fs.MkdirAll("/home/ops", 0o775, sys.Owner{User: "ops", Group: "ops"})
 
 	step := SSHStep{}
 	_, err := step.Apply(context.Background(), env, Plan{
@@ -694,8 +694,8 @@ func TestSSHUnsafeHomeRejected(t *testing.T) {
 	}
 	var oe *output.Error
 	errors.As(err, &oe)
-	if oe.Hint != "chmod go-w /home/andres" {
-		t.Fatalf("got hint %q, want %q", oe.Hint, "chmod go-w /home/andres")
+	if oe.Hint != "chmod go-w /home/ops" {
+		t.Fatalf("got hint %q, want %q", oe.Hint, "chmod go-w /home/ops")
 	}
 	if _, statErr := fs.Stat(sshDropInPath); statErr == nil {
 		t.Fatal("drop-in must not be written when home directory has unsafe permissions")
@@ -703,7 +703,7 @@ func TestSSHUnsafeHomeRejected(t *testing.T) {
 }
 
 func TestConfirmSSHAlreadyReverted(t *testing.T) {
-	env, _, _ := newSSHTestEnv("andres", true, false)
+	env, _, _ := newSSHTestEnv("ops", true, false)
 
 	err := ConfirmSSH(context.Background(), env)
 	if err == nil {
@@ -735,7 +735,7 @@ func (c *callbackRunner) Run(ctx context.Context, cmd sys.Cmd) (sys.Result, erro
 }
 
 func TestConfirmSSHRevertedWhileStoppingTimer(t *testing.T) {
-	env, baseRunner, fs := newSSHTestEnv("andres", true, false)
+	env, baseRunner, fs := newSSHTestEnv("ops", true, false)
 	_ = fs.WriteFile(sshDropInPath, []byte(sshDropInContent), 0o644, sys.Owner{User: "root", Group: "root"})
 	baseRunner.On("systemctl stop cvctl-ssh-revert.timer cvctl-ssh-revert.service", sys.Result{
 		ExitCode: 0,
@@ -770,7 +770,7 @@ func TestConfirmSSHRevertedWhileStoppingTimer(t *testing.T) {
 
 func TestConfirmSSHStopFailure(t *testing.T) {
 	t.Run("stop command fails with real error", func(t *testing.T) {
-		env, runner, fs := newSSHTestEnv("andres", true, false)
+		env, runner, fs := newSSHTestEnv("ops", true, false)
 		_ = fs.WriteFile(sshDropInPath, []byte(sshDropInContent), 0o644, sys.Owner{User: "root", Group: "root"})
 		runner.On("systemctl stop cvctl-ssh-revert.timer cvctl-ssh-revert.service", sys.Result{
 			ExitCode: 1,
@@ -787,7 +787,7 @@ func TestConfirmSSHStopFailure(t *testing.T) {
 	})
 
 	t.Run("timer still active after stop", func(t *testing.T) {
-		env, runner, fs := newSSHTestEnv("andres", true, false)
+		env, runner, fs := newSSHTestEnv("ops", true, false)
 		_ = fs.WriteFile(sshDropInPath, []byte(sshDropInContent), 0o644, sys.Owner{User: "root", Group: "root"})
 		runner.On("systemctl stop cvctl-ssh-revert.timer cvctl-ssh-revert.service", sys.Result{ExitCode: 0})
 		runner.On("systemctl is-active cvctl-ssh-revert.timer", sys.Result{
@@ -806,7 +806,7 @@ func TestConfirmSSHStopFailure(t *testing.T) {
 }
 
 func TestConfirmSSHSuccess(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, false)
+	env, runner, fs := newSSHTestEnv("ops", true, false)
 	_ = fs.WriteFile(sshDropInPath, []byte(sshDropInContent), 0o644, sys.Owner{User: "root", Group: "root"})
 	runner.On("systemctl stop cvctl-ssh-revert.timer cvctl-ssh-revert.service", sys.Result{
 		ExitCode: 5,
@@ -823,10 +823,10 @@ func TestConfirmSSHSuccess(t *testing.T) {
 }
 
 func TestSSHErrorAfterTimerArmedIncludesRevertNotice(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, false)
-	seedAdminWithKey(runner, fs, "andres", "/home/andres", "1000", "andres", testEd25519Key)
+	env, runner, fs := newSSHTestEnv("ops", true, false)
+	seedAdminWithKey(runner, fs, "ops", "/home/ops", "1000", "ops", testEd25519Key)
 	runner.On("sshd -t", sys.Result{ExitCode: 0})
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication no\npermitrootlogin no\n"),
 		ExitCode: 0,
 	})
@@ -856,7 +856,7 @@ func TestSSHErrorAfterTimerArmedIncludesRevertNotice(t *testing.T) {
 }
 
 func TestSSHSkipWhenNotManaged(t *testing.T) {
-	env, runner, _ := newSSHTestEnv("andres", false, false)
+	env, runner, _ := newSSHTestEnv("ops", false, false)
 
 	step := SSHStep{}
 	plan, err := step.Check(context.Background(), env)
@@ -888,9 +888,9 @@ func TestSSHRegisteredInDefaultSteps(t *testing.T) {
 }
 
 func TestSSHUnchangedWhenEffectiveMatches(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, false)
+	env, runner, fs := newSSHTestEnv("ops", true, false)
 	_ = fs.WriteFile(sshDropInPath, []byte(sshDropInContent), 0o644, sys.Owner{User: "root", Group: "root"})
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout:   []byte("passwordauthentication no\npermitrootlogin no\n"),
 		ExitCode: 0,
 	})
@@ -916,11 +916,11 @@ func TestSSHInvalidInteractivePubKeyRejected(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			env, runner, fs := newSSHTestEnv("andres", true, true)
+			env, runner, fs := newSSHTestEnv("ops", true, true)
 			env.Prompt = hostcfgtest.NewPrompter(t, map[string]string{
 				"admin_ssh_pubkey": tc.key,
 			})
-			seedAdminWithKey(runner, fs, "andres", "/home/andres", "1000", "andres", "# comment only")
+			seedAdminWithKey(runner, fs, "ops", "/home/ops", "1000", "ops", "# comment only")
 
 			step := SSHStep{}
 			_, err := step.Apply(context.Background(), env, Plan{
@@ -938,7 +938,7 @@ func TestSSHInvalidInteractivePubKeyRejected(t *testing.T) {
 }
 
 func TestSSHCheckWithSSHDMissingReturnsChangesNoError(t *testing.T) {
-	env, runner, _ := newSSHTestEnv("andres", true, false)
+	env, runner, _ := newSSHTestEnv("ops", true, false)
 	runner.OnErrorPrefix("sshd", errors.New("exec: \"sshd\": executable file not found in $PATH"))
 
 	step := SSHStep{}

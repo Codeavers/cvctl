@@ -43,7 +43,7 @@ func seedDesiredAccountsState(r *systest.Runner, fs *systest.FS, adminUser strin
 }
 
 func TestAccountsCreatesAll(t *testing.T) {
-	env, runner, fs := newAccountsTestEnv("andres")
+	env, runner, fs := newAccountsTestEnv("ops")
 
 	rootRoot := sys.Owner{User: "root", Group: "root"}
 	_ = fs.MkdirAll("/etc/cvctl", 0o700, rootRoot)
@@ -54,13 +54,13 @@ func TestAccountsCreatesAll(t *testing.T) {
 	runner.On("getent group deploy", sys.Result{ExitCode: 2})
 	runner.On("getent passwd deployer", sys.Result{ExitCode: 2})
 	runner.On("id -nG deployer", sys.Result{ExitCode: 1, Stderr: []byte("id: 'deployer': no such user\n")})
-	runner.On("getent passwd andres", sys.Result{Stdout: []byte("andres:x:1000:1000::/home/andres:/bin/bash\n"), ExitCode: 0})
-	runner.On("id -nG andres", sys.Result{Stdout: []byte("andres sudo\n"), ExitCode: 0})
+	runner.On("getent passwd ops", sys.Result{Stdout: []byte("ops:x:1000:1000::/home/ops:/bin/bash\n"), ExitCode: 0})
+	runner.On("id -nG ops", sys.Result{Stdout: []byte("ops sudo\n"), ExitCode: 0})
 
 	runner.On("groupadd deploy", sys.Result{ExitCode: 0})
 	runner.On("useradd --system --home-dir /srv/deploy --no-create-home --shell /bin/bash deployer", sys.Result{ExitCode: 0})
 	runner.On("usermod -aG docker,deploy deployer", sys.Result{ExitCode: 0})
-	runner.On("usermod -aG deploy andres", sys.Result{ExitCode: 0})
+	runner.On("usermod -aG deploy ops", sys.Result{ExitCode: 0})
 
 	step := AccountsStep{}
 	plan, err := step.Check(context.Background(), env)
@@ -89,7 +89,7 @@ func TestAccountsCreatesAll(t *testing.T) {
 		"groupadd deploy",
 		"useradd --system --home-dir /srv/deploy --no-create-home --shell /bin/bash deployer",
 		"usermod -aG docker,deploy deployer",
-		"usermod -aG deploy andres",
+		"usermod -aG deploy ops",
 	}
 	if len(applyCalls) != len(wantCmds) {
 		var got []string
@@ -145,8 +145,8 @@ func TestAccountsCreatesAll(t *testing.T) {
 }
 
 func TestAccountsUnchanged(t *testing.T) {
-	env, runner, fs := newAccountsTestEnv("andres")
-	seedDesiredAccountsState(runner, fs, "andres")
+	env, runner, fs := newAccountsTestEnv("ops")
+	seedDesiredAccountsState(runner, fs, "ops")
 
 	step := AccountsStep{}
 	plan, err := step.Check(context.Background(), env)
@@ -168,8 +168,8 @@ func TestAccountsUnchanged(t *testing.T) {
 }
 
 func TestAccountsFixesModes(t *testing.T) {
-	env, runner, fs := newAccountsTestEnv("andres")
-	seedDesiredAccountsState(runner, fs, "andres")
+	env, runner, fs := newAccountsTestEnv("ops")
+	seedDesiredAccountsState(runner, fs, "ops")
 
 	// Drift /srv/deploy to 2775; sshd StrictModes rejects deployer key if group-writable.
 	_ = fs.MkdirAll("/srv/deploy", 0o2775, sys.Owner{User: "deployer", Group: "deploy"})
@@ -268,8 +268,8 @@ func TestAccountsRegisteredInDefaultSteps(t *testing.T) {
 }
 
 func TestAccountsIdempotentAfterHostcfgSave(t *testing.T) {
-	env, runner, fs := newAccountsTestEnv("andres")
-	seedDesiredAccountsState(runner, fs, "andres")
+	env, runner, fs := newAccountsTestEnv("ops")
+	seedDesiredAccountsState(runner, fs, "ops")
 
 	cfg, sec, err := hostcfg.Load(fs, "/etc/cvctl")
 	if err != nil {

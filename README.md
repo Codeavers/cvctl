@@ -47,8 +47,7 @@ Credentials: `CVCTL_PUBLISH_TOKEN` or `GITHUB_TOKEN`, user `CVCTL_PUBLISH_USER` 
 the token goes only to the registry host of the ref. Failures use `E_PUBLISH`; a bad artifact on
 the host side is `E_INFRA_ARTIFACT`. Layers are capped at 1 MiB. Hosts in
 `CVCTL_INSECURE_REGISTRIES` use plain HTTP. A CI template is in
-[docs/ci/publish-contract.yml](docs/ci/publish-contract.yml); the cvctl package must grant read
-access to the project repository (Package settings, Manage Actions access).
+[examples/ci/publish-contract.yml](examples/ci/publish-contract.yml).
 
 ## Migrating an existing deploy
 
@@ -118,8 +117,8 @@ sudo cvctl init --adopt
 sudo cvctl init --non-interactive --json
 ```
 
-See [docs/host-init.md](docs/host-init.md) for full step documentation, file permissions table,
-SSH try/confirm recovery flow, and non-interactive configuration.
+`--dry-run` prints the plan without changing anything. SSH changes are applied with a revert
+timer: if the new session cannot be confirmed, the previous sshd config comes back on its own.
 
 ## lint
 
@@ -220,8 +219,6 @@ bucket, plus `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` and `S3_REGION`.
 - An exposed silo joins its instance's `<inst>_edge` network so Traefik can reach it; anonymous access stays
   limited to `GetObject` on public buckets.
 
-Design: `docs/specs/2026-10-17-s3-buckets-design.md`.
-
 ## Backups
 
 Per app the daily timer backs up databases (WAL-G) and the env files (`cvctl.env`, `app.env`, deploy key) encrypted with the host restic key; object storage (`s3` services) is not backed up by default: set `cvctl.backup: volume` on the service to back it up. Run manual env backups with `cvctl backup now <inst> env`.
@@ -246,3 +243,7 @@ restore them manually with `wal-g` using that prefix; they are never pruned. The
 source of truth: every new generation is numbered above the highest one in the bucket, and
 `cvctl project restore` on a new host restores the newest generation holding a base backup even
 when the secrets bundle names an older one (it warns). Re-run `cvctl secrets export` after a restore.
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE).

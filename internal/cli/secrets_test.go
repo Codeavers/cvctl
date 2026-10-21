@@ -130,10 +130,10 @@ func TestRemoteExport(t *testing.T) {
 	}
 	r := &systest.Runner{}
 	noisy := "Passphrase: \r\n" + strings.ReplaceAll(armored.String(), "\n", "\r\n")
-	r.On("ssh -t -p 2228 andres@srv.example.com sudo cvctl secrets export -o -", sys.Result{Stdout: []byte(noisy)})
+	r.On("ssh -t -p 2228 ops@srv.example.com sudo cvctl secrets export -o -", sys.Result{Stdout: []byte(noisy)})
 	fsys := systest.NewFS()
 	secretsEnv(t, fsys, r)
-	code, _, errb := run(t, "remote", "export", "srv.example.com", "--port", "2228", "--user", "andres")
+	code, _, errb := run(t, "remote", "export", "srv.example.com", "--port", "2228", "--user", "ops")
 	if code != 0 {
 		t.Fatalf("%d %s", code, errb)
 	}

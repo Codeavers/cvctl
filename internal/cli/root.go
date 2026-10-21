@@ -18,7 +18,7 @@ type printerKey struct{}
 func NewRoot(version string) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "cvctl",
-		Short:         "Codeaver deploy CLI",
+		Short:         "Deploy Docker Compose projects to a VPS with pull-based GitOps",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}

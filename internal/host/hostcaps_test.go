@@ -163,10 +163,10 @@ func TestSSHUnitSelection(t *testing.T) {
 }
 
 func TestSSHApplyUsesSshdUnit(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, false)
+	env, runner, fs := newSSHTestEnv("ops", true, false)
 	runner.On("systemctl cat ssh.service", sys.Result{ExitCode: 1})
-	seedAdminWithKey(runner, fs, "andres", "/home/andres", "1000", "andres", testEd25519Key)
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	seedAdminWithKey(runner, fs, "ops", "/home/ops", "1000", "ops", testEd25519Key)
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout: []byte("passwordauthentication yes\npermitrootlogin yes\n"),
 	})
 	runner.On("sshd -t", sys.Result{})
@@ -177,7 +177,7 @@ func TestSSHApplyUsesSshdUnit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout: []byte("passwordauthentication no\npermitrootlogin no\n"),
 	})
 	if _, err := (SSHStep{}).Apply(context.Background(), env, plan); err != nil {
@@ -194,11 +194,11 @@ func TestSSHApplyUsesSshdUnit(t *testing.T) {
 }
 
 func TestSSHUnitRunnerErrorAbortsBeforeTimer(t *testing.T) {
-	env, runner, fs := newSSHTestEnv("andres", true, false)
+	env, runner, fs := newSSHTestEnv("ops", true, false)
 	boom := errors.New("systemctl exploded")
 	runner.OnError("systemctl cat ssh.service", boom)
-	seedAdminWithKey(runner, fs, "andres", "/home/andres", "1000", "andres", testEd25519Key)
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	seedAdminWithKey(runner, fs, "ops", "/home/ops", "1000", "ops", testEd25519Key)
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout: []byte("passwordauthentication yes\npermitrootlogin yes\n"),
 	})
 	runner.On("sshd -t", sys.Result{})
@@ -207,7 +207,7 @@ func TestSSHUnitRunnerErrorAbortsBeforeTimer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+	runner.On("sshd -T -C user=ops,host=localhost,addr=127.0.0.1", sys.Result{
 		Stdout: []byte("passwordauthentication no\npermitrootlogin no\n"),
 	})
 	_, err = SSHStep{}.Apply(context.Background(), env, plan)

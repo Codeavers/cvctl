@@ -382,7 +382,7 @@ func TestDeployHappyPath(t *testing.T) {
 		return nil
 	}
 
-	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "cli:andres"})
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "cli:ops"})
 	if err != nil {
 		t.Fatalf("Deploy returned unexpected error: %v", err)
 	}
@@ -2736,7 +2736,7 @@ func TestDeployWritesBackupEnv(t *testing.T) {
 		Host: "h1", Endpoint: "http://cvctl-storage:9000", Bucket: "cvctl", Region: "us-east-1",
 		AccessKey: "AKIDSECRET1", SecretKey: "SKSECRETVALUE", LibsodiumKey: "LIBSODIUMSECRET",
 	}
-	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "cli:andres"})
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "cli:ops"})
 	if err != nil || res.Status != state.StatusOK {
 		t.Fatalf("deploy: %v %+v", err, res)
 	}
@@ -2762,7 +2762,7 @@ func TestDeployWritesBackupEnv(t *testing.T) {
 
 func TestDeployWithoutBackupWritesNoBackupEnv(t *testing.T) {
 	rig := setupTestRig(t, "dev", "demo-dev")
-	if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "cli:andres"}); err != nil {
+	if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "cli:ops"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(rig.instDir, "backup-main-db.env")); err == nil {
