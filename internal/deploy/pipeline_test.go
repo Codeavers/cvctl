@@ -2841,6 +2841,27 @@ func TestStaleBackupEnvRemovedOnPromote(t *testing.T) {
 	}
 }
 
+func TestStaleResticEnvRemovedOnPromote(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	rig.deployer.Backup = testBackupTarget()
+	stale := filepath.Join(rig.instDir, "restic-gone.env")
+	hostEnv := filepath.Join(rig.instDir, "restic-env.env")
+	for _, p := range []string{stale, hostEnv} {
+		if err := os.WriteFile(p, []byte("X=1\n"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"}); err != nil || res.Status != state.StatusOK {
+		t.Fatalf("deploy: %v %+v", err, res)
+	}
+	if _, err := os.Stat(stale); err == nil {
+		t.Fatal("restic env of a non-target service not removed")
+	}
+	if _, err := os.Stat(hostEnv); err != nil {
+		t.Fatalf("restic-env.env must stay: %v", err)
+	}
+}
+
 var externalBucketsCvctlEnv = `CVCTL_INSTANCE=demo-dev
 CVCTL_ENV=dev
 CVCTL_STRATEGY=recreate

@@ -218,6 +218,15 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 	var envWarnings []string
 	var restoredFiles []string
 
+	// EnvDump creates the instance directory on a fresh host to write the
+	// restic env file; an early failure removes it again so a re-run starts clean.
+	instDirExisted := fileExists(e.fs(), instDir)
+	dropCreatedDir := func() {
+		if !instDirExisted {
+			_ = removeAll(e.fs(), instDir)
+		}
+	}
+
 	if hasEnv {
 		if opts.EnvSnapshot != "" {
 			return nil, &output.UsageError{Err: &output.Error{
@@ -233,8 +242,16 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 		}
 		entries, snapID, err := e.Data.EnvDump(ctx, inst, opts.EnvSnapshot)
 		if err != nil {
+			dropCreatedDir()
 			var oe *output.Error
 			if errors.As(err, &oe) && oe.Code == "E_BACKUP_NO_ENV" {
+				return nil, &output.Error{
+					Code:    "E_RESTORE_NO_SECRETS",
+					Message: fmt.Sprintf("%s is missing", cvctlEnvPath),
+					Hint:    "import a bundle (cvctl secrets import) or check cvctl backup list " + inst + " env",
+				}
+			}
+			if errors.As(err, &oe) && oe.Code == "E_BACKUP_NOT_CONFIGURED" {
 				return nil, &output.Error{
 					Code:    "E_RESTORE_NO_SECRETS",
 					Message: fmt.Sprintf("%s is missing", cvctlEnvPath),
@@ -262,6 +279,7 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 			for _, p := range written {
 				_ = e.fs().Remove(rootPrefix + p)
 			}
+			dropCreatedDir()
 			return nil, err
 		}
 		for _, p := range written {
@@ -282,6 +300,7 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 	failEarly := func(err error) (*RestoreResult, error) {
 		var rep cleanupReport
 		cleanupEnv(&rep)
+		dropCreatedDir()
 		return nil, rep.apply(err)
 	}
 

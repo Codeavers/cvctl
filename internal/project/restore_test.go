@@ -1079,3 +1079,31 @@ func TestRestoreFailedDeployKeepsRestoredEnvFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestRestoreEnvDumpNotConfiguredMapsToNoSecrets(t *testing.T) {
+	rig := newRestoreRig(t, "")
+	rig.data.envDumpErr = &output.Error{Code: "E_BACKUP_NOT_CONFIGURED", Message: "restic_password is not set", Hint: "run cvctl init"}
+	_, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_RESTORE_NO_SECRETS" || !strings.Contains(oe.Hint, "secrets import") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRestoreRemovesInstanceDirItCreatedOnEarlyFailure(t *testing.T) {
+	rig := newRestoreRig(t, "")
+	if err := os.Remove(rig.instDir); err != nil {
+		t.Fatal(err)
+	}
+	// Entries without cvctl.env: the run fails right after the env restore.
+	rig.data.envEntries = []secrets.Entry{
+		{Path: "/srv/deploy/demo-dev/app.env", Mode: 0o640, User: "deployer", Group: "deploy", Data: []byte("A=1\n")},
+	}
+	_, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	if codeOf(t, err) != "E_RESTORE_NO_SECRETS" {
+		t.Fatalf("err=%v", err)
+	}
+	if fileExists(rig.env.fs(), rig.instDir) {
+		t.Fatalf("%s created by this run was left behind", rig.instDir)
+	}
+}

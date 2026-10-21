@@ -97,6 +97,11 @@ renamed first: `E_INSTANCE_NAME`, and bundle import rejects them. Run, in this o
 7. Registry logins other than the token host (`CVCTL_REGISTRY_HOST`, else the first
    `CVCTL_REGISTRIES` host) are pruned automatically by the agent on start.
 
+## Upgrading to v0.8.0
+
+`s3` services stop being backed up unless the contract sets `cvctl.backup: volume`. The old restic
+repository `<bucket>/<host>/<inst>/<svc>` is no longer used and can be deleted by hand.
+
 ## init
 
 Prepares a Linux host with systemd. On Ubuntu and Debian it installs and hardens everything;
@@ -171,7 +176,7 @@ sudo cvctl secrets import secrets.age
 sudo cvctl secrets import --force secrets.age
 ```
 
-- **Scope flags**: `--instance <name>` bundles only the env files under `/srv/deploy/<inst>/`;
+- **Scope flags**: `--instance <name>` bundles the instance's files under `/srv/deploy/<inst>/` and its deploy key;
   `--host` bundles only `host.env` and `/etc/cvctl/secrets/*`. The flags are mutually exclusive
   (`E_USAGE_SCOPE`). Omitting both bundles every host secret, instance env file and deploy key.
 - **Passphrase**: prompted interactively on the terminal (typed twice, hidden) or read from
@@ -219,13 +224,13 @@ Design: `docs/specs/2026-10-17-s3-buckets-design.md`.
 
 ## Backups
 
-Per app the daily timer backs up databases (WAL-G) and the env files (`cvctl.env`, `app.env`, deploy key) encrypted with the host restic key; object storage is not backed up by default. Run manual env backups with `cvctl backup now <inst> env`.
+Per app the daily timer backs up databases (WAL-G) and the env files (`cvctl.env`, `app.env`, deploy key) encrypted with the host restic key; object storage (`s3` services) is not backed up by default: set `cvctl.backup: volume` on the service to back it up. Run manual env backups with `cvctl backup now <inst> env`.
 
 ### Disaster recovery and restore
 
 With off-site backups (`CVCTL_STORAGE=s3`), rebuilding an instance on a new host only needs the host bundle (`cvctl secrets export --host`) plus `cvctl project restore <inst>`. `cvctl.env`, `app.env` and the deploy key are recovered automatically from the latest off-site env backup (or pick an older one with `--env-snapshot <id>`). If `cvctl.env` already exists locally, those files are kept as is and `--env-snapshot` is rejected (`E_USAGE_ENV_SNAPSHOT`).
 
-`cvctl project restore` clones the infra repository, restores every data service from its latest backup into a fresh volume, deploys the instance, and starts a new WAL-G backup generation.
+`cvctl project restore` clones the infra repository, restores every data service from its latest backup into a fresh volume, deploys the instance, and starts a new WAL-G backup generation. `s3` services without `cvctl.backup: volume` are recreated empty.
 
 ### Backup generations
 

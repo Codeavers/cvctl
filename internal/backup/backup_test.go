@@ -1048,3 +1048,43 @@ func TestEnvPackExcludesRegeneratedEnvFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestEnvDumpOnFreshHostCreatesInstanceDir(t *testing.T) {
+	g := newRig(t)
+	fresh := systest.NewFS()
+	fresh.StrictParents = true
+	_ = fresh.MkdirAll("/srv/deploy", 0o755, sys.Owner{})
+	g.r.FS = fresh
+	g.okAll()
+	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-env.env restic/restic:0.19.1 snapshots --json latest",
+		sys.Result{Stdout: []byte(`[{"id":"abcdef0123456789","short_id":"abcdef01","time":"2026-01-02T00:00:00Z"}]`)})
+	tarBytes, err := secrets.Pack([]secrets.Entry{{Path: "/srv/deploy/app-prod/cvctl.env", Mode: 0o600, User: "deployer", Group: "deploy", Data: []byte("FOO=bar\n")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-env.env restic/restic:0.19.1 dump abcdef01 /env.tar",
+		sys.Result{Stdout: tarBytes})
+
+	if _, _, err := g.r.EnvDump(context.Background(), "app-prod", ""); err != nil {
+		t.Fatalf("EnvDump on a fresh host: %v", err)
+	}
+	info, ok := fresh.Files()["/srv/deploy/app-prod"]
+	if !ok || !info.IsDir || info.Mode != 0o2775 || info.User != "deployer" || info.Group != "deploy" {
+		t.Fatalf("instance dir: %+v (present=%v)", info, ok)
+	}
+}
+
+func TestListEnvNeedsNoContract(t *testing.T) {
+	g := newRig(t)
+	g.r.Load = func(string) (*contract.Project, *instance.Decisions, error) {
+		return nil, nil, errors.New("no cvctl.env")
+	}
+	g.run.OnPrefix("docker", sys.Result{Stdout: []byte(`[{"id":"abcdef0123","short_id":"abcdef01","time":"2026-01-02T00:00:00Z"}]`)})
+	snaps, err := g.r.List(context.Background(), "app-prod", "env")
+	if err != nil {
+		t.Fatalf("List env without contract: %v", err)
+	}
+	if len(snaps) != 1 || snaps[0].Service != "env" {
+		t.Fatalf("snaps: %+v", snaps)
+	}
+}

@@ -492,27 +492,32 @@ func (r *Runner) List(ctx context.Context, inst, svc string) ([]Snapshot, error)
 		return nil, notConfigured()
 	}
 	hostRunner := r
+	if svc == "env" {
+		snaps, err := hostRunner.envList(ctx, inst)
+		if err != nil {
+			return nil, err
+		}
+		return append([]Snapshot{}, snaps...), nil
+	}
 	dataRunner, ts, err := r.targets(ctx, inst, svc)
 	if err != nil {
 		return nil, err
 	}
 	out := []Snapshot{}
-	if svc != "env" {
-		for _, t := range ts {
-			var snaps []Snapshot
-			switch t.Strategy {
-			case StrategyWalG:
-				snaps, err = dataRunner.walgList(ctx, inst, t)
-			default:
-				snaps, err = dataRunner.resticList(ctx, inst, t)
-			}
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, snaps...)
+	for _, t := range ts {
+		var snaps []Snapshot
+		switch t.Strategy {
+		case StrategyWalG:
+			snaps, err = dataRunner.walgList(ctx, inst, t)
+		default:
+			snaps, err = dataRunner.resticList(ctx, inst, t)
 		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, snaps...)
 	}
-	if svc == "" || svc == "env" {
+	if svc == "" {
 		snaps, err := hostRunner.envList(ctx, inst)
 		if err != nil {
 			return nil, err

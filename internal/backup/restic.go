@@ -46,6 +46,14 @@ func (r *Runner) writeResticEnv(inst, svc string, idx int) (string, error) {
 	}
 	body := envFileBody(env)
 	path := r.resticEnvPath(inst, svc)
+	// A new host has no instance directory yet (project restore from the host bundle).
+	if err := r.FS.MkdirAll(r.instanceDir(inst), 0o2775, deployOwner); err != nil {
+		return "", &output.Error{
+			Code:    "E_BACKUP_FAILED",
+			Message: fmt.Sprintf("cannot create %s: %v", r.instanceDir(inst), err),
+			Hint:    "check permissions on the deploy root",
+		}
+	}
 	if err := r.FS.WriteFile(path, body, 0o640, deployOwner); err != nil {
 		return "", &output.Error{
 			Code:    "E_BACKUP_FAILED",
