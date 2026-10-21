@@ -89,10 +89,14 @@ func (PackagesStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		if errComp == nil && resComp.ExitCode == 0 && isComposeSatisfied(string(resComp.Stdout)) {
 			// Compose is installed and version is >= 2.24.0.
 		} else {
+			composeHint := "install the Docker compose plugin 2.24+ with your distribution's packages"
+			if osi.apt() {
+				composeHint = "install the compose plugin: apt-get install docker-compose-v2 (or docker-compose-plugin from Docker's repo)"
+			}
 			return Plan{}, &output.Error{
 				Code:    "E_DOCKER_COMPOSE_OLD",
 				Message: "docker is running but docker compose is missing or older than 2.24",
-				Hint:    "install the compose plugin: apt-get install docker-compose-v2 (or docker-compose-plugin from Docker's repo)",
+				Hint:    composeHint,
 			}
 		}
 	} else {

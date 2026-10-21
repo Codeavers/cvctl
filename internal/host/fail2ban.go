@@ -37,7 +37,7 @@ func (Fail2banStep) Name() string { return "fail2ban" }
 func (Fail2banStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	osi, err := hostOS(e.FS)
 	if err != nil {
-		return Plan{}, fail2banFSErr("/etc/os-release", err)
+		return Plan{}, err
 	}
 	if !osi.apt() && !hasCommand(ctx, e, "fail2ban-client") {
 		return Plan{Skip: "fail2ban not installed; brute-force protection not managed: install fail2ban yourself"}, nil

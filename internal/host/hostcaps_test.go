@@ -2,11 +2,13 @@ package host
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/codeavers/cvctl/internal/hostcfg"
+	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/internal/sys/systest"
 )
@@ -154,7 +156,7 @@ func TestSSHUnitSelection(t *testing.T) {
 	}{{0, "ssh"}, {1, "sshd"}} {
 		env, r, _ := capsEnv(ubuntu2404)
 		r.On("systemctl cat ssh.service", sys.Result{ExitCode: tc.catExit})
-		if got := sshUnit(context.Background(), env); got != tc.want {
+		if got, err := sshUnit(context.Background(), env); err != nil || got != tc.want {
 			t.Fatalf("exit %d: got %q want %q", tc.catExit, got, tc.want)
 		}
 	}
@@ -187,6 +189,68 @@ func TestSSHApplyUsesSshdUnit(t *testing.T) {
 	for _, c := range runner.Calls {
 		if c.String() == "systemctl try-reload-or-restart ssh" {
 			t.Fatal("ssh unit used on an sshd host")
+		}
+	}
+}
+
+func TestSSHUnitRunnerErrorAbortsBeforeTimer(t *testing.T) {
+	env, runner, fs := newSSHTestEnv("andres", true, false)
+	boom := errors.New("systemctl exploded")
+	runner.OnError("systemctl cat ssh.service", boom)
+	seedAdminWithKey(runner, fs, "andres", "/home/andres", "1000", "andres", testEd25519Key)
+	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+		Stdout: []byte("passwordauthentication yes\npermitrootlogin yes\n"),
+	})
+	runner.On("sshd -t", sys.Result{})
+	// Check also reads the unit? It must not; only Apply does.
+	plan, err := SSHStep{}.Check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.On("sshd -T -C user=andres,host=localhost,addr=127.0.0.1", sys.Result{
+		Stdout: []byte("passwordauthentication no\npermitrootlogin no\n"),
+	})
+	_, err = SSHStep{}.Apply(context.Background(), env, plan)
+	if !errors.Is(err, boom) {
+		t.Fatalf("got %v", err)
+	}
+	if _, serr := fs.Stat(sshDropInPath); serr == nil {
+		t.Fatal("drop-in not removed")
+	}
+	for _, c := range runner.Calls {
+		if c.Name == "systemd-run" {
+			t.Fatal("revert timer armed")
+		}
+	}
+}
+
+func TestMalformedOSReleaseErrorCode(t *testing.T) {
+	env, r, _ := capsEnv("ID=\"unterminated\n")
+	dockerPresent(r)
+	for _, s := range []Step{PackagesStep{}, Fail2banStep{}, FirewallStep{}, UnattendedStep{}} {
+		_, err := s.Check(context.Background(), env)
+		if c := code(t, err); c != "E_HOST_OS_RELEASE" {
+			t.Fatalf("%s: %s", s.Name(), c)
+		}
+	}
+}
+
+func TestComposeOldHint(t *testing.T) {
+	for rel, want := range map[string]string{
+		ubuntu2404: "apt-get install docker-compose-v2",
+		arch:       "with your distribution's packages",
+	} {
+		env, r, _ := capsEnv(rel)
+		r.On("docker info", sys.Result{})
+		r.On("docker compose version --short", sys.Result{Stdout: []byte("2.20.0\n")})
+		_, err := PackagesStep{}.Check(context.Background(), env)
+		if c := code(t, err); c != "E_DOCKER_COMPOSE_OLD" {
+			t.Fatal(c)
+		}
+		var oe *output.Error
+		errors.As(err, &oe)
+		if !strings.Contains(oe.Hint, want) {
+			t.Fatalf("%s: hint %q", rel, oe.Hint)
 		}
 	}
 }

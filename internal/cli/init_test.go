@@ -160,10 +160,9 @@ func TestInitNotRootFailsBeforeConfig(t *testing.T) {
 	if _, err := fs.ReadFile("/etc/cvctl/host.env"); err == nil {
 		t.Fatal("host.env written")
 	}
-	for p := range fs.Files() {
-		if !strings.HasPrefix(p, "/run") { // only the seeded systemd dir
-			t.Fatalf("unexpected write %s", p)
-		}
+	files := fs.Files()
+	if len(files) != 3 || files["/run"].IsDir != true || files["/run/systemd"].IsDir != true || files["/run/systemd/system"].IsDir != true {
+		t.Fatalf("unexpected writes: %v", files)
 	}
 }
 

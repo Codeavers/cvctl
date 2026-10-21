@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"regexp"
 	"strings"
@@ -34,11 +35,11 @@ func hostOS(fsys sys.FS) (osInfo, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return osInfo{}, nil
 		}
-		return osInfo{}, err
+		return osInfo{}, osReleaseErr(err)
 	}
 	m, err := godotenv.Unmarshal(string(b))
 	if err != nil {
-		return osInfo{}, err
+		return osInfo{}, osReleaseErr(err)
 	}
 	return osInfo{
 		ID:             strings.ToLower(m["ID"]),
@@ -46,6 +47,14 @@ func hostOS(fsys sys.FS) (osInfo, error) {
 		Codename:       m["VERSION_CODENAME"],
 		UbuntuCodename: m["UBUNTU_CODENAME"],
 	}, nil
+}
+
+func osReleaseErr(err error) error {
+	return &output.Error{
+		Code:    "E_HOST_OS_RELEASE",
+		Message: fmt.Sprintf("cannot use /etc/os-release: %v", err),
+		Hint:    "check /etc/os-release syntax",
+	}
 }
 
 func (o osInfo) is(distro string) bool {

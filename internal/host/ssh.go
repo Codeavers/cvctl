@@ -228,7 +228,10 @@ func (SSHStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 		}, rmErr)
 	}
 
-	unit := sshUnit(ctx, e)
+	unit, err := sshUnit(ctx, e)
+	if err != nil {
+		return "", wrapRemoveErr(err, e.FS.Remove(sshDropInPath))
+	}
 
 	// Clear any leftover revert unit before arming so systemd-run is idempotent across retries.
 	if _, err := e.Run.Run(ctx, sys.Cmd{
@@ -505,10 +508,13 @@ func sshCmdFailed(c sys.Cmd, res sys.Result) error {
 
 // sshUnit is the systemd unit of the SSH daemon: Debian and Ubuntu call it ssh, most
 // other distributions sshd.
-func sshUnit(ctx context.Context, e *Env) string {
+func sshUnit(ctx context.Context, e *Env) (string, error) {
 	res, err := e.Run.Run(ctx, sys.Cmd{Name: "systemctl", Args: []string{"cat", "ssh.service"}})
-	if err == nil && res.ExitCode == 0 {
-		return "ssh"
+	if err != nil {
+		return "", err
 	}
-	return "sshd"
+	if res.ExitCode != 0 {
+		return "sshd", nil
+	}
+	return "ssh", nil
 }

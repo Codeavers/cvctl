@@ -32,7 +32,7 @@ func (UnattendedStep) Name() string { return "unattended-upgrades" }
 func (UnattendedStep) Check(_ context.Context, e *Env) (Plan, error) {
 	osi, err := hostOS(e.FS)
 	if err != nil {
-		return Plan{}, unattendedErr("/etc/os-release", err)
+		return Plan{}, err
 	}
 	if !osi.apt() {
 		id := osi.ID
