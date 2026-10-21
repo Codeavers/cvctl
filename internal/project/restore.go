@@ -212,6 +212,8 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 		return nil, err
 	}
 	defer unlock()
+	// Re-check under the lock: another restore or an import may have written it meanwhile.
+	hasEnv = fileExists(e.fs(), cvctlEnvPath)
 
 	var envWarnings []string
 	var restoredFiles []string
