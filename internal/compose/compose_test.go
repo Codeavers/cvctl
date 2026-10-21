@@ -394,6 +394,7 @@ func TestBlueGreenPrimitivesArgv(t *testing.T) {
 
 	runner.On(p.Cmd("up", "-d", "--remove-orphans", "db", "worker").String(), sys.Result{})
 	runner.On(p.Cmd("up", "-d", "db").String(), sys.Result{})
+	runner.On(p.Cmd("up", "-d", "--no-deps", "--remove-orphans", "db").String(), sys.Result{})
 	runner.On(p.Cmd("up", "-d", "--no-deps", "--no-recreate", "--scale", "api=2", "api").String(), sys.Result{})
 	runner.On("docker inspect -f {{json .NetworkSettings.Networks}} bbb", sys.Result{Stdout: []byte(`{"demo-dev_edge":{"IPAddress":"172.20.0.5"},"demo-dev_app":{"IPAddress":"172.21.0.5"}}`)})
 	runner.On("docker stop -t 10 aaa", sys.Result{})
@@ -404,6 +405,9 @@ func TestBlueGreenPrimitivesArgv(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := p.UpServices(ctx, []string{"db"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.UpServicesNoDeps(ctx, []string{"db"}, true); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.UpServices(ctx, nil, true); err != nil {
@@ -426,8 +430,8 @@ func TestBlueGreenPrimitivesArgv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(runner.Calls) != 8 {
-		t.Fatalf("calls = %d, want 8 (empty UpServices runs nothing)", len(runner.Calls))
+	if len(runner.Calls) != 9 {
+		t.Fatalf("calls = %d, want 9 (empty UpServices runs nothing)", len(runner.Calls))
 	}
 	for _, c := range runner.Calls {
 		if c.Name == "docker" && c.Args[0] != "compose" {

@@ -15,6 +15,7 @@ import (
 	"github.com/codeavers/cvctl/internal/compose"
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/instance"
+	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/state"
 )
 
@@ -64,6 +65,11 @@ func (s *swapCompose) UpServices(_ context.Context, services []string, orphans b
 	return nil
 }
 
+func (s *swapCompose) UpServicesNoDeps(_ context.Context, services []string, orphans bool) error {
+	s.rec(fmt.Sprintf("upservices-nodeps:%s:orphans=%v", strings.Join(services, ","), orphans))
+	return nil
+}
+
 func (s *swapCompose) ScaleNoRecreate(_ context.Context, svc string, n int) error {
 	s.rec(fmt.Sprintf("scale:%s=%d", svc, n))
 	if s.st.failScale != nil {
@@ -86,8 +92,6 @@ func (s *swapCompose) IP(_ context.Context, id, network string) (string, error) 
 	s.rec(fmt.Sprintf("ip:%s:%s", id, network))
 	return s.st.edgeIP, nil
 }
-
-func (s *swapCompose) Network(short string) string { return "demo-dev_" + short }
 
 func (s *swapCompose) CheckContainer(_ context.Context, h contract.HealthSpec, port int, _ *http.Client, id string, httpCheck bool) error {
 	s.rec(fmt.Sprintf("check:%s:%s:port=%d:http=%v", h.Service, id, port, httpCheck))
@@ -189,7 +193,7 @@ func TestBlueGreenSwapOrder(t *testing.T) {
 	}
 
 	assertOrder(t, rig.compose.calls,
-		"upservices:main-db:orphans=true",
+		"upservices-nodeps:main-db:orphans=true",
 		"containers:api",
 		"scale:api=2",
 		"containers:api",
@@ -285,7 +289,7 @@ func TestBlueGreenFirstDeployUsesPlainUp(t *testing.T) {
 	if err != nil || res.Status != state.StatusOK {
 		t.Fatalf("res=%+v err=%v", res, err)
 	}
-	assertOrder(t, rig.compose.calls, "upservices:main-db:orphans=true", "containers:api", "upservices:api:orphans=false", "up")
+	assertOrder(t, rig.compose.calls, "upservices-nodeps:main-db:orphans=true", "containers:api", "upservices:api:orphans=false", "up")
 	for _, c := range rig.compose.calls {
 		if strings.HasPrefix(c, "scale:") || strings.HasPrefix(c, "stopremove:") {
 			t.Fatalf("first deploy must not swap, saw %q", c)
@@ -335,7 +339,7 @@ func TestBlueGreenWorkerOnlyUsesPlainUp(t *testing.T) {
 	p := &contract.Project{Apps: []contract.AppService{{Name: "worker", Role: "worker"}}}
 	c := rig.deployer.Compose("demo-dev", "o", "e")
 
-	swapped, err := rig.deployer.bringUp(context.Background(), p, &instance.Decisions{Strategy: "blue-green"}, c)
+	swapped, err := rig.deployer.bringUp(context.Background(), "demo-dev", p, &instance.Decisions{Strategy: "blue-green"}, c)
 	if err != nil || len(swapped) != 0 {
 		t.Fatalf("swapped=%v err=%v", swapped, err)
 	}
@@ -363,4 +367,51 @@ func TestRecreateUsesPlainUp(t *testing.T) {
 	if rig.compose.upCount != 1 {
 		t.Fatalf("upCount = %d", rig.compose.upCount)
 	}
+}
+
+func TestBlueGreenNeedsSwapAPI(t *testing.T) {
+	rig, _ := blueGreenRig(t)
+	p := &contract.Project{Apps: []contract.AppService{{Name: "api", Role: "app", ExposePort: 3000}}}
+	c := &boundCompose{fake: rig.compose}
+
+	_, err := rig.deployer.bringUp(context.Background(), "demo-dev", p, &instance.Decisions{Strategy: "blue-green"}, c)
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_DEPLOY_FAILED" {
+		t.Fatalf("err = %v", err)
+	}
+	if len(rig.compose.calls) != 0 {
+		t.Fatalf("nothing must run: %v", rig.compose.calls)
+	}
+}
+
+func TestBlueGreenWorkerDependingOnExposedKeepsAPISwapped(t *testing.T) {
+	rig, ss := blueGreenRig(t)
+	seedBGCurrent(t, rig)
+	ss.containers["api"] = []compose.Container{oldContainer("old1", 0)}
+	cp := filepath.Join(rig.infraDir, "compose.yml")
+	y, _ := os.ReadFile(cp)
+	y = append(y, []byte(`  worker:
+    image: ghcr.io/org/project-worker
+    depends_on: [api]
+    labels:
+      cvctl.role: worker
+    deploy: { resources: { limits: { memory: 256m } } }
+`)...)
+	const dg = "sha256:0000000000000000000000000000000000000000000000000000000000000002"
+	envPath := filepath.Join(rig.instDir, "cvctl.env")
+	eb, _ := os.ReadFile(envPath)
+	if err := os.WriteFile(envPath, append(eb, []byte("CVCTL_DIGEST_WORKER="+dg+"\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := defaultDesired()
+	want.Digests["worker"] = dg
+	if err := os.WriteFile(cp, y, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{Actor: "agent"})
+	if err != nil || res.Status != state.StatusOK {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	assertOrder(t, rig.compose.calls, "upservices-nodeps:main-db,worker:orphans=true", "scale:api=2", "stopremove:old1")
 }

@@ -248,10 +248,23 @@ func (p Project) Logs(ctx context.Context, service string, tail int) (string, er
 // UpServices runs `up -d` for the given services only. An empty list is a
 // no-op: compose would otherwise start every service.
 func (p Project) UpServices(ctx context.Context, services []string, removeOrphans bool) error {
+	return p.upServices(ctx, services, removeOrphans, false)
+}
+
+// UpServicesNoDeps is UpServices with --no-deps: depends_on targets are not
+// started or recreated.
+func (p Project) UpServicesNoDeps(ctx context.Context, services []string, removeOrphans bool) error {
+	return p.upServices(ctx, services, removeOrphans, true)
+}
+
+func (p Project) upServices(ctx context.Context, services []string, removeOrphans, noDeps bool) error {
 	if len(services) == 0 {
 		return nil
 	}
 	args := []string{"up", "-d"}
+	if noDeps {
+		args = append(args, "--no-deps")
+	}
 	if removeOrphans {
 		args = append(args, "--remove-orphans")
 	}

@@ -11,6 +11,8 @@ import (
 	"github.com/codeavers/cvctl/internal/compose"
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/instance"
+	"github.com/codeavers/cvctl/internal/output"
+	"github.com/codeavers/cvctl/internal/render"
 )
 
 const (
@@ -22,14 +24,14 @@ const (
 )
 
 // SwapAPI is what a blue-green swap needs beyond ComposeAPI. *compose.Project
-// implements it; a ComposeAPI without it falls back to a plain Up.
+// implements it; a blue-green deploy fails without it.
 type SwapAPI interface {
 	Up(ctx context.Context) error
 	UpServices(ctx context.Context, services []string, removeOrphans bool) error
+	UpServicesNoDeps(ctx context.Context, services []string, removeOrphans bool) error
 	ScaleNoRecreate(ctx context.Context, svc string, n int) error
 	Containers(ctx context.Context, svc string) ([]compose.Container, error)
 	IP(ctx context.Context, id, network string) (string, error)
-	Network(short string) string
 	CheckContainer(ctx context.Context, h contract.HealthSpec, port int, client *http.Client, id string, httpCheck bool) error
 	StopRemove(ctx context.Context, id string, grace time.Duration) error
 	RemoveForce(ctx context.Context, id string) error
@@ -62,18 +64,25 @@ func exposedApps(p *contract.Project) []contract.AppService {
 
 // bringUp starts the project for the strategy and returns the services that
 // were swapped without downtime.
-func (d *Deployer) bringUp(ctx context.Context, p *contract.Project, dec *instance.Decisions, c ComposeAPI) ([]string, error) {
-	sw, ok := c.(SwapAPI)
-	if dec.Strategy != "blue-green" || !ok || len(exposedApps(p)) == 0 {
+func (d *Deployer) bringUp(ctx context.Context, inst string, p *contract.Project, dec *instance.Decisions, c ComposeAPI) ([]string, error) {
+	if dec.Strategy != "blue-green" || len(exposedApps(p)) == 0 {
 		return nil, c.Up(ctx)
 	}
-	return d.swapBlueGreen(ctx, p, dec, sw)
+	sw, ok := c.(SwapAPI)
+	if !ok {
+		return nil, &output.Error{
+			Code:    "E_DEPLOY_FAILED",
+			Message: "blue-green needs the compose swap API",
+			Hint:    "this is a bug in cvctl; report it",
+		}
+	}
+	return d.swapBlueGreen(ctx, inst, p, dec, sw)
 }
 
 // swapBlueGreen replaces each exposed service by a second container of the
 // same compose service: the old one keeps serving until the new one is healthy
 // and the route is pinned to it. Everything else is brought up as usual.
-func (d *Deployer) swapBlueGreen(ctx context.Context, p *contract.Project, dec *instance.Decisions, c SwapAPI) ([]string, error) {
+func (d *Deployer) swapBlueGreen(ctx context.Context, inst string, p *contract.Project, dec *instance.Decisions, c SwapAPI) ([]string, error) {
 	exposed := exposedApps(p)
 	isExposed := map[string]bool{}
 	for _, a := range exposed {
@@ -86,13 +95,15 @@ func (d *Deployer) swapBlueGreen(ctx context.Context, p *contract.Project, dec *
 		}
 	}
 	sort.Strings(others)
-	if err := c.UpServices(ctx, others, true); err != nil {
+	// --no-deps: depends_on must not start or recreate an exposed service
+	// before its swap. Data services were started by UpData already.
+	if err := c.UpServicesNoDeps(ctx, others, true); err != nil {
 		return nil, err
 	}
 
 	var swapped []string
 	for _, a := range exposed {
-		did, err := d.swapService(ctx, p, dec, c, a)
+		did, err := d.swapService(ctx, inst, p, dec, c, a)
 		if did {
 			swapped = append(swapped, a.Name)
 		}
@@ -107,7 +118,7 @@ func (d *Deployer) swapBlueGreen(ctx context.Context, p *contract.Project, dec *
 
 // swapService reports whether the service was swapped, as opposed to started
 // plainly because nothing ran.
-func (d *Deployer) swapService(ctx context.Context, p *contract.Project, dec *instance.Decisions, c SwapAPI, a contract.AppService) (bool, error) {
+func (d *Deployer) swapService(ctx context.Context, inst string, p *contract.Project, dec *instance.Decisions, c SwapAPI, a contract.AppService) (bool, error) {
 	cs, err := c.Containers(ctx, a.Name)
 	if err != nil {
 		return false, err
@@ -177,7 +188,7 @@ func (d *Deployer) swapService(ctx context.Context, p *contract.Project, dec *in
 	if err := c.CheckContainer(ctx, h, port, nil, fresh.ID, httpCheck); err != nil {
 		return false, dropNew(err)
 	}
-	ip, err := c.IP(ctx, fresh.ID, c.Network("edge"))
+	ip, err := c.IP(ctx, fresh.ID, render.NetworkEdge(inst))
 	if err != nil {
 		return false, dropNew(err)
 	}
