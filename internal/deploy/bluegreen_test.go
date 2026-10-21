@@ -39,6 +39,7 @@ type swapState struct {
 	failCheck  error
 	failScale  error
 	failStop   error
+	onStop     func()
 	// failScaleCreates makes a failing scale leave its container behind.
 	failScaleCreates bool
 	// newState is the state of containers the scale creates; empty is running.
@@ -114,6 +115,9 @@ func (s *swapCompose) StopRemove(_ context.Context, id string, grace time.Durati
 	s.rec("stopremove:" + id)
 	s.snapshot("stopremove")
 	s.st.grace = grace
+	if s.st.onStop != nil {
+		s.st.onStop()
+	}
 	if s.st.failStop != nil {
 		return s.st.failStop
 	}
@@ -547,4 +551,104 @@ func TestBlueGreenWorkerDependingOnExposedKeepsAPISwapped(t *testing.T) {
 		t.Fatalf("res=%+v err=%v", res, err)
 	}
 	assertOrder(t, rig.compose.calls, "upservices-nodeps:main-db,worker:orphans=true", "scale:api=2", "stopremove:old1")
+}
+
+func TestBlueGreenCancelledStopKeepsNew(t *testing.T) {
+	rig, ss := blueGreenRig(t)
+	seedBGCurrent(t, rig)
+	ss.containers["api"] = []compose.Container{oldContainer("old1", 0)}
+	ctx, cancel := context.WithCancel(context.Background())
+	ss.failStop = errors.New("stop interrupted")
+	ss.onStop = cancel
+	c := rig.deployer.Compose("demo-dev", "o", "e")
+	p, dec := swapProject()
+	rig.deployer.Sleep = func(context.Context, time.Duration) error { return nil }
+
+	swapped, err := rig.deployer.bringUp(ctx, "demo-dev", p, dec, c)
+	if err == nil || !slices.Equal(swapped, []string{"api"}) {
+		t.Fatalf("swapped=%v err=%v", swapped, err)
+	}
+	for _, call := range rig.compose.calls {
+		if call == "rmforce:new1" {
+			t.Fatalf("new container must stay: %v", rig.compose.calls)
+		}
+	}
+	if len(ss.containers["api"]) != 2 {
+		t.Fatalf("both containers must remain: %v", ss.containers["api"])
+	}
+	r, _ := os.ReadFile(ss.routePath)
+	if strings.Contains(string(r), "172.20.0.9") {
+		t.Fatalf("route must be back to the alias form:\n%s", r)
+	}
+}
+
+func TestBlueGreenStopFailsOldAlreadyStoppedKeepsNew(t *testing.T) {
+	rig, ss := blueGreenRig(t)
+	seedBGCurrent(t, rig)
+	ss.containers["api"] = []compose.Container{oldContainer("old1", 0)}
+	ss.failStop = errors.New("rm failed")
+	ss.onStop = func() {
+		for i := range ss.containers["api"] {
+			if ss.containers["api"][i].ID == "old1" {
+				ss.containers["api"][i].State = "exited"
+			}
+		}
+	}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"})
+	if err != nil || res.Status != state.StatusFailed {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	for _, call := range rig.compose.calls[:] {
+		if call == "rmforce:new1" {
+			t.Fatalf("new container must stay: %v", rig.compose.calls)
+		}
+	}
+	found := false
+	for _, c := range ss.containers["api"] {
+		found = found || c.ID == "new1"
+	}
+	if !found {
+		t.Fatalf("new1 must remain: %v", ss.containers["api"])
+	}
+	r, _ := os.ReadFile(ss.routePath)
+	if !strings.Contains(string(r), "http://demo-dev--api:3000") || strings.Contains(string(r), "172.20.0.9") {
+		t.Fatalf("route must end in the alias form:\n%s", r)
+	}
+	hist, _ := rig.store.History("demo-dev", 10)
+	if len(hist) == 0 || !slices.Equal(hist[len(hist)-1].BlueGreen, []string{"api"}) {
+		t.Fatalf("history must record api: %+v", hist)
+	}
+}
+
+func TestBlueGreenEdgeConnectFailureIsTransient(t *testing.T) {
+	rig, ss := blueGreenRig(t)
+	rig.deployer.Run = &netRunner{log: rig.compose, failConnect: true}
+	seedBGCurrent(t, rig)
+	ss.containers["api"] = []compose.Container{oldContainer("old1", 0)}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range rig.compose.calls {
+		if strings.HasPrefix(call, "scale:") || strings.HasPrefix(call, "stopremove:") {
+			t.Fatalf("no swap step may run: %v", rig.compose.calls)
+		}
+	}
+	if rig.compose.upCount != 0 {
+		t.Fatalf("no rollback Up expected, got %d", rig.compose.upCount)
+	}
+	st, _ := rig.store.Load("demo-dev")
+	if st.FailedHash != "" || st.LastTransient == "" {
+		t.Fatalf("must be a transient failure: %+v (res %+v)", st, res)
+	}
+}
+
+func swapProject() (*contract.Project, *instance.Decisions) {
+	return &contract.Project{
+		Compose: &types.Project{},
+		Apps:    []contract.AppService{{Name: "api", Role: "app", ExposePort: 3000}},
+		X:       contract.Ext{Health: contract.HealthSpec{Service: "api", HTTP: "/health"}},
+	}, &instance.Decisions{Instance: "demo-dev", Strategy: "blue-green", Domains: map[string]string{"api": "api.example.com"}}
 }

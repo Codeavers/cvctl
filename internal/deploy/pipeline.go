@@ -1095,6 +1095,10 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		return d.failPermanent(ctx, inst, st, want, deployID, actor, now, "deployer misconfigured: Compose returned nil", secrets)
 	}
 	swapped, upErr := d.bringUp(ctx, inst, p, dec, finalCompose)
+	var edgeErr *edgeConnectError
+	if errors.As(upErr, &edgeErr) {
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, stepErrText(ctx, edgeErr.err), secrets)
+	}
 	if upErr == nil {
 		// Traefik being unreachable says nothing about the new release: retry, do not roll back.
 		if err := d.connectTraefik(ctx, inst); err != nil {

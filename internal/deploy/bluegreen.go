@@ -37,6 +37,13 @@ type SwapAPI interface {
 	RemoveForce(ctx context.Context, id string) error
 }
 
+// edgeConnectError marks a Traefik network failure: like after the plain Up it
+// says nothing about the release, so the pipeline retries instead of rolling back.
+type edgeConnectError struct{ err error }
+
+func (e *edgeConnectError) Error() string { return e.err.Error() }
+func (e *edgeConnectError) Unwrap() error { return e.err }
+
 func (d *Deployer) sleep(ctx context.Context, dur time.Duration) error {
 	if d.Sleep != nil {
 		return d.Sleep(ctx, dur)
@@ -110,7 +117,7 @@ func (d *Deployer) swapBlueGreen(ctx context.Context, inst string, p *contract.P
 
 	// Traefik has to reach the new container's edge IP before the first pin.
 	if err := d.connectTraefik(ctx, inst); err != nil {
-		return nil, err
+		return nil, &edgeConnectError{err}
 	}
 
 	var swapped []string
@@ -216,8 +223,12 @@ func (d *Deployer) swapService(ctx context.Context, inst string, p *contract.Pro
 	}
 	if err := c.StopRemove(ctx, old.ID, stopGrace(p, a.Name)); err != nil {
 		_ = d.WriteRoute(p, dec, nil)
-		// Once the old container is no longer running the new one is the only
-		// server and must stay.
+		// A cancelled stop may have killed the old container already, so the
+		// new one stays. The same holds once the old one is no longer running:
+		// the new one is then the only server.
+		if ctx.Err() != nil {
+			return true, err
+		}
 		if left, lerr := c.Containers(context.WithoutCancel(ctx), a.Name); lerr == nil && runningID(left, old.ID) {
 			return false, dropNew(err)
 		}
