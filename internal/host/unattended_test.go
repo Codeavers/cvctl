@@ -22,6 +22,7 @@ func (w *writeErrFS) WriteFile(p string, data []byte, mode os.FileMode, o sys.Ow
 func newUnattendedTestEnv() (*Env, *systest.Runner, *systest.FS) {
 	r := &systest.Runner{}
 	fs := systest.NewFS()
+	seedOS(fs, ubuntu2404)
 	return &Env{Run: r, FS: fs, EUID: 0}, r, fs
 }
 

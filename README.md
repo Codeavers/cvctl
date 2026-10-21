@@ -99,8 +99,9 @@ renamed first: `E_INSTANCE_NAME`, and bundle import rejects them. Run, in this o
 
 ## init
 
-Prepares an Ubuntu 24.04 or later VPS from scratch or adopts an existing server to the desired
-state idempotently: packages, docker daemon, accounts (`deployer` user), SSH hardening
+Prepares a Linux host with systemd. On Ubuntu and Debian it installs and hardens everything;
+elsewhere install Docker yourself and cvctl skips what the host lacks. It adopts an existing
+server to the desired state idempotently: packages, docker daemon, accounts (`deployer` user), SSH hardening
 with auto-revert timer, fail2ban, firewall (UFW), unattended security upgrades, Traefik v3
 reverse proxy (file provider only, no Docker socket), backup storage (local MinIO or S3),
 and notifications.

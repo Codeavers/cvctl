@@ -228,6 +228,8 @@ func (SSHStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 		}, rmErr)
 	}
 
+	unit := sshUnit(ctx, e)
+
 	// Clear any leftover revert unit before arming so systemd-run is idempotent across retries.
 	if _, err := e.Run.Run(ctx, sys.Cmd{
 		Name: "systemctl",
@@ -249,13 +251,13 @@ func (SSHStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 			"--unit", "cvctl-ssh-revert",
 			"--on-active=300",
 			"/bin/sh", "-c",
-			"rm -f /etc/ssh/sshd_config.d/00-cvctl.conf && systemctl try-reload-or-restart ssh",
+			"rm -f /etc/ssh/sshd_config.d/00-cvctl.conf && systemctl try-reload-or-restart " + unit,
 		},
 	}); err != nil {
 		return "", wrapRemoveErr(err, e.FS.Remove(sshDropInPath))
 	}
 
-	if err := runSSHCmd(ctx, e, sys.Cmd{Name: "systemctl", Args: []string{"try-reload-or-restart", "ssh"}}); err != nil {
+	if err := runSSHCmd(ctx, e, sys.Cmd{Name: "systemctl", Args: []string{"try-reload-or-restart", unit}}); err != nil {
 		return "", withRevertNotice(err)
 	}
 
@@ -281,7 +283,7 @@ func (SSHStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 		if err := e.FS.Remove(sshDropInPath); err != nil {
 			return "", withRevertNotice(err)
 		}
-		if err := runSSHCmd(ctx, e, sys.Cmd{Name: "systemctl", Args: []string{"try-reload-or-restart", "ssh"}}); err != nil {
+		if err := runSSHCmd(ctx, e, sys.Cmd{Name: "systemctl", Args: []string{"try-reload-or-restart", unit}}); err != nil {
 			return "", withRevertNotice(err)
 		}
 		if err := stopRevertTimer(ctx, e); err != nil {
@@ -499,4 +501,14 @@ func runSSHCmd(ctx context.Context, e *Env, c sys.Cmd) error {
 
 func sshCmdFailed(c sys.Cmd, res sys.Result) error {
 	return sys.CmdErr("E_SSH_FAILED", c, res, nil, fmt.Sprintf("check `%s` output and sshd service status", c.String()))
+}
+
+// sshUnit is the systemd unit of the SSH daemon: Debian and Ubuntu call it ssh, most
+// other distributions sshd.
+func sshUnit(ctx context.Context, e *Env) string {
+	res, err := e.Run.Run(ctx, sys.Cmd{Name: "systemctl", Args: []string{"cat", "ssh.service"}})
+	if err == nil && res.ExitCode == 0 {
+		return "ssh"
+	}
+	return "sshd"
 }

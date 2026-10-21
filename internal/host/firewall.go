@@ -41,6 +41,14 @@ func (FirewallStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		return Plan{Skip: firewallSkipMsg}, nil
 	}
 
+	osi, err := hostOS(e.FS)
+	if err != nil {
+		return Plan{}, firewallFSErr(err)
+	}
+	if !osi.apt() && !hasCommand(ctx, e, "ufw") {
+		return Plan{Skip: "ufw not installed; firewall not managed: allow ssh, 80 and 443 yourself"}, nil
+	}
+
 	sshdCmd := sys.Cmd{
 		Name: "sshd",
 		Args: []string{"-T", "-C", "user=root,host=localhost,addr=127.0.0.1"},
@@ -217,4 +225,12 @@ func runFirewallCmd(ctx context.Context, e *Env, c sys.Cmd) error {
 
 func firewallCmdFailed(c sys.Cmd, res sys.Result) error {
 	return sys.CmdErr("E_FIREWALL_FAILED", c, res, nil, fmt.Sprintf("check `%s` output and ufw status", c.String()))
+}
+
+func firewallFSErr(err error) error {
+	return &output.Error{
+		Code:    "E_FIREWALL_FAILED",
+		Message: fmt.Sprintf("cannot read /etc/os-release: %v", err),
+		Hint:    "check permissions of /etc/os-release, or set CVCTL_FIREWALL_MANAGE=false",
+	}
 }
