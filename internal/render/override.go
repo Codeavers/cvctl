@@ -29,6 +29,9 @@ type Options struct {
 	BackupEnvDir string
 	// Backup nil means no backups configured: no backup env, no backup network.
 	Backup *BackupTarget
+	// Pin maps a service to the backend URL its Traefik route uses instead of
+	// the network alias; only Traefik reads it.
+	Pin map[string]string
 }
 
 // BackupTarget is the object storage destination and key material for wal-g.

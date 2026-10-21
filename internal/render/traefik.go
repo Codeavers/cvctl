@@ -12,7 +12,8 @@ import (
 
 // Traefik renders the file-provider route for every exposed app and exposed
 // local bucket service, or nil when none is exposed. Traefik has no Docker
-// socket access, so these files are the only source of routes.
+// socket access, so these files are the only source of routes. A service in
+// o.Pin routes to that URL instead of its network alias.
 func Traefik(p *contract.Project, d *instance.Decisions, o Options) ([]byte, error) {
 	if d.Instance == "" {
 		return nil, missing("instance")
@@ -41,7 +42,7 @@ func Traefik(p *contract.Project, d *instance.Decisions, o Options) ([]byte, err
 		}
 		routers[name] = r
 		services[name] = map[string]any{"loadBalancer": map[string]any{
-			"servers": []any{map[string]any{"url": fmt.Sprintf("http://%s:%d", name, a.ExposePort)}},
+			"servers": []any{map[string]any{"url": backendURL(o, a.Name, name, a.ExposePort)}},
 		}}
 	}
 	for _, ds := range p.Data {
@@ -80,11 +81,18 @@ func Traefik(p *contract.Project, d *instance.Decisions, o Options) ([]byte, err
 		}
 		routers[name] = r
 		services[name] = map[string]any{"loadBalancer": map[string]any{
-			"servers": []any{map[string]any{"url": fmt.Sprintf("http://%s:%d", name, ds.ExposePort)}},
+			"servers": []any{map[string]any{"url": backendURL(o, ds.Name, name, ds.ExposePort)}},
 		}}
 	}
 	if len(routers) == 0 {
 		return nil, nil
 	}
 	return marshal(map[string]any{"http": map[string]any{"routers": routers, "services": services}})
+}
+
+func backendURL(o Options, svc, alias string, port int) string {
+	if u := o.Pin[svc]; u != "" {
+		return u
+	}
+	return fmt.Sprintf("http://%s:%d", alias, port)
 }

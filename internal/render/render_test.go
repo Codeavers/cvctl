@@ -847,3 +847,29 @@ func TestOverrideEscapesOnlyGenerated(t *testing.T) {
 	}
 	golden(t, "override-escape.yml", out)
 }
+
+func TestTraefikGoldenPinned(t *testing.T) {
+	p, d, _ := setupBuckets(t)
+	out, err := Traefik(p, d, Options{Edge: "edge", Pin: map[string]string{"api": "http://172.20.0.5:3000"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "traefik-pinned.yml", out)
+}
+
+func TestTraefikPinNilAndEmptyMatchAlias(t *testing.T) {
+	p, d, _ := setupBuckets(t)
+	base, err := Traefik(p, d, Options{Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pin := range []map[string]string{{}, {"api": ""}, {"other": "http://1.2.3.4:1"}} {
+		out, err := Traefik(p, d, Options{Edge: "edge", Pin: pin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(out) != string(base) {
+			t.Fatalf("pin %v changed output:\n%s", pin, out)
+		}
+	}
+}

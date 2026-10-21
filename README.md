@@ -66,8 +66,32 @@ sudo cvctl project add oci://ghcr.io/<org>/<repo>-infra --env dev \
 ## project list
 
 `cvctl project list [--json]` reads each instance's `cvctl.env` and installed contract (no network,
-no docker) and prints its env, contract source, tracked tag, domains, data service modes and
+no docker) and prints its env, strategy, contract source, tracked tag, domains, data service modes and
 whether it is paused. An instance whose contract cannot be read is listed with the error.
+`cvctl status` shows the strategy too.
+
+## Deploy strategy
+
+`recreate` (default for dev) replaces containers in place: a few seconds of downtime per deploy.
+`blue-green` (default for prod) swaps the services that carry `cvctl.expose` without downtime.
+`project add --strategy recreate|blue-green` sets it explicitly (interactive or not; without the
+flag: prod gets `blue-green`, everything else `recreate`) and `cvctl set-strategy <instance>
+<strategy>` changes it later.
+
+Per exposed service, in contract order: compose scales it to 2 (the old container keeps running
+and a new one starts with the new config); the new container must pass its health check; Traefik's
+route is pinned to the new container only; the old one is stopped with its `stop_grace_period`
+(10s by default) and removed; the route goes back to the service alias, which now resolves only to
+the new container. If the new container is unhealthy it is removed and the old one never stops.
+Workers, data services and non-exposed apps are recreated as in `recreate`. The first deploy of an
+instance is a plain `up`. `cvctl history` lists the services swapped blue-green per deploy.
+
+Constraints:
+
+- Memory of a swapped service doubles while both containers run.
+- Migrations run before the swap, so they must be backward compatible with the old version:
+  expand in one deploy, contract in a later one.
+- Websocket connections on the old container close when it stops (clients must reconnect).
 
 ## Timeouts
 

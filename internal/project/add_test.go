@@ -644,21 +644,14 @@ vars:
 	}
 }
 
-func TestAddBlueGreenUnsupported(t *testing.T) {
+func TestAddStrategyUnknown(t *testing.T) {
 	e := &Env{}
 	_, err := Add(context.Background(), e, "git@github.com:myorg/my-service-infra.git", AddOptions{
-		Strategy: "blue-green",
+		Strategy: "rolling",
 	})
-	if err == nil {
-		t.Fatal("expected error for blue-green strategy, got nil")
-	}
-
 	var oe *output.Error
-	if !errors.As(err, &oe) {
-		t.Fatalf("expected output.Error, got %T: %v", err, err)
-	}
-	if oe.Code != "E_STRATEGY_UNSUPPORTED" {
-		t.Errorf("expected code E_STRATEGY_UNSUPPORTED, got %s", oe.Code)
+	if !errors.As(err, &oe) || oe.Code != "E_STRATEGY_UNSUPPORTED" {
+		t.Fatalf("expected E_STRATEGY_UNSUPPORTED, got %v", err)
 	}
 }
 
@@ -2048,6 +2041,9 @@ func TestAddExtNonInteractiveHappyPath(t *testing.T) {
 		t.Fatalf("Add failed: %v", err)
 	}
 
+	if res.Decisions.Strategy != "blue-green" {
+		t.Errorf("prod default strategy = %q, want blue-green", res.Decisions.Strategy)
+	}
 	sd := res.Decisions.Services["media"]
 	if sd.Mode != "external" {
 		t.Fatalf("expected Mode external, got %q", sd.Mode)
@@ -2687,5 +2683,53 @@ CVCTL_DOMAIN_MEDIA=media.example.com
 	}
 	if !bytes.Equal(beforeBytes, afterBytes) {
 		t.Fatalf("expected cvctl.env to remain byte-identical, before:\n%s\nafter:\n%s", string(beforeBytes), string(afterBytes))
+	}
+}
+
+func TestAddStrategyDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, strategy, want string
+	}{
+		{"dev default", "dev", "", "recreate"},
+		{"prod default", "prod", "", "blue-green"},
+		{"prod explicit recreate", "prod", "recreate", "recreate"},
+		{"dev explicit blue-green", "dev", "blue-green", "blue-green"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			infraDir := filepath.Join(tmp, "infra")
+			writeTestInfra(t, infraDir, testS3BucketsCompose, testS3BucketsSpec)
+			stub := &stubRepo{infraSource: infraDir}
+			e := &Env{
+				FS:         sys.NewOSFS(),
+				DeployRoot: tmp,
+				StateRoot:  filepath.Join(tmp, "state"),
+				Catalog:    testCatalog(t),
+				RepoFactory: func(dir, _ string) RepoLike {
+					r := *stub
+					r.dir = dir
+					return &r
+				},
+			}
+			res, err := Add(context.Background(), e, "git@github.com:myorg/my-service-infra.git", AddOptions{
+				Env:      tc.env,
+				Strategy: tc.strategy,
+				Domains:  map[string]string{"web": "web.example.com"},
+				Ext: map[string]map[string]string{
+					"media": {
+						"endpoint":          "https://s3.amazonaws.com",
+						"access_key":        "ak",
+						"secret_key":        "sk",
+						"public_url_photos": "https://cdn.example.com/photos",
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Add failed: %v", err)
+			}
+			if res.Decisions.Strategy != tc.want {
+				t.Errorf("strategy = %q, want %q", res.Decisions.Strategy, tc.want)
+			}
+		})
 	}
 }

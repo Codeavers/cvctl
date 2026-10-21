@@ -3092,3 +3092,47 @@ func TestDeployProbeExternalBucketsRedactsSecrets(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteRoutePinThenUnpin(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := contract.Load(rig.infraDir, cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := instance.Read(filepath.Join(rig.instDir, "cvctl.env"), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(rig.deployer.traefikDir(), "demo-dev.yml")
+
+	if err := rig.deployer.WriteRoute(p, dec, nil); err != nil {
+		t.Fatal(err)
+	}
+	alias, _ := os.ReadFile(path)
+	if !strings.Contains(string(alias), "http://demo-dev--api:") {
+		t.Fatalf("alias route missing:\n%s", alias)
+	}
+
+	if err := rig.deployer.WriteRoute(p, dec, map[string]string{"api": "http://10.0.0.7:3000"}); err != nil {
+		t.Fatal(err)
+	}
+	pinned, _ := os.ReadFile(path)
+	if !strings.Contains(string(pinned), "url: http://10.0.0.7:3000") || strings.Contains(string(pinned), "http://demo-dev--api:") {
+		t.Fatalf("pinned route wrong:\n%s", pinned)
+	}
+
+	if err := rig.deployer.WriteRoute(p, dec, nil); err != nil {
+		t.Fatal(err)
+	}
+	back, _ := os.ReadFile(path)
+	if string(back) != string(alias) {
+		t.Fatalf("unpin did not restore alias form:\n%s", back)
+	}
+	if m, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".*.tmp-*")); len(m) != 0 {
+		t.Fatalf("leftover temp files: %v", m)
+	}
+}
