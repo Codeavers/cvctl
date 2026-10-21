@@ -226,6 +226,21 @@ func (d *Deployer) renderTraefik(p *contract.Project, dec *instance.Decisions, o
 	return render.Traefik(p, dec, o)
 }
 
+// WriteRoute re-renders the instance's Traefik route with pin applied and
+// writes it atomically (sys.FS.WriteFile is temp file + rename). A nil pin
+// restores the alias form; no exposed service removes the file.
+func (d *Deployer) WriteRoute(p *contract.Project, dec *instance.Decisions, pin map[string]string) error {
+	b, err := d.renderTraefik(p, dec, render.Options{Edge: d.edge(), Pin: pin})
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(d.traefikDir(), dec.Instance+".yml")
+	if b == nil {
+		return d.fs().Remove(path)
+	}
+	return d.fs().WriteFile(path, b, 0o640, deployOwner)
+}
+
 func (d *Deployer) edge() string {
 	if d.Host != nil && d.Host.EdgeMode != "" {
 		return d.Host.EdgeMode
