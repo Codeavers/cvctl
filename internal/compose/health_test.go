@@ -459,3 +459,66 @@ func TestHealthNonRunningContainerFails(t *testing.T) {
 		t.Fatalf("expected non-running failure, got %v", err)
 	}
 }
+
+func TestCheckContainerIgnoresOtherContainer(t *testing.T) {
+	var oldHits, newHits atomic.Int32
+	oldSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		oldHits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer oldSrv.Close()
+	newSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		newHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer newSrv.Close()
+	u, _ := url.Parse(newSrv.URL)
+	port, _ := strconv.Atoi(u.Port())
+
+	runner := &systest.Runner{}
+	p := Project{Run: runner, Instance: "demo-dev", Dir: "/srv/deploy/demo-dev"}
+	// The old container is stopped and never inspected: it must not matter.
+	runner.On(p.Cmd("ps", "--format", "json").String(), sys.Result{
+		Stdout: []byte(`[{"ID":"aaa","Service":"api","Name":"demo-dev-api-1","State":"exited"},{"ID":"bbb","Service":"api","Name":"demo-dev-api-2","State":"running"}]`),
+	})
+	runner.On("docker inspect -f {{json .NetworkSettings.Networks}} bbb", sys.Result{Stdout: []byte(`{"demo-dev_app":{"IPAddress":"127.0.0.1"}}`)})
+	runner.On("docker inspect -f {{.RestartCount}} bbb", sys.Result{Stdout: []byte("0\n")})
+	runner.On("docker inspect -f {{.RestartCount}} demo-dev-api-2", sys.Result{Stdout: []byte("0\n")})
+
+	ctx := WithHealthInterval(context.Background(), 5*time.Millisecond)
+	h := contract.HealthSpec{Service: "api", HTTP: "/health", Timeout: 500 * time.Millisecond}
+	if err := CheckContainer(ctx, runner, p, h, port, newSrv.Client(), "bbb", true); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if newHits.Load() == 0 || oldHits.Load() != 0 {
+		t.Fatalf("hits new=%d old=%d", newHits.Load(), oldHits.Load())
+	}
+	for _, c := range runner.Calls {
+		for _, a := range c.Args {
+			if a == "aaa" || a == "demo-dev-api-1" {
+				t.Fatalf("old container was touched: %v", c.Args)
+			}
+		}
+	}
+}
+
+func TestCheckContainerNoHTTPAndErrors(t *testing.T) {
+	runner := &systest.Runner{}
+	p := Project{Run: runner, Instance: "demo-dev", Dir: "/srv/deploy/demo-dev"}
+	runner.On(p.Cmd("ps", "--format", "json").String(), sys.Result{
+		Stdout: []byte(`[{"ID":"aaa","Service":"web","Name":"demo-dev-web-1","State":"running"},{"ID":"bbb","Service":"web","Name":"demo-dev-web-2","State":"restarting"}]`),
+	})
+	runner.On("docker inspect -f {{.RestartCount}} demo-dev-web-1", sys.Result{Stdout: []byte("0\n")})
+	ctx := WithHealthInterval(context.Background(), time.Millisecond)
+	h := contract.HealthSpec{Service: "api", HTTP: "/health"}
+
+	if err := CheckContainer(ctx, runner, p, h, 80, nil, "aaa", false); err != nil {
+		t.Fatalf("running container without http: %v", err)
+	}
+	for _, id := range []string{"bbb", "zzz", ""} {
+		err := CheckContainer(ctx, runner, p, h, 80, nil, id, false)
+		if oe, ok := err.(*output.Error); !ok || oe.Code != "E_HEALTH_FAILED" {
+			t.Fatalf("id %q: expected E_HEALTH_FAILED, got %v", id, err)
+		}
+	}
+}

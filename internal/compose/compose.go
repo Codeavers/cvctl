@@ -25,11 +25,51 @@ type Project struct {
 }
 
 type Container struct {
-	Service string `json:"Service"`
-	Name    string `json:"Name"`
-	State   string `json:"State"`
-	Health  string `json:"Health"`
-	Image   string `json:"Image"`
+	ID      string    `json:"ID"`
+	Service string    `json:"Service"`
+	Name    string    `json:"Name"`
+	State   string    `json:"State"`
+	Health  string    `json:"Health"`
+	Image   string    `json:"Image"`
+	Created time.Time `json:"-"`
+}
+
+// UnmarshalJSON reads Created from compose ps, which prints a unix timestamp
+// in current releases and an RFC 3339 string in some older ones.
+func (c *Container) UnmarshalJSON(data []byte) error {
+	type plain Container
+	aux := struct {
+		*plain
+		Created json.RawMessage `json:"Created"`
+	}{plain: (*plain)(c)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	c.Created = time.Time{}
+	raw := strings.TrimSpace(string(aux.Created))
+	switch {
+	case raw == "" || raw == "null":
+	case strings.HasPrefix(raw, `"`):
+		var s string
+		if err := json.Unmarshal(aux.Created, &s); err != nil {
+			return err
+		}
+		if s == "" {
+			break
+		}
+		t, err := time.Parse(time.RFC3339Nano, s)
+		if err != nil {
+			return fmt.Errorf("cannot parse container Created %q: %w", s, err)
+		}
+		c.Created = t
+	default:
+		var n int64
+		if err := json.Unmarshal(aux.Created, &n); err != nil {
+			return err
+		}
+		c.Created = time.Unix(n, 0)
+	}
+	return nil
 }
 
 func (p Project) Cmd(args ...string) sys.Cmd {
@@ -142,7 +182,11 @@ func (p Project) Up(ctx context.Context) error {
 }
 
 func (p Project) PS(ctx context.Context) ([]Container, error) {
-	cmd := p.Cmd("ps", "--format", "json")
+	return p.ps(ctx)
+}
+
+func (p Project) ps(ctx context.Context, services ...string) ([]Container, error) {
+	cmd := p.Cmd(append([]string{"ps", "--format", "json"}, services...)...)
 	res, err := p.Run.Run(ctx, cmd)
 	if err != nil || res.ExitCode != 0 {
 		return nil, p.composeErr(cmd, res, err)
@@ -199,4 +243,76 @@ func (p Project) Logs(ctx context.Context, service string, tail int) (string, er
 		out = string(res.Stderr)
 	}
 	return out, nil
+}
+
+// UpServices runs `up -d` for the given services only. An empty list is a
+// no-op: compose would otherwise start every service.
+func (p Project) UpServices(ctx context.Context, services []string, removeOrphans bool) error {
+	if len(services) == 0 {
+		return nil
+	}
+	args := []string{"up", "-d"}
+	if removeOrphans {
+		args = append(args, "--remove-orphans")
+	}
+	cmd := p.Cmd(append(args, services...)...)
+	res, err := p.Run.Run(ctx, cmd)
+	if err != nil || res.ExitCode != 0 {
+		return p.composeErr(cmd, res, err)
+	}
+	return nil
+}
+
+// ScaleNoRecreate scales svc to n without touching its dependencies or
+// recreating the containers that already run: compose keeps the old ones and
+// starts new ones from the current config.
+func (p Project) ScaleNoRecreate(ctx context.Context, svc string, n int) error {
+	cmd := p.Cmd("up", "-d", "--no-deps", "--no-recreate", "--scale", svc+"="+strconv.Itoa(n), svc)
+	res, err := p.Run.Run(ctx, cmd)
+	if err != nil || res.ExitCode != 0 {
+		return p.composeErr(cmd, res, err)
+	}
+	return nil
+}
+
+// Containers lists the containers of one service.
+func (p Project) Containers(ctx context.Context, svc string) ([]Container, error) {
+	return p.ps(ctx, svc)
+}
+
+func dockerCmd(args ...string) sys.Cmd {
+	return sys.Cmd{Name: "docker", Args: args, Env: []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"}}
+}
+
+// IP returns the address of container id on the named network.
+func (p Project) IP(ctx context.Context, id, network string) (string, error) {
+	return containerIP(ctx, p.Run, id, network, "E_COMPOSE_FAILED", "check docker daemon status")
+}
+
+// StopRemove stops the container, giving it grace to finish in-flight work,
+// and removes it.
+func (p Project) StopRemove(ctx context.Context, id string, grace time.Duration) error {
+	secs := int((grace + time.Second - 1) / time.Second)
+	if secs < 0 {
+		secs = 0
+	}
+	stop := dockerCmd("stop", "-t", strconv.Itoa(secs), id)
+	res, err := p.Run.Run(ctx, stop)
+	if err != nil || res.ExitCode != 0 {
+		return sys.CmdErr("E_COMPOSE_FAILED", stop, res, err, "check docker daemon status")
+	}
+	return p.remove(ctx, dockerCmd("rm", id))
+}
+
+// RemoveForce kills and removes the container.
+func (p Project) RemoveForce(ctx context.Context, id string) error {
+	return p.remove(ctx, dockerCmd("rm", "-f", id))
+}
+
+func (p Project) remove(ctx context.Context, cmd sys.Cmd) error {
+	res, err := p.Run.Run(ctx, cmd)
+	if err != nil || res.ExitCode != 0 {
+		return sys.CmdErr("E_COMPOSE_FAILED", cmd, res, err, "check docker daemon status")
+	}
+	return nil
 }

@@ -359,3 +359,87 @@ func TestUpDataWaitTimeoutArgv(t *testing.T) {
 		t.Fatalf("UpData: %v", err)
 	}
 }
+
+func TestContainersParsesCreated(t *testing.T) {
+	runner := &systest.Runner{}
+	p := Project{Run: runner, Instance: "demo-dev", Dir: "/srv/deploy/demo-dev"}
+	cmd := p.Cmd("ps", "--format", "json", "api")
+
+	runner.On(cmd.String(), sys.Result{Stdout: []byte(`[{"ID":"aaa","Service":"api","Name":"demo-dev-api-1","State":"running","Created":1700000000}]`)})
+	got, err := p.Containers(context.Background(), "api")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("one container: %v %+v", err, got)
+	}
+	if got[0].ID != "aaa" || got[0].State != "running" || !got[0].Created.Equal(time.Unix(1700000000, 0)) {
+		t.Fatalf("unexpected: %+v", got[0])
+	}
+
+	runner.On(cmd.String(), sys.Result{Stdout: []byte(
+		`{"ID":"aaa","Name":"demo-dev-api-1","State":"running","Created":1700000000}` + "\n" +
+			`{"ID":"bbb","Name":"demo-dev-api-2","State":"running","Created":"2023-11-14T22:14:30Z"}` + "\n")})
+	got, err = p.Containers(context.Background(), "api")
+	if err != nil || len(got) != 2 {
+		t.Fatalf("two containers: %v %+v", err, got)
+	}
+	if !got[1].Created.After(got[0].Created) || got[1].ID != "bbb" {
+		t.Fatalf("unexpected: %+v", got)
+	}
+}
+
+func TestBlueGreenPrimitivesArgv(t *testing.T) {
+	runner := &systest.Runner{}
+	p := Project{Run: runner, Instance: "demo-dev", Dir: "/srv/deploy/demo-dev"}
+	ctx := context.Background()
+	env := []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"}
+
+	runner.On(p.Cmd("up", "-d", "--remove-orphans", "db", "worker").String(), sys.Result{})
+	runner.On(p.Cmd("up", "-d", "db").String(), sys.Result{})
+	runner.On(p.Cmd("up", "-d", "--no-deps", "--no-recreate", "--scale", "api=2", "api").String(), sys.Result{})
+	runner.On("docker inspect -f {{json .NetworkSettings.Networks}} bbb", sys.Result{Stdout: []byte(`{"demo-dev_edge":{"IPAddress":"172.20.0.5"},"demo-dev_app":{"IPAddress":"172.21.0.5"}}`)})
+	runner.On("docker stop -t 10 aaa", sys.Result{})
+	runner.On("docker rm aaa", sys.Result{})
+	runner.On("docker rm -f bbb", sys.Result{})
+
+	if err := p.UpServices(ctx, []string{"db", "worker"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.UpServices(ctx, []string{"db"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.UpServices(ctx, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ScaleNoRecreate(ctx, "api", 2); err != nil {
+		t.Fatal(err)
+	}
+	ip, err := p.IP(ctx, "bbb", "demo-dev_edge")
+	if err != nil || ip != "172.20.0.5" {
+		t.Fatalf("ip = %q, %v", ip, err)
+	}
+	if _, err := p.IP(ctx, "bbb", "demo-dev_other"); err == nil {
+		t.Fatal("expected error for missing network")
+	}
+	if err := p.StopRemove(ctx, "aaa", 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.RemoveForce(ctx, "bbb"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(runner.Calls) != 8 {
+		t.Fatalf("calls = %d, want 8 (empty UpServices runs nothing)", len(runner.Calls))
+	}
+	for _, c := range runner.Calls {
+		if c.Name == "docker" && c.Args[0] != "compose" {
+			if len(c.Env) != 1 || c.Env[0] != env[0] {
+				t.Fatalf("missing DOCKER_CONFIG on %v", c.Args)
+			}
+		}
+	}
+
+	runner.On("docker stop -t 10 aaa", sys.Result{ExitCode: 1})
+	err = p.StopRemove(ctx, "aaa", 10*time.Second)
+	if oe, ok := err.(*output.Error); !ok || oe.Code != "E_COMPOSE_FAILED" {
+		t.Fatalf("expected E_COMPOSE_FAILED, got %v", err)
+	}
+}
