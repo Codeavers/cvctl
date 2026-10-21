@@ -716,8 +716,8 @@ func TestRootPasswordNeverReachesServiceVarsOrAppEnv(t *testing.T) {
 	}
 }
 
-func TestOverrideBucketsBackedUp(t *testing.T) {
-	p, d, cat := setupBuckets(t)
+func bucketNets(t *testing.T, p *contract.Project, d *instance.Decisions, cat kinds.Catalog) (map[string]any, map[string]any) {
+	t.Helper()
 	out, err := Override(p, d, cat, Options{InstanceDir: "/srv/inst/proj-dev", Edge: "edge", Backup: testBackup()})
 	if err != nil {
 		t.Fatal(err)
@@ -731,17 +731,34 @@ func TestOverrideBucketsBackedUp(t *testing.T) {
 	if err := yaml.Unmarshal(out, &doc); err != nil {
 		t.Fatal(err)
 	}
-	mediaNets := doc.Services["media"].Networks
-	if _, ok := mediaNets["data"]; !ok {
-		t.Fatal("media missing data network")
+	return doc.Services["media"].Networks, doc.Networks
+}
+
+func TestOverrideBucketsNotBackedUpByDefault(t *testing.T) {
+	p, d, cat := setupBuckets(t)
+	mediaNets, _ := bucketNets(t, p, d, cat)
+	for _, n := range []string{"data", "edge"} {
+		if _, ok := mediaNets[n]; !ok {
+			t.Fatalf("media missing %s network", n)
+		}
 	}
-	if _, ok := mediaNets["edge"]; !ok {
-		t.Fatal("media missing edge network")
+	if _, ok := mediaNets["backup"]; ok {
+		t.Fatal("media joined the backup network without cvctl.backup: volume")
 	}
+}
+
+func TestOverrideBucketsBackedUpWhenOptedIn(t *testing.T) {
+	p, d, cat := setupBuckets(t)
+	for i := range p.Data {
+		if p.Data[i].Name == "media" {
+			p.Data[i].Backup = "volume"
+		}
+	}
+	mediaNets, nets := bucketNets(t, p, d, cat)
 	if _, ok := mediaNets["backup"]; !ok {
 		t.Fatal("media missing backup network")
 	}
-	if _, ok := doc.Networks["backup"]; !ok {
+	if _, ok := nets["backup"]; !ok {
 		t.Fatal("top level missing backup network")
 	}
 }

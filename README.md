@@ -175,6 +175,8 @@ bucket, plus `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` and `S3_REGION`.
   `--ext <service>.<field>=<value>`). Every deploy probes each bucket with the app keys and fetches
   the probe object anonymously from each public URL. Backups are the provider's job.
 
+- **Not backed up by default**: object storage (photos, uploads) is treated as disposable. A
+  contract that needs it backed up sets `cvctl.backup: volume` on the service (restic, daily).
 - **Upgrading** an instance that already runs a local `s3` service: its deploys fail with
   `E_DECISION_MISSING` until `cvctl project update <instance>` generates the app keys; from then on
   the app holds scoped keys and cannot create buckets itself. Without declared buckets the bucket is
