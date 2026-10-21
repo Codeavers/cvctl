@@ -999,6 +999,8 @@ func TestEnvPackExcludesRegeneratedEnvFiles(t *testing.T) {
 	_ = g.fs.WriteFile(instDir+"/backup-db.env", []byte("BACKUP_DB=secret\n"), 0o600, sys.Owner{})
 	_ = g.fs.WriteFile(instDir+"/restic-files.env", []byte("RESTIC_FILES=secret\n"), 0o600, sys.Owner{})
 	_ = g.fs.WriteFile(instDir+"/restic-env.env", []byte("RESTIC_ENV=secret\n"), 0o600, sys.Owner{})
+	_ = g.fs.WriteFile("/var/lib/cvctl/app-prod/deploy_key", []byte("KEY\n"), 0o600, sys.Owner{})
+	_ = g.fs.WriteFile("/var/lib/cvctl/app-prod/deploy_key.pub", []byte("PUB\n"), 0o644, sys.Owner{})
 
 	if _, err := g.r.BackupNow(context.Background(), "app-prod", "env"); err != nil {
 		t.Fatal(err)
@@ -1024,7 +1026,7 @@ func TestEnvPackExcludesRegeneratedEnvFiles(t *testing.T) {
 		paths[filepath.Base(e.Path)] = true
 	}
 
-	for _, expected := range []string{"cvctl.env", "app.env"} {
+	for _, expected := range []string{"cvctl.env", "app.env", "deploy_key", "deploy_key.pub"} {
 		if !paths[expected] {
 			t.Fatalf("expected file %q in env.tar, but missing. Paths: %v", expected, paths)
 		}

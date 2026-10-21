@@ -394,14 +394,16 @@ func TestCollectInstance(t *testing.T) {
 		t.Fatalf("unexpected warnings: %v", warns)
 	}
 	// seed has app.env, backup-db.env, cvctl.env, docker-compose.yml (ignored),
-	// and deploy keys under /var/lib/cvctl (not under /srv/deploy).
-	if len(entries) != 3 {
-		t.Fatalf("want 3 instance entries, got %d", len(entries))
-	}
+	// and the deploy keys under /var/lib/cvctl.
 	want := []string{
 		"/srv/deploy/shop-prod/app.env",
 		"/srv/deploy/shop-prod/backup-db.env",
 		"/srv/deploy/shop-prod/cvctl.env",
+		"/var/lib/cvctl/shop-prod/deploy_key",
+		"/var/lib/cvctl/shop-prod/deploy_key.pub",
+	}
+	if len(entries) != len(want) {
+		t.Fatalf("want %d instance entries, got %d: %v", len(want), len(entries), entries)
 	}
 	for i, w := range want {
 		if entries[i].Path != w {
@@ -575,8 +577,11 @@ func TestPartialBundleRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("instance-only restore: %v", err)
 	}
-	if len(restoredInst) != 3 {
-		t.Fatalf("want 3 restored instance files, got %d", len(restoredInst))
+	if len(restoredInst) != 5 {
+		t.Fatalf("want 5 restored instance files (3 env, 2 deploy key), got %d", len(restoredInst))
+	}
+	if _, err := dstInst.Stat("/var/lib/cvctl/shop-prod/deploy_key"); err != nil {
+		t.Errorf("deploy_key missing: %v", err)
 	}
 	fi, err := dstInst.Stat("/srv/deploy/shop-prod")
 	if err != nil || !fi.IsDir || fi.User != "deployer" || fi.Group != "deploy" {

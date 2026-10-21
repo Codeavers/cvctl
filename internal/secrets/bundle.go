@@ -105,8 +105,8 @@ func CollectHost(fsys sys.FS, root string) ([]Entry, []string, error) {
 	return c.entries, c.warns, nil
 }
 
-// CollectInstance gathers only the files under /srv/deploy/<inst>/ that Collect
-// would include.
+// CollectInstance gathers the files of one instance that Collect would include:
+// those under /srv/deploy/<inst>/ and its deploy key under /var/lib/cvctl/<inst>/.
 func CollectInstance(fsys sys.FS, root, inst string) ([]Entry, []string, error) {
 	if !instRe.MatchString(inst) {
 		return nil, nil, &output.Error{
@@ -148,6 +148,10 @@ func CollectInstance(fsys sys.FS, root, inst string) ([]Entry, []string, error) 
 	}
 	c := collector{fsys: fsys, root: r}
 	c.dirFiles(instDir, instFileRe.MatchString)
+	// The deploy key lives under the state dir, not the deploy dir; restore needs it.
+	for _, name := range []string{"deploy_key", "deploy_key.pub"} {
+		c.file(path.Join(stateDir, inst, name))
+	}
 	if c.err != nil {
 		return nil, c.warns, c.err
 	}
