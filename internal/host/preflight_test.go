@@ -18,7 +18,7 @@ func preflightEnv(osrelease string, euid int) *Env {
 	return &Env{FS: fs, EUID: euid}
 }
 
-const ubuntu2404 = "NAME=\"Ubuntu\"\nID=ubuntu\nVERSION_ID=\"24.04\"\n"
+const ubuntu2404 = "NAME=\"Ubuntu\"\nID=ubuntu\nVERSION_ID=\"24.04\"\nVERSION_CODENAME=noble\n"
 
 func code(t *testing.T, err error) string {
 	t.Helper()
@@ -39,8 +39,16 @@ func TestPreflightOK(t *testing.T) {
 	}
 }
 
+func TestPreflightNewerReleases(t *testing.T) {
+	for _, rel := range []string{"ID=ubuntu\nVERSION_ID=\"25.10\"\nVERSION_CODENAME=questing\n", "ID=ubuntu\nVERSION_ID=\"26.04\"\nVERSION_CODENAME=resolute\n"} {
+		if _, err := (PreflightStep{}).Check(context.Background(), preflightEnv(rel, 0)); err != nil {
+			t.Fatalf("%q: %v", rel, err)
+		}
+	}
+}
+
 func TestPreflightNotUbuntu(t *testing.T) {
-	for _, rel := range []string{"ID=debian\nVERSION_ID=\"12\"\n", "ID=ubuntu\nVERSION_ID=\"22.04\"\n", ""} {
+	for _, rel := range []string{"ID=debian\nVERSION_ID=\"12\"\n", "ID=ubuntu\nVERSION_ID=\"22.04\"\nVERSION_CODENAME=jammy\n", "ID=ubuntu\nVERSION_ID=\"26.04\"\n", ""} {
 		_, err := PreflightStep{}.Check(context.Background(), preflightEnv(rel, 0))
 		if c := code(t, err); c != "E_HOST_UNSUPPORTED" {
 			t.Fatalf("%q: %s", rel, c)
