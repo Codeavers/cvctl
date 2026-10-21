@@ -183,6 +183,18 @@ func (PackagesStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		// A release newer than Docker's repository fails apt-get update with an unclear
+		// message; check the suite first.
+		release := sys.Cmd{Name: "curl", Args: []string{"-fsSI", "https://download.docker.com/linux/ubuntu/dists/" + codename + "/Release"}}
+		if rr, err := e.Run.Run(ctx, release); err != nil {
+			return "", err
+		} else if rr.ExitCode != 0 {
+			return "", &output.Error{
+				Code:    "E_DOCKER_REPO",
+				Message: fmt.Sprintf("download.docker.com has no repository for Ubuntu %q", codename),
+				Hint:    "Docker publishes new Ubuntu releases a few weeks after launch; install Docker Engine 28+ by hand or retry later",
+			}
+		}
 
 		dockerListContent := fmt.Sprintf("deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n", arch, codename)
 		if err := e.FS.MkdirAll("/etc/apt/sources.list.d", 0o755, sys.Owner{User: "root", Group: "root"}); err != nil {

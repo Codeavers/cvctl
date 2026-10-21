@@ -50,7 +50,7 @@ var testEUID = 0
 func stubInit(t *testing.T, fs *systest.FS, p hostcfg.Prompter, interactive bool, steps ...host.Step) {
 	t.Helper()
 	if _, err := fs.ReadFile("/etc/os-release"); err != nil {
-		_ = fs.WriteFile("/etc/os-release", []byte("ID=ubuntu\nVERSION_ID=\"24.04\"\n"), 0o644, sys.Owner{User: "root", Group: "root"})
+		_ = fs.WriteFile("/etc/os-release", []byte("ID=ubuntu\nVERSION_ID=\"24.04\"\nVERSION_CODENAME=noble\n"), 0o644, sys.Owner{User: "root", Group: "root"})
 	}
 	oldEnv, oldSteps, oldLock := newInitEnv, initSteps, sys.Lock
 	t.Cleanup(func() { newInitEnv, initSteps, sys.Lock = oldEnv, oldSteps, oldLock })
@@ -200,7 +200,7 @@ func (pendPlanStep) Apply(context.Context, *host.Env, host.Plan) (string, error)
 
 func TestConfirmSSHCommand(t *testing.T) {
 	fs := systest.NewFS()
-	_ = fs.WriteFile("/etc/os-release", []byte("ID=ubuntu\nVERSION_ID=\"24.04\"\n"), 0o644, sys.Owner{User: "root", Group: "root"})
+	_ = fs.WriteFile("/etc/os-release", []byte("ID=ubuntu\nVERSION_ID=\"24.04\"\nVERSION_CODENAME=noble\n"), 0o644, sys.Owner{User: "root", Group: "root"})
 	_ = fs.WriteFile("/etc/ssh/sshd_config.d/00-cvctl.conf", []byte("PasswordAuthentication no\n"), 0o644, sys.Owner{User: "root", Group: "root"})
 	runner := &systest.Runner{}
 	runner.On("systemctl stop cvctl-ssh-revert.timer cvctl-ssh-revert.service", sys.Result{ExitCode: 0})

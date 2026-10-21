@@ -64,6 +64,7 @@ func TestDockerInstallWhenMissing(t *testing.T) {
 	runner.On("install -m 0755 -d /etc/apt/keyrings", sys.Result{ExitCode: 0})
 	runner.On("curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc", sys.Result{ExitCode: 0})
 	runner.On("dpkg --print-architecture", sys.Result{Stdout: []byte("amd64\n"), ExitCode: 0})
+	runner.On("curl -fsSI https://download.docker.com/linux/ubuntu/dists/noble/Release", sys.Result{ExitCode: 0})
 	runner.On("apt-get update", sys.Result{ExitCode: 0})
 	runner.On("apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin", sys.Result{ExitCode: 0})
 
@@ -90,6 +91,7 @@ func TestDockerInstallWhenMissing(t *testing.T) {
 		"install -m 0755 -d /etc/apt/keyrings",
 		"curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc",
 		"dpkg --print-architecture",
+		"curl -fsSI https://download.docker.com/linux/ubuntu/dists/noble/Release",
 		"apt-get update",
 		"apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
 	}
@@ -274,6 +276,7 @@ func TestPackagesInstallBaseBeforeDockerRepo(t *testing.T) {
 	runner.On("install -m 0755 -d /etc/apt/keyrings", sys.Result{ExitCode: 0})
 	runner.On("curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc", sys.Result{ExitCode: 0})
 	runner.On("dpkg --print-architecture", sys.Result{Stdout: []byte("amd64\n"), ExitCode: 0})
+	runner.On("curl -fsSI https://download.docker.com/linux/ubuntu/dists/noble/Release", sys.Result{ExitCode: 0})
 	runner.On("apt-get update", sys.Result{ExitCode: 0})
 	runner.On("apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin", sys.Result{ExitCode: 0})
 
@@ -416,11 +419,12 @@ func TestComposeVersionParsing(t *testing.T) {
 
 func TestDockerRepoUsesHostCodename(t *testing.T) {
 	env, runner, fs := newPackagesTestEnv()
-	_ = fs.WriteFile("/etc/os-release", []byte("ID=ubuntu\nVERSION_ID=\"26.04\"\n"), 0o644, sys.Owner{User: "root", Group: "root"})
+	_ = fs.WriteFile("/etc/os-release", []byte("ID=ubuntu\nVERSION_ID=\"26.04\"\nVERSION_CODENAME=resolute\n"), 0o644, sys.Owner{User: "root", Group: "root"})
 	markAllInstalled(runner)
 	runner.On("install -m 0755 -d /etc/apt/keyrings", sys.Result{})
 	runner.On("curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc", sys.Result{})
 	runner.On("dpkg --print-architecture", sys.Result{Stdout: []byte("arm64\n")})
+	runner.On("curl -fsSI https://download.docker.com/linux/ubuntu/dists/resolute/Release", sys.Result{})
 	runner.On("apt-get update", sys.Result{})
 	runner.On("apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin", sys.Result{})
 
@@ -439,5 +443,28 @@ func TestDockerRepoUsesHostCodename(t *testing.T) {
 	want := "deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu resolute stable\n"
 	if string(data) != want {
 		t.Fatalf("docker.list = %q, want %q", data, want)
+	}
+}
+
+func TestDockerRepoMissingForCodename(t *testing.T) {
+	env, runner, fs := newPackagesTestEnv()
+	_ = fs.WriteFile("/etc/os-release", []byte("ID=ubuntu\nVERSION_ID=\"28.10\"\nVERSION_CODENAME=zesty\n"), 0o644, sys.Owner{User: "root", Group: "root"})
+	markAllInstalled(runner)
+	runner.On("install -m 0755 -d /etc/apt/keyrings", sys.Result{})
+	runner.On("curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc", sys.Result{})
+	runner.On("dpkg --print-architecture", sys.Result{Stdout: []byte("amd64\n")})
+	runner.On("curl -fsSI https://download.docker.com/linux/ubuntu/dists/zesty/Release", sys.Result{ExitCode: 22})
+
+	step := PackagesStep{}
+	plan, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = step.Apply(context.Background(), env, plan)
+	if c := code(t, err); c != "E_DOCKER_REPO" {
+		t.Fatalf("code %s", c)
+	}
+	if _, err := fs.ReadFile("/etc/apt/sources.list.d/docker.list"); err == nil {
+		t.Fatal("docker.list written for a missing repository")
 	}
 }
