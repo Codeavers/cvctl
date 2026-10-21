@@ -363,7 +363,7 @@ func TestUpDataWaitTimeoutArgv(t *testing.T) {
 func TestContainersParsesCreated(t *testing.T) {
 	runner := &systest.Runner{}
 	p := Project{Run: runner, Instance: "demo-dev", Dir: "/srv/deploy/demo-dev"}
-	cmd := p.Cmd("ps", "--format", "json", "api")
+	cmd := p.Cmd("ps", "-a", "--format", "json", "api")
 
 	runner.On(cmd.String(), sys.Result{Stdout: []byte(`[{"ID":"aaa","Service":"api","Name":"demo-dev-api-1","State":"running","Created":1700000000}]`)})
 	got, err := p.Containers(context.Background(), "api")

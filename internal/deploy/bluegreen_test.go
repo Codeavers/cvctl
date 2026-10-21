@@ -12,11 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/compose-spec/compose-go/v2/types"
+
 	"github.com/codeavers/cvctl/internal/compose"
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/state"
+	"github.com/codeavers/cvctl/internal/sys"
 )
 
 var _ SwapAPI = (*compose.Project)(nil)
@@ -36,8 +39,12 @@ type swapState struct {
 	failCheck  error
 	failScale  error
 	failStop   error
-	edgeIP     string
-	grace      time.Duration
+	// failScaleCreates makes a failing scale leave its container behind.
+	failScaleCreates bool
+	// newState is the state of containers the scale creates; empty is running.
+	newState string
+	edgeIP   string
+	grace    time.Duration
 }
 
 func newSwapState(routePath string) *swapState {
@@ -72,15 +79,19 @@ func (s *swapCompose) UpServicesNoDeps(_ context.Context, services []string, orp
 
 func (s *swapCompose) ScaleNoRecreate(_ context.Context, svc string, n int) error {
 	s.rec(fmt.Sprintf("scale:%s=%d", svc, n))
-	if s.st.failScale != nil {
+	if s.st.failScale != nil && !s.st.failScaleCreates {
 		return s.st.failScale
+	}
+	state := s.st.newState
+	if state == "" {
+		state = "running"
 	}
 	s.st.nextID++
 	s.st.containers[svc] = append(s.st.containers[svc], compose.Container{
-		ID: fmt.Sprintf("new%d", s.st.nextID), Service: svc, State: "running",
+		ID: fmt.Sprintf("new%d", s.st.nextID), Service: svc, State: state,
 		Created: time.Date(2026, 10, 21, 12, 0, s.st.nextID, 0, time.UTC),
 	})
-	return nil
+	return s.st.failScale
 }
 
 func (s *swapCompose) Containers(_ context.Context, svc string) ([]compose.Container, error) {
@@ -282,6 +293,124 @@ func TestBlueGreenScaleFailureRemovesNew(t *testing.T) {
 	}
 }
 
+func TestBlueGreenScaleFailureAfterCreateRemovesNew(t *testing.T) {
+	rig, ss := blueGreenRig(t)
+	seedBGCurrent(t, rig)
+	ss.containers["api"] = []compose.Container{oldContainer("old1", 0)}
+	ss.failScale = errors.New("scale boom")
+	ss.failScaleCreates = true
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"})
+	if err != nil || res.Status != state.StatusFailed {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	assertOrder(t, rig.compose.calls, "scale:api=2", "rmforce:new1")
+	if len(ss.containers["api"]) != 1 || ss.containers["api"][0].ID != "old1" {
+		t.Fatalf("only the old container may remain: %v", ss.containers["api"])
+	}
+}
+
+func TestBlueGreenNewContainerNeverRunningIsRemoved(t *testing.T) {
+	rig, ss := blueGreenRig(t)
+	seedBGCurrent(t, rig)
+	ss.containers["api"] = []compose.Container{oldContainer("old1", 0)}
+	ss.newState = "exited"
+	ss.failCheck = errors.New("not running")
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"})
+	if err != nil || res.Status != state.StatusFailed {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	assertOrder(t, rig.compose.calls, "scale:api=2", "rmforce:new1")
+	if len(ss.containers["api"]) != 1 || ss.containers["api"][0].ID != "old1" {
+		t.Fatalf("old must be kept: %v", ss.containers["api"])
+	}
+}
+
+func TestBlueGreenNonRunningLeftoverRemovedBeforeScale(t *testing.T) {
+	rig, ss := blueGreenRig(t)
+	seedBGCurrent(t, rig)
+	stale := oldContainer("stale", 30)
+	stale.State = "exited"
+	ss.containers["api"] = []compose.Container{oldContainer("old1", 0), stale}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"})
+	if err != nil || res.Status != state.StatusOK {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	assertOrder(t, rig.compose.calls, "rmforce:stale", "scale:api=2", "stopremove:old1")
+}
+
+func TestBlueGreenConnectsTraefikBeforePin(t *testing.T) {
+	rig, ss := blueGreenRig(t)
+	rig.deployer.Run = &netRunner{log: rig.compose}
+	seedBGCurrent(t, rig)
+	ss.containers["api"] = []compose.Container{oldContainer("old1", 0)}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"})
+	if err != nil || res.Status != state.StatusOK {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	assertOrder(t, rig.compose.calls, "upservices-nodeps:main-db:orphans=true", "net:connect demo-dev_edge cvctl-traefik", "scale:api=2", "settle")
+}
+
+// routeFailFS fails the nth write of the route file.
+type routeFailFS struct {
+	sys.FS
+	path string
+	n    int
+	seen int
+}
+
+func (f *routeFailFS) WriteFile(path string, data []byte, mode os.FileMode, o sys.Owner) error {
+	if path == f.path {
+		f.seen++
+		if f.seen == f.n {
+			return errors.New("disk full")
+		}
+	}
+	return f.FS.WriteFile(path, data, mode, o)
+}
+
+func TestBlueGreenAliasRewriteFailureEndsInAliasViaRollback(t *testing.T) {
+	rig, ss := blueGreenRig(t)
+	seedBGCurrent(t, rig)
+	ss.containers["api"] = []compose.Container{oldContainer("old1", 0)}
+	// Writes: promote (1), pin (2), alias rewrite (3), rollback re-render (4).
+	rig.deployer.FS = &routeFailFS{FS: rig.deployer.FS, path: ss.routePath, n: 3}
+
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"})
+	if err != nil || res.Status != state.StatusFailed {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	r, _ := os.ReadFile(ss.routePath)
+	if !strings.Contains(string(r), "http://demo-dev--api:3000") || strings.Contains(string(r), "172.20.0.9") {
+		t.Fatalf("route must end in the alias form:\n%s", r)
+	}
+}
+
+func TestBlueGreenExcludesExternalDataFromFirstCall(t *testing.T) {
+	rig, _ := blueGreenRig(t)
+	p := &contract.Project{
+		Compose: &types.Project{},
+		Apps: []contract.AppService{
+			{Name: "api", Role: "app", ExposePort: 3000},
+			{Name: "worker", Role: "worker"},
+		},
+		Data: []contract.DataService{{Name: "ext-db"}, {Name: "local-db"}},
+	}
+	dec := &instance.Decisions{Strategy: "blue-green", Services: map[string]instance.ServiceDecision{
+		"ext-db": {Mode: "external"}, "local-db": {Mode: "local"},
+	}}
+	c := rig.deployer.Compose("demo-dev", "o", "e")
+	if _, err := rig.deployer.bringUp(context.Background(), "demo-dev", p, dec, c); err != nil {
+		t.Fatal(err)
+	}
+	if got := rig.compose.calls[0]; got != "upservices-nodeps:local-db,worker:orphans=true" {
+		t.Fatalf("first call = %q", got)
+	}
+}
+
 func TestBlueGreenFirstDeployUsesPlainUp(t *testing.T) {
 	rig, _ := blueGreenRig(t)
 
@@ -331,6 +460,10 @@ func TestBlueGreenStopFailureRestoresAlias(t *testing.T) {
 	r, _ := os.ReadFile(ss.routePath)
 	if strings.Contains(string(r), "172.20.0.9") {
 		t.Fatalf("route must be back to the alias form:\n%s", r)
+	}
+	assertOrder(t, rig.compose.calls, "stopremove:old1", "rmforce:new1")
+	if len(ss.containers["api"]) != 1 || ss.containers["api"][0].ID != "old1" {
+		t.Fatalf("old still running must be kept: %v", ss.containers["api"])
 	}
 }
 

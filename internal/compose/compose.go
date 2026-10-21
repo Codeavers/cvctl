@@ -182,11 +182,15 @@ func (p Project) Up(ctx context.Context) error {
 }
 
 func (p Project) PS(ctx context.Context) ([]Container, error) {
-	return p.ps(ctx)
+	return p.ps(ctx, false)
 }
 
-func (p Project) ps(ctx context.Context, services ...string) ([]Container, error) {
-	cmd := p.Cmd(append([]string{"ps", "--format", "json"}, services...)...)
+func (p Project) ps(ctx context.Context, all bool, services ...string) ([]Container, error) {
+	args := []string{"ps"}
+	if all {
+		args = append(args, "-a")
+	}
+	cmd := p.Cmd(append(append(args, "--format", "json"), services...)...)
 	res, err := p.Run.Run(ctx, cmd)
 	if err != nil || res.ExitCode != 0 {
 		return nil, p.composeErr(cmd, res, err)
@@ -288,9 +292,10 @@ func (p Project) ScaleNoRecreate(ctx context.Context, svc string, n int) error {
 	return nil
 }
 
-// Containers lists the containers of one service.
+// Containers lists the containers of one service in any state: created or
+// exited ones must stay visible so they can be removed.
 func (p Project) Containers(ctx context.Context, svc string) ([]Container, error) {
-	return p.ps(ctx, svc)
+	return p.ps(ctx, true, svc)
 }
 
 func dockerCmd(args ...string) sys.Cmd {

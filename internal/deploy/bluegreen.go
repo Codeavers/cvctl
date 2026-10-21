@@ -88,16 +88,28 @@ func (d *Deployer) swapBlueGreen(ctx context.Context, inst string, p *contract.P
 	for _, a := range exposed {
 		isExposed[a.Name] = true
 	}
+	// Only what the override renders: external data services have no entry in
+	// the compose project.
 	var others []string
-	for name := range p.Compose.Services {
-		if !isExposed[name] {
-			others = append(others, name)
+	for _, a := range p.Apps {
+		if !isExposed[a.Name] {
+			others = append(others, a.Name)
+		}
+	}
+	for _, ds := range p.Data {
+		if dec.Services[ds.Name].Mode != "external" {
+			others = append(others, ds.Name)
 		}
 	}
 	sort.Strings(others)
 	// --no-deps: depends_on must not start or recreate an exposed service
 	// before its swap. Data services were started by UpData already.
 	if err := c.UpServicesNoDeps(ctx, others, true); err != nil {
+		return nil, err
+	}
+
+	// Traefik has to reach the new container's edge IP before the first pin.
+	if err := d.connectTraefik(ctx, inst); err != nil {
 		return nil, err
 	}
 
@@ -132,8 +144,9 @@ func (d *Deployer) swapService(ctx context.Context, inst string, p *contract.Pro
 	if len(running) == 0 {
 		return false, c.UpServices(ctx, []string{a.Name}, false)
 	}
-	// The oldest container is the one st.Current describes; a crashed swap
-	// left the others behind.
+	// The oldest running container is the one st.Current describes. Every
+	// other one, whatever its state, is a leftover: a stale created or exited
+	// container would be reused by the next scale.
 	sort.SliceStable(running, func(i, j int) bool { return running[i].Created.Before(running[j].Created) })
 	old := running[0]
 	for _, ct := range cs {
@@ -175,7 +188,7 @@ func (d *Deployer) swapService(ctx context.Context, inst string, p *contract.Pro
 		}
 	}
 	if fresh == nil {
-		return false, fmt.Errorf("blue-green: compose created no new container for %s", a.Name)
+		return false, dropNew(fmt.Errorf("blue-green: compose created no new container for %s", a.Name))
 	}
 
 	httpCheck := a.Name == p.X.Health.Service
@@ -203,9 +216,23 @@ func (d *Deployer) swapService(ctx context.Context, inst string, p *contract.Pro
 	}
 	if err := c.StopRemove(ctx, old.ID, stopGrace(p, a.Name)); err != nil {
 		_ = d.WriteRoute(p, dec, nil)
+		// Once the old container is no longer running the new one is the only
+		// server and must stay.
+		if left, lerr := c.Containers(context.WithoutCancel(ctx), a.Name); lerr == nil && runningID(left, old.ID) {
+			return false, dropNew(err)
+		}
 		return true, err
 	}
 	return true, d.WriteRoute(p, dec, nil)
+}
+
+func runningID(cs []compose.Container, id string) bool {
+	for _, c := range cs {
+		if c.ID == id && strings.EqualFold(c.State, "running") {
+			return true
+		}
+	}
+	return false
 }
 
 func stopGrace(p *contract.Project, svc string) time.Duration {
