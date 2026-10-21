@@ -366,18 +366,22 @@ func newProjectRestoreCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "restore <instance>",
 		Short: "Rebuild an instance on a new host from off-site backups",
-		Long: `Rebuild an instance on a host that lost its data. Run cvctl secrets import first
-so cvctl.env and the deploy key are back, and make sure the host uses S3 storage.
+		Long: `Rebuild an instance on a host that lost its data. With off-site backups (CVCTL_STORAGE=s3),
+the host bundle (cvctl secrets export --host) plus cvctl project restore <inst>
+is enough: cvctl.env, app.env and the deploy key are recovered automatically from
+the latest env backup (or pick an older one with --env-snapshot).
 
 The infra repository is cloned, every data service is restored from its latest
 backup into a new volume, the instance is deployed, and wal-g services start a
 new backup generation so the restored timeline never mixes with the old one.`,
-		Example: `  cvctl secrets import bundle.age
+		Example: `  cvctl secrets import host-bundle.age
   cvctl project restore myapp-prod
+  cvctl project restore myapp-prod --env-snapshot abcdef01
   cvctl project restore myapp-prod --repo git@github.com:myorg/my-infra.git`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repo, _ := cmd.Flags().GetString("repo")
+			envSnapshot, _ := cmd.Flags().GetString("env-snapshot")
 			asJSON, _ := cmd.Flags().GetBool("json")
 			e, err := newProjectEnv(projectOpts{
 				NonInteractive: true,
@@ -387,7 +391,10 @@ new backup generation so the restored timeline never mixes with the old one.`,
 			if err != nil {
 				return err
 			}
-			res, err := project.Restore(cmd.Context(), e, args[0], project.RestoreOptions{Repo: repo})
+			res, err := project.Restore(cmd.Context(), e, args[0], project.RestoreOptions{
+				Repo:        repo,
+				EnvSnapshot: envSnapshot,
+			})
 			if err != nil {
 				if res == nil {
 					return err
@@ -419,6 +426,7 @@ new backup generation so the restored timeline never mixes with the old one.`,
 		},
 	}
 	cmd.Flags().String("repo", "", "infra repository URL or oci://host/repository (overrides CVCTL_INFRA_REF and CVCTL_INFRA_URL from cvctl.env)")
+	cmd.Flags().String("env-snapshot", "", "env backup snapshot ID to restore (default latest)")
 	return cmd
 }
 

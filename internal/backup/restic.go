@@ -357,11 +357,12 @@ func (r *Runner) EnvDump(ctx context.Context, inst, snapshot string) ([]secrets.
 		return nil, "", err
 	}
 	prefix := "/srv/deploy/" + inst + "/"
+	keyPrefix := "/var/lib/cvctl/" + inst + "/deploy_key"
 	for _, e := range entries {
-		if !strings.HasPrefix(e.Path, prefix) {
+		if !strings.HasPrefix(e.Path, prefix) && !strings.HasPrefix(e.Path, keyPrefix) {
 			return nil, "", &output.Error{
 				Code:    "E_BACKUP_ENV_FOREIGN",
-				Message: fmt.Sprintf("env backup entry %q is not under %s", e.Path, prefix),
+				Message: fmt.Sprintf("env backup entry %q is not under %s or %s", e.Path, prefix, keyPrefix),
 				Hint:    "the backup contains files from a different instance",
 			}
 		}

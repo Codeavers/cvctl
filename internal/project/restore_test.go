@@ -16,6 +16,7 @@ import (
 	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/render"
+	"github.com/codeavers/cvctl/internal/secrets"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/internal/sys/systest"
@@ -35,6 +36,31 @@ type fakeData struct {
 	used, withBase *int
 	gensErr        error
 	restoredGen    int
+
+	envEntries   []secrets.Entry
+	envSnapID    string
+	envDumpErr   error
+	envDumpCalls []string
+}
+
+func (f *fakeData) EnvDump(_ context.Context, inst, snapshot string) ([]secrets.Entry, string, error) {
+	*f.log = append(*f.log, "envdump "+inst+" "+snapshot)
+	f.envDumpCalls = append(f.envDumpCalls, snapshot)
+	if f.envDumpErr != nil {
+		return nil, "", f.envDumpErr
+	}
+	if len(f.envEntries) == 0 {
+		return nil, "", &output.Error{
+			Code:    "E_BACKUP_NO_ENV",
+			Message: "no env backup found for " + inst,
+			Hint:    "run cvctl backup now " + inst + " env",
+		}
+	}
+	snap := f.envSnapID
+	if snap == "" {
+		snap = "abcdef01"
+	}
+	return f.envEntries, snap, nil
 }
 
 func (f *fakeData) BucketGenerations(_ context.Context, _, _ string) (int, int, error) {
@@ -100,10 +126,24 @@ type restoreRig struct {
 	instDir string
 }
 
+type testOSFS struct {
+	sys.FS
+}
+
+func (t testOSFS) LookupOwner(o sys.Owner) error {
+	if (o.User == "" || o.User == "deployer" || o.User == "root") &&
+		(o.Group == "" || o.Group == "deploy" || o.Group == "root") {
+		return nil
+	}
+	return t.FS.LookupOwner(o)
+}
+
 func newRestoreRig(t *testing.T, envBody string) *restoreRig {
 	t.Helper()
 	tmp := t.TempDir()
-	instDir := filepath.Join(tmp, "demo-dev")
+	deployRoot := filepath.Join(tmp, "srv", "deploy")
+	stateRoot := filepath.Join(tmp, "var", "lib", "cvctl")
+	instDir := filepath.Join(deployRoot, "demo-dev")
 	originDir := filepath.Join(tmp, "origin")
 	writeTestInfra(t, originDir, validCompose, validSpec)
 	if err := os.MkdirAll(instDir, 0o755); err != nil {
@@ -122,8 +162,7 @@ func newRestoreRig(t *testing.T, envBody string) *restoreRig {
 	t.Cleanup(func() { sys.LockFile = oldLock })
 	sys.LockFile = fl.LockFile
 
-	osfs := sys.NewOSFS()
-	stateRoot := filepath.Join(tmp, "state")
+	osfs := testOSFS{FS: sys.NewOSFS()}
 	store := state.NewStore(osfs, stateRoot)
 	log := &[]string{}
 	cat := testCatalog(t)
@@ -132,7 +171,7 @@ func newRestoreRig(t *testing.T, envBody string) *restoreRig {
 	deployer := &deploy.Deployer{
 		Run:        netRun,
 		Backup:     &render.BackupTarget{Host: "h1", Endpoint: "http://s3", Bucket: "bk", Region: "r", AccessKey: "ak-ACCESS-0000", SecretKey: "sk-SECRET-0000", LibsodiumKey: "lib-KEY-00000"},
-		DeployRoot: tmp,
+		DeployRoot: deployRoot,
 		TraefikDir: filepath.Join(tmp, "traefik"),
 		StateRoot:  stateRoot,
 		FS:         osfs,
@@ -148,7 +187,7 @@ func newRestoreRig(t *testing.T, envBody string) *restoreRig {
 	data := &fakeData{t: t, store: store, log: log}
 	e := &Env{
 		FS:          osfs,
-		DeployRoot:  tmp,
+		DeployRoot:  deployRoot,
 		StateRoot:   stateRoot,
 		Catalog:     cat,
 		Host:        &hostcfg.Config{Registries: "ghcr.io/codeavers", Storage: "s3"},
@@ -717,5 +756,243 @@ func TestRestoreWarnsWhenNewestGenerationHasNoBaseBackup(t *testing.T) {
 	}
 	if !found || !notified {
 		t.Fatalf("warnings=%v notes=%+v", res.Warnings, note.msgs)
+	}
+}
+
+func TestRestoreRecoversEnvFilesFromBackup(t *testing.T) {
+	rig := newRestoreRig(t, "")
+	rig.data.envEntries = []secrets.Entry{
+		{
+			Path:  "/srv/deploy/demo-dev/cvctl.env",
+			Mode:  0o640,
+			User:  "deployer",
+			Group: "deploy",
+			Data:  []byte(restoreEnvBase),
+		},
+		{
+			Path:  "/srv/deploy/demo-dev/app.env",
+			Mode:  0o640,
+			User:  "deployer",
+			Group: "deploy",
+			Data:  []byte("APP_SECRET=supersecret123\n"),
+		},
+		{
+			Path:  "/var/lib/cvctl/demo-dev/deploy_key",
+			Mode:  0o600,
+			User:  "deployer",
+			Group: "deploy",
+			Data:  []byte("PRIVATE_SSH_KEY_DATA\n"),
+		},
+	}
+	rig.data.envSnapID = "abcdef01"
+
+	res, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cvctlBytes, err := os.ReadFile(filepath.Join(rig.instDir, "cvctl.env"))
+	if err != nil {
+		t.Fatalf("cvctl.env missing: %v", err)
+	}
+	if !strings.Contains(string(cvctlBytes), "CVCTL_SVC_DB_BACKUP_GEN=4") {
+		t.Errorf("cvctl.env generations not updated: %s", cvctlBytes)
+	}
+	appBytes, err := os.ReadFile(filepath.Join(rig.instDir, "app.env"))
+	if err != nil {
+		t.Fatalf("app.env missing: %v", err)
+	}
+	if !strings.HasPrefix(string(appBytes), "APP_SECRET=supersecret123\n") {
+		t.Errorf("app.env content mismatch: %q", appBytes)
+	}
+	keyBytes, err := os.ReadFile(filepath.Join(rig.env.stateRoot(), "demo-dev", "deploy_key"))
+	if err != nil {
+		t.Fatalf("deploy_key missing: %v", err)
+	}
+	if string(keyBytes) != "PRIVATE_SSH_KEY_DATA\n" {
+		t.Errorf("deploy_key content mismatch: %q", keyBytes)
+	}
+
+	const wantWarning = "env: restored cvctl.env, app.env and deploy key from backup abcdef01"
+	found := false
+	for _, w := range res.Warnings {
+		if w == wantWarning {
+			found = true
+		}
+		for _, secret := range []string{"supersecret123", "PRIVATE_SSH_KEY_DATA", "existingpass123456789012345678"} {
+			if strings.Contains(w, secret) {
+				t.Fatalf("warning leaks secret %q: %s", secret, w)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected warning %q in %v", wantWarning, res.Warnings)
+	}
+
+	order := strings.Join(*rig.log, ",")
+	if !strings.Contains(order, "envdump demo-dev ") || !strings.Contains(order, "clone") || !strings.Contains(order, "restore db") {
+		t.Fatalf("log missing expected steps: %s", order)
+	}
+}
+
+func TestRestoreEnvDumpNoEnvReturnsNoSecrets(t *testing.T) {
+	rig := newRestoreRig(t, "")
+	rig.data.envDumpErr = &output.Error{
+		Code:    "E_BACKUP_NO_ENV",
+		Message: "no env backup found for demo-dev",
+		Hint:    "run cvctl backup now demo-dev env",
+	}
+
+	_, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if codeOf(t, err) != "E_RESTORE_NO_SECRETS" {
+		t.Fatalf("code: want E_RESTORE_NO_SECRETS, got %v", err)
+	}
+	var oe *output.Error
+	errors.As(err, &oe)
+	const wantHint = "import a bundle (cvctl secrets import) or check cvctl backup list demo-dev env"
+	if oe.Hint != wantHint {
+		t.Fatalf("hint: want %q, got %q", wantHint, oe.Hint)
+	}
+}
+
+func TestRestoreEnvSnapshotPassedThrough(t *testing.T) {
+	rig := newRestoreRig(t, "")
+	rig.data.envEntries = []secrets.Entry{
+		{
+			Path:  "/srv/deploy/demo-dev/cvctl.env",
+			Mode:  0o640,
+			User:  "deployer",
+			Group: "deploy",
+			Data:  []byte(restoreEnvBase),
+		},
+	}
+	rig.data.envSnapID = "feed9876"
+
+	_, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{EnvSnapshot: "feed9876"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rig.data.envDumpCalls) != 1 || rig.data.envDumpCalls[0] != "feed9876" {
+		t.Fatalf("envDumpCalls: want [\"feed9876\"], got %v", rig.data.envDumpCalls)
+	}
+}
+
+func TestRestoreExistingCvctlEnvWithEnvSnapshotErrors(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	_, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{EnvSnapshot: "feed9876"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var ue *output.UsageError
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *output.UsageError, got %T: %v", err, err)
+	}
+	if codeOf(t, err) != "E_USAGE_ENV_SNAPSHOT" {
+		t.Fatalf("code: want E_USAGE_ENV_SNAPSHOT, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "cvctl.env already exists; --env-snapshot only applies when restoring env files from the backup") {
+		t.Fatalf("message mismatch: %v", err)
+	}
+	if len(rig.data.envDumpCalls) != 0 {
+		t.Fatalf("EnvDump must never be called when cvctl.env exists, got %v", rig.data.envDumpCalls)
+	}
+}
+
+func TestRestoreExistingCvctlEnvNeverCallsEnvDump(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	res, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rig.data.envDumpCalls) != 0 {
+		t.Fatalf("EnvDump must not be called when cvctl.env exists, got %v", rig.data.envDumpCalls)
+	}
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "env: restored") {
+			t.Fatalf("unexpected restored warning: %s", w)
+		}
+	}
+}
+
+func TestRestoreFailureAfterEnvWriteRemovesWrittenFiles(t *testing.T) {
+	rig := newRestoreRig(t, "")
+	rig.data.envEntries = []secrets.Entry{
+		{
+			Path:  "/srv/deploy/demo-dev/cvctl.env",
+			Mode:  0o640,
+			User:  "deployer",
+			Group: "deploy",
+			Data:  []byte(restoreEnvBase),
+		},
+		{
+			Path:  "/srv/deploy/demo-dev/app.env",
+			Mode:  0o640,
+			User:  "deployer",
+			Group: "deploy",
+			Data:  []byte("APP_SECRET=testsecret\n"),
+		},
+		{
+			Path:  "/var/lib/cvctl/demo-dev/deploy_key",
+			Mode:  0o600,
+			User:  "deployer",
+			Group: "deploy",
+			Data:  []byte("KEY_DATA\n"),
+		},
+	}
+	rig.data.restoreErr = errors.New("volume restore boom")
+
+	_, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	cvctlPath := filepath.Join(rig.instDir, "cvctl.env")
+	if fileExists(rig.env.fs(), cvctlPath) {
+		t.Errorf("cvctl.env was not removed on failure: %s", cvctlPath)
+	}
+	appPath := filepath.Join(rig.instDir, "app.env")
+	if fileExists(rig.env.fs(), appPath) {
+		t.Errorf("app.env was not removed on failure: %s", appPath)
+	}
+	keyPath := filepath.Join(rig.env.stateRoot(), "demo-dev", "deploy_key")
+	if fileExists(rig.env.fs(), keyPath) {
+		t.Errorf("deploy_key was not removed on failure: %s", keyPath)
+	}
+
+	if !strings.Contains(err.Error(), "cleaned up:") {
+		t.Errorf("error missing cleaned up notice: %v", err)
+	}
+}
+
+func TestRestoreSecretsRootMisconfigured(t *testing.T) {
+	rig := newRestoreRig(t, "")
+	rig.env.DeployRoot = "/tmp/bad/root"
+	_, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	if codeOf(t, err) != "E_RESTORE_MISCONFIGURED" {
+		t.Fatalf("want E_RESTORE_MISCONFIGURED, got %v", err)
+	}
+
+	rig2 := newRestoreRig(t, "")
+	rig2.env.StateRoot = "/different/var/lib/cvctl"
+	_, err2 := Restore(context.Background(), rig2.env, "demo-dev", RestoreOptions{})
+	if codeOf(t, err2) != "E_RESTORE_MISCONFIGURED" {
+		t.Fatalf("want E_RESTORE_MISCONFIGURED, got %v", err2)
+	}
+}
+
+func TestRestoreNilDataWithMissingCvctlEnv(t *testing.T) {
+	rig := newRestoreRig(t, "")
+	rig.env.Data = nil
+	_, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	if codeOf(t, err) != "E_RESTORE_NO_SECRETS" {
+		t.Fatalf("want E_RESTORE_NO_SECRETS, got %v", err)
+	}
+	var oe *output.Error
+	errors.As(err, &oe)
+	if !strings.Contains(oe.Hint, "secrets import") {
+		t.Fatalf("hint should mention secrets import: %s", oe.Hint)
 	}
 }

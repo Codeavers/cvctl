@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/render"
+	"github.com/codeavers/cvctl/internal/secrets"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
 )
@@ -38,11 +40,15 @@ type DataRestorer interface {
 	// BucketGenerations returns the highest wal-g generation of svc holding
 	// any data and the highest holding a base backup (-1: none).
 	BucketGenerations(ctx context.Context, inst, svc string) (highestUsed, highestWithBase int, err error)
+	// EnvDump unpacks the env tar archive from snapshot of inst.
+	EnvDump(ctx context.Context, inst, snapshot string) ([]secrets.Entry, string, error)
 }
 
 type RestoreOptions struct {
 	// Repo overrides CVCTL_INFRA_URL; instances created before it was recorded need it.
 	Repo string
+	// EnvSnapshot selects an older env backup snapshot (defaults to latest).
+	EnvSnapshot string
 }
 
 type RestoreResult struct {
@@ -113,6 +119,50 @@ func deployFailedErr(err error, detail, inst string, vols []string) error {
 	return &output.Error{Code: "E_DEPLOY_FAILED", Message: msg, Hint: hint}
 }
 
+func (e *Env) secretsRoot() (string, error) {
+	deployRoot := e.deployRoot()
+	stateRoot := e.stateRoot()
+	if !strings.HasSuffix(deployRoot, "/srv/deploy") {
+		return "", &output.Error{
+			Code:    "E_RESTORE_MISCONFIGURED",
+			Message: fmt.Sprintf("deploy root %s does not end in /srv/deploy", deployRoot),
+			Hint:    "this is a cvctl bug; report it",
+		}
+	}
+	prefix := strings.TrimSuffix(deployRoot, "/srv/deploy")
+	if stateRoot != prefix+"/var/lib/cvctl" {
+		return "", &output.Error{
+			Code:    "E_RESTORE_MISCONFIGURED",
+			Message: fmt.Sprintf("state root %s is not consistent with deploy root prefix %s", stateRoot, prefix),
+			Hint:    "this is a cvctl bug; report it",
+		}
+	}
+	return prefix, nil
+}
+
+func formatRestoredEnvWarning(written []string, snapID string) string {
+	var baseNames []string
+	seen := map[string]bool{}
+	for _, p := range written {
+		base := filepath.Base(p)
+		if strings.HasPrefix(base, "deploy_key") {
+			base = "deploy key"
+		}
+		if !seen[base] {
+			seen[base] = true
+			baseNames = append(baseNames, base)
+		}
+	}
+	fileList := strings.Join(baseNames, ", ")
+	if len(baseNames) > 1 {
+		fileList = strings.Join(baseNames[:len(baseNames)-1], ", ") + " and " + baseNames[len(baseNames)-1]
+	}
+	if fileList == "" {
+		return fmt.Sprintf("env: restored from backup %s", snapID)
+	}
+	return fmt.Sprintf("env: restored %s from backup %s", fileList, snapID)
+}
+
 // Restore rebuilds an instance on a new host from its imported secrets and the
 // off-site backups. The instance lock is held throughout so the agent cannot
 // deploy a half-restored instance. A failure before the deploy removes what
@@ -131,49 +181,114 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 	}
 	instDir := filepath.Join(e.deployRoot(), inst)
 	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
+
+	var envWarnings []string
+	var restoredFiles []string
+
+	hasEnv := fileExists(e.fs(), cvctlEnvPath)
+	if hasEnv {
+		if opts.EnvSnapshot != "" {
+			return nil, &output.UsageError{Err: &output.Error{
+				Code:    "E_USAGE_ENV_SNAPSHOT",
+				Message: "cvctl.env already exists; --env-snapshot only applies when restoring env files from the backup",
+				Hint:    "omit --env-snapshot to use the existing cvctl.env, or remove cvctl.env to restore it from the backup",
+			}}
+		}
+	} else {
+		if e.Data == nil {
+			return nil, &output.Error{
+				Code:    "E_RESTORE_NO_SECRETS",
+				Message: fmt.Sprintf("%s is missing", cvctlEnvPath),
+				Hint:    "run cvctl secrets import <bundle> first",
+			}
+		}
+		rootPrefix, err := e.secretsRoot()
+		if err != nil {
+			return nil, err
+		}
+		entries, snapID, err := e.Data.EnvDump(ctx, inst, opts.EnvSnapshot)
+		if err != nil {
+			var oe *output.Error
+			if errors.As(err, &oe) && oe.Code == "E_BACKUP_NO_ENV" {
+				return nil, &output.Error{
+					Code:    "E_RESTORE_NO_SECRETS",
+					Message: fmt.Sprintf("%s is missing", cvctlEnvPath),
+					Hint:    "import a bundle (cvctl secrets import) or check cvctl backup list " + inst + " env",
+				}
+			}
+			return nil, err
+		}
+		written, err := secrets.Restore(e.fs(), rootPrefix, entries, false)
+		if err != nil {
+			for _, p := range written {
+				_ = e.fs().Remove(rootPrefix + p)
+			}
+			return nil, err
+		}
+		for _, p := range written {
+			restoredFiles = append(restoredFiles, rootPrefix+p)
+		}
+		envWarnings = append(envWarnings, formatRestoredEnvWarning(written, snapID))
+	}
+
+	cleanupEnv := func(rep *cleanupReport) {
+		for _, p := range restoredFiles {
+			if rerr := e.fs().Remove(p); rerr == nil {
+				rep.cleaned = append(rep.cleaned, p)
+			} else if !errors.Is(rerr, fs.ErrNotExist) {
+				rep.notRemoved = append(rep.notRemoved, p)
+			}
+		}
+	}
+	failEarly := func(err error) (*RestoreResult, error) {
+		var rep cleanupReport
+		cleanupEnv(&rep)
+		return nil, rep.apply(err)
+	}
+
 	if _, err := e.fs().Stat(cvctlEnvPath); err != nil {
-		return nil, &output.Error{
+		return failEarly(&output.Error{
 			Code:    "E_RESTORE_NO_SECRETS",
 			Message: fmt.Sprintf("%s is missing", cvctlEnvPath),
 			Hint:    "run cvctl secrets import <bundle> first",
-		}
+		})
 	}
 	// An import may have left it root-owned; the deployer clones into it.
 	if err := e.fs().MkdirAll(instDir, 0o2775, deployOwner); err != nil {
-		return nil, &output.Error{
+		return failEarly(&output.Error{
 			Code:    "E_FILE_WRITE",
 			Message: fmt.Sprintf("cannot fix the owner of %s: %v", instDir, err),
 			Hint:    "run as root (sudo cvctl project restore)",
-		}
+		})
 	}
 	if e.Data == nil || e.Deployer == nil || e.Deployer.Store == nil {
-		return nil, &output.Error{
+		return failEarly(&output.Error{
 			Code:    "E_RESTORE_MISCONFIGURED",
 			Message: "project restore is not wired (data restorer, deployer or state store missing)",
 			Hint:    "this is a cvctl bug; report it",
-		}
+		})
 	}
 
 	// Held throughout so wal-g retention of a backup timer cannot delete the
 	// base backup being fetched; the operator retries rather than waits.
 	unlockData, err := e.Deployer.Store.LockData()
 	if err != nil {
-		return nil, err
+		return failEarly(err)
 	}
 	defer unlockData()
 	unlock, err := e.Deployer.Store.Lock(inst)
 	if err != nil {
-		return nil, err
+		return failEarly(err)
 	}
 	defer unlock()
 
 	origEnv, err := e.fs().ReadFile(cvctlEnvPath)
 	if err != nil {
-		return nil, err
+		return failEarly(err)
 	}
 	rawEnv, err := readRawEnv(e.fs(), cvctlEnvPath)
 	if err != nil {
-		return nil, err
+		return failEarly(err)
 	}
 	repoURL := opts.Repo
 	if repoURL == "" && rawEnv[keySource] == instance.SourceOCI && rawEnv[keyRef] != "" {
@@ -183,14 +298,14 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 		repoURL = rawEnv[keyInfraURL]
 	}
 	if repoURL == "" {
-		return nil, &output.Error{
+		return failEarly(&output.Error{
 			Code:    "E_RESTORE_NO_REPO",
 			Message: fmt.Sprintf("the infra repository of %s is unknown (cvctl.env has no %s)", inst, keyInfraURL),
 			Hint:    "pass --repo <infra-url>",
-		}
+		})
 	}
 	if err := validateRepoURL(repoURL); err != nil {
-		return nil, err
+		return failEarly(err)
 	}
 	isOCI := isOCIURL(repoURL)
 	branch := rawEnv["CVCTL_INFRA_BRANCH"]
@@ -207,21 +322,22 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 	}
 	infraDir := filepath.Join(instDir, "infra")
 	if fileExists(e.fs(), infraDir) {
-		return nil, &output.Error{
+		return failEarly(&output.Error{
 			Code:    "E_RESTORE_INFRA_EXISTS",
 			Message: fmt.Sprintf("%s already exists", infraDir),
 			Hint:    fmt.Sprintf("if a previous project restore failed after deploy, use cvctl project update %s; otherwise remove %s and re-run", inst, infraDir),
-		}
+		})
 	}
 
-	res := &RestoreResult{Instance: inst}
+	res := &RestoreResult{Instance: inst, Warnings: envWarnings}
 	var created []string
 	cloned, envWritten := false, false
 	var genUpdates map[string]string
 	fail := func(err error) (*RestoreResult, error) {
 		cctx := context.WithoutCancel(ctx)
 		var rep cleanupReport
-		if envWritten {
+		cleanupEnv(&rep)
+		if envWritten && len(restoredFiles) == 0 {
 			if werr := e.fs().WriteFile(cvctlEnvPath, origEnv, 0o640, deployOwner); werr == nil {
 				rep.cleaned = append(rep.cleaned, "backup generations in cvctl.env")
 			} else {

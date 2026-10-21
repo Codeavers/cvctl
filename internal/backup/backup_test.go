@@ -564,14 +564,23 @@ func TestEnvDumpSuccess(t *testing.T) {
 	g := newRig(t)
 	g.okAll()
 
-	entry := secrets.Entry{
-		Path:  "/srv/deploy/app-prod/cvctl.env",
-		Mode:  0o600,
-		User:  "deployer",
-		Group: "deploy",
-		Data:  []byte("FOO=bar\n"),
+	entriesSeed := []secrets.Entry{
+		{
+			Path:  "/srv/deploy/app-prod/cvctl.env",
+			Mode:  0o600,
+			User:  "deployer",
+			Group: "deploy",
+			Data:  []byte("FOO=bar\n"),
+		},
+		{
+			Path:  "/var/lib/cvctl/app-prod/deploy_key",
+			Mode:  0o600,
+			User:  "deployer",
+			Group: "deploy",
+			Data:  []byte("KEY\n"),
+		},
 	}
-	tarBytes, err := secrets.Pack([]secrets.Entry{entry})
+	tarBytes, err := secrets.Pack(entriesSeed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,35 +597,37 @@ func TestEnvDumpSuccess(t *testing.T) {
 	if shortID != "abcdef01" {
 		t.Fatalf("shortID: want abcdef01, got %q", shortID)
 	}
-	if len(entries) != 1 || entries[0].Path != "/srv/deploy/app-prod/cvctl.env" || string(entries[0].Data) != "FOO=bar\n" {
+	if len(entries) != 2 || entries[0].Path != "/srv/deploy/app-prod/cvctl.env" || entries[1].Path != "/var/lib/cvctl/app-prod/deploy_key" {
 		t.Fatalf("entries: %+v", entries)
 	}
 }
 
 func TestEnvDumpRejectsForeignPath(t *testing.T) {
-	g := newRig(t)
-	g.okAll()
+	for _, foreignPath := range []string{"/srv/deploy/other-prod/cvctl.env", "/var/lib/cvctl/other-prod/deploy_key"} {
+		g := newRig(t)
+		g.okAll()
 
-	entry := secrets.Entry{
-		Path:  "/srv/deploy/other-prod/cvctl.env",
-		Mode:  0o600,
-		User:  "deployer",
-		Group: "deploy",
-		Data:  []byte("FOO=bar\n"),
-	}
-	tarBytes, err := secrets.Pack([]secrets.Entry{entry})
-	if err != nil {
-		t.Fatal(err)
-	}
+		entry := secrets.Entry{
+			Path:  foreignPath,
+			Mode:  0o600,
+			User:  "deployer",
+			Group: "deploy",
+			Data:  []byte("FOO=bar\n"),
+		}
+		tarBytes, err := secrets.Pack([]secrets.Entry{entry})
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-env.env restic/restic:0.19.1 snapshots --json latest",
-		sys.Result{Stdout: []byte(`[{"id":"abcdef0123456789","short_id":"abcdef01","time":"2026-01-02T00:00:00Z"}]`)})
-	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-env.env restic/restic:0.19.1 dump abcdef01 /env.tar",
-		sys.Result{Stdout: tarBytes})
+		g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-env.env restic/restic:0.19.1 snapshots --json latest",
+			sys.Result{Stdout: []byte(`[{"id":"abcdef0123456789","short_id":"abcdef01","time":"2026-01-02T00:00:00Z"}]`)})
+		g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-env.env restic/restic:0.19.1 dump abcdef01 /env.tar",
+			sys.Result{Stdout: tarBytes})
 
-	_, _, err = g.r.EnvDump(context.Background(), "app-prod", "")
-	if err == nil || code(err) != "E_BACKUP_ENV_FOREIGN" {
-		t.Fatalf("want E_BACKUP_ENV_FOREIGN, got %v", err)
+		_, _, err = g.r.EnvDump(context.Background(), "app-prod", "")
+		if err == nil || code(err) != "E_BACKUP_ENV_FOREIGN" {
+			t.Fatalf("path %q: want E_BACKUP_ENV_FOREIGN, got %v", foreignPath, err)
+		}
 	}
 }
 

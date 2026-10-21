@@ -220,6 +220,12 @@ Design: `docs/specs/2026-10-17-s3-buckets-design.md`.
 
 Per app the daily timer backs up databases (WAL-G) and the env files (`cvctl.env`, `app.env`, deploy key) encrypted with the host restic key; object storage is not backed up by default. Run manual env backups with `cvctl backup now <inst> env`.
 
+### Disaster recovery and restore
+
+With off-site backups (`CVCTL_STORAGE=s3`), rebuilding an instance on a new host only needs the host bundle (`cvctl secrets export --host`) plus `cvctl project restore <inst>`. `cvctl.env`, `app.env` and the deploy key are recovered automatically from the latest off-site env backup (or pick an older one with `--env-snapshot <id>`). If `cvctl.env` already exists locally, those files are kept as is and `--env-snapshot` is rejected (`E_USAGE_ENV_SNAPSHOT`).
+
+`cvctl project restore` clones the infra repository, restores every data service from its latest backup into a fresh volume, deploys the instance, and starts a new WAL-G backup generation.
+
 ### Backup generations
 
 `cvctl db restore` brings a data service back into a new volume and starts a new WAL-G backup
