@@ -2,6 +2,7 @@ package backup_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -13,7 +14,9 @@ import (
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/notify"
+	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/render"
+	"github.com/codeavers/cvctl/internal/secrets"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/internal/sys/systest"
@@ -54,6 +57,8 @@ func newRig(t *testing.T) *rig {
 	run := &systest.Runner{}
 	run.On("docker network inspect -f {{.Internal}} app-prod_backup", sys.Result{})
 	fsys := systest.NewFS()
+	_ = fsys.MkdirAll("/srv/deploy/app-prod", 0o755, sys.Owner{})
+	_ = fsys.WriteFile("/srv/deploy/app-prod/cvctl.env", []byte("CVCTL_INSTANCE=app-prod\n"), 0o600, sys.Owner{})
 	store := state.NewStore(fsys, "/var/lib/cvctl")
 	note := &recNotifier{}
 	p := &contract.Project{Data: []contract.DataService{
@@ -272,10 +277,10 @@ func TestListParsesWalgAndRestic(t *testing.T) {
 	g.run.OnPrefix("docker compose", sys.Result{Stdout: []byte(`[{"backup_name":"base_0001","time":"2026-01-01T00:00:00Z"}]`)})
 	g.run.OnPrefix("docker run", sys.Result{Stdout: []byte(`[{"id":"abcdef0123","short_id":"abcdef01","time":"2026-01-02T00:00:00Z"}]`)})
 	snaps, err := g.r.List(context.Background(), "app-prod", "")
-	if err != nil || len(snaps) != 2 {
+	if err != nil || len(snaps) != 3 {
 		t.Fatalf("snaps=%+v err=%v", snaps, err)
 	}
-	if snaps[0].ID != "base_0001" || snaps[0].Strategy != "wal-g" || snaps[1].ID != "abcdef01" || snaps[1].Strategy != "volume" {
+	if snaps[0].ID != "base_0001" || snaps[0].Strategy != "wal-g" || snaps[1].ID != "abcdef01" || snaps[1].Strategy != "volume" || snaps[2].ID != "abcdef01" || snaps[2].Strategy != "env" {
 		t.Fatalf("snaps=%+v", snaps)
 	}
 	if !strings.HasSuffix(g.calls()[0], "wal-g backup-list --json") {
@@ -325,10 +330,348 @@ func TestStatusWriteFailureDoesNotAbortBackups(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "E_BACKUP_STATUS_WRITE") || strings.Contains(err.Error(), "E_BACKUP_FAILED") {
 		t.Fatalf("err=%v", err)
 	}
-	if len(res) != 2 || !res[0].OK || !res[1].OK {
+	if len(res) != 3 || !res[0].OK || !res[1].OK || !res[2].OK {
 		t.Fatalf("all targets must still run: %+v", res)
 	}
 	if len(g.run.Calls) < 3 {
 		t.Fatalf("calls: %v", g.calls())
+	}
+}
+
+func code(err error) string {
+	var oe *output.Error
+	if errors.As(err, &oe) {
+		return oe.Code
+	}
+	return ""
+}
+
+func TestEnvBackupRunsWithNoDataServices(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+	p := &contract.Project{Data: nil}
+	d := &instance.Decisions{Instance: "app-prod", Services: nil}
+	g.r.Load = func(string) (*contract.Project, *instance.Decisions, error) { return p, d, nil }
+
+	res, err := g.r.BackupNow(context.Background(), "app-prod", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res) != 1 || res[0].Service != "env" || res[0].Strategy != "env" || !res[0].OK {
+		t.Fatalf("unexpected results: %+v", res)
+	}
+	st, err := g.store.Load("app-prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs := st.Backups["env"]
+	if bs.LastOK.IsZero() || bs.LastError != "" {
+		t.Fatalf("status: %+v", bs)
+	}
+}
+
+func TestBackupOrderDataFirstThenEnv(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+	res, err := g.r.BackupNow(context.Background(), "app-prod", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res) != 3 {
+		t.Fatalf("want 3 results, got %d: %+v", len(res), res)
+	}
+	if res[0].Service != "db" || res[1].Service != "files" || res[2].Service != "env" {
+		t.Fatalf("order of results: %+v", res)
+	}
+	calls := g.calls()
+	var walgIdx, volumeIdx, envIdx int = -1, -1, -1
+	for i, c := range calls {
+		if strings.Contains(c, "wal-g backup-push") {
+			walgIdx = i
+		}
+		if strings.Contains(c, "backup /data") {
+			volumeIdx = i
+		}
+		if strings.Contains(c, "--stdin-filename env.tar") {
+			envIdx = i
+		}
+	}
+	if walgIdx == -1 || volumeIdx == -1 || envIdx == -1 {
+		t.Fatalf("missing expected calls: walg=%d, vol=%d, env=%d (all=%v)", walgIdx, volumeIdx, envIdx, calls)
+	}
+	if !(walgIdx < volumeIdx && volumeIdx < envIdx) {
+		t.Fatalf("wrong call order: walg=%d, volume=%d, env=%d", walgIdx, volumeIdx, envIdx)
+	}
+}
+
+func TestBackupNowOnlyEnv(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+	res, err := g.r.BackupNow(context.Background(), "app-prod", "env")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res) != 1 || res[0].Service != "env" || res[0].Strategy != "env" || !res[0].OK {
+		t.Fatalf("results: %+v", res)
+	}
+	for _, c := range g.calls() {
+		if strings.Contains(c, "wal-g") || strings.Contains(c, "backup /data") {
+			t.Fatalf("data service call ran during only=env: %s", c)
+		}
+	}
+}
+
+func TestEnvBackupFailureDoesNotStopDataTargets(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+	g.run.OnPrefix("docker run -i --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-env.env restic/restic:0.19.1 backup --stdin", sys.Result{ExitCode: 1, Stderr: []byte("s3 network failure")})
+	res, err := g.r.BackupNow(context.Background(), "app-prod", "")
+	if err == nil || code(err) != "E_BACKUP_FAILED" {
+		t.Fatalf("want E_BACKUP_FAILED, got %v", err)
+	}
+	if len(res) != 3 {
+		t.Fatalf("want 3 results, got %d: %+v", len(res), res)
+	}
+	if !res[0].OK || !res[1].OK || res[2].OK {
+		t.Fatalf("expected data targets OK, env failed: %+v", res)
+	}
+	if res[2].Service != "env" || !strings.Contains(res[2].Error, "s3 network failure") {
+		t.Fatalf("env error: %v", res[2].Error)
+	}
+	st, _ := g.store.Load("app-prod")
+	if st.Backups["env"].LastError == "" || !st.Backups["env"].LastOK.IsZero() {
+		t.Fatalf("env status: %+v", st.Backups["env"])
+	}
+	if st.Backups["db"].LastOK.IsZero() || st.Backups["files"].LastOK.IsZero() {
+		t.Fatalf("data targets status: %+v", st.Backups)
+	}
+}
+
+func TestDataFailureDoesNotStopEnvBackup(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+	g.run.OnPrefix("docker compose", sys.Result{ExitCode: 1, Stderr: []byte("postgres connection refused")})
+	res, err := g.r.BackupNow(context.Background(), "app-prod", "")
+	if err == nil || code(err) != "E_BACKUP_FAILED" {
+		t.Fatalf("want E_BACKUP_FAILED, got %v", err)
+	}
+	if len(res) != 3 {
+		t.Fatalf("want 3 results, got %d: %+v", len(res), res)
+	}
+	if res[0].OK || !res[1].OK || !res[2].OK {
+		t.Fatalf("expected db failed, files and env OK: %+v", res)
+	}
+	st, _ := g.store.Load("app-prod")
+	if st.Backups["db"].LastError == "" {
+		t.Fatalf("db status: %+v", st.Backups["db"])
+	}
+	if st.Backups["env"].LastOK.IsZero() || st.Backups["env"].LastError != "" {
+		t.Fatalf("env status: %+v", st.Backups["env"])
+	}
+}
+
+func TestEnvBackupArgvNeverContainsFileContents(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+	secretPayload := "TOP_SECRET_CREDENTIAL=supersecret123456"
+	_ = g.fs.WriteFile("/srv/deploy/app-prod/cvctl.env", []byte("CVCTL_INSTANCE=app-prod\n"+secretPayload+"\n"), 0o600, sys.Owner{})
+
+	if _, err := g.r.BackupNow(context.Background(), "app-prod", "env"); err != nil {
+		t.Fatal(err)
+	}
+
+	foundStdin := false
+	for _, c := range g.run.Calls {
+		for _, a := range c.Args {
+			if strings.Contains(a, secretPayload) || strings.Contains(a, "supersecret123456") {
+				t.Fatalf("file content leaked in argv: %s (args=%v)", a, c.Args)
+			}
+		}
+		if len(c.Stdin) > 0 && strings.Contains(string(c.Stdin), "supersecret123456") {
+			foundStdin = true
+		}
+	}
+	if !foundStdin {
+		t.Fatal("secret payload not found in any command Stdin")
+	}
+}
+
+func TestEnvBackupUsesHostKeyEvenWithInstanceKeys(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+	instPass := "instance-restic-password-999"
+	p, d, _ := g.r.Load("app-prod")
+	d.Backup = instance.BackupDecision{
+		LibsodiumKey:   "inst-libsodium-key-888",
+		ResticPassword: instPass,
+	}
+	g.r.Load = func(string) (*contract.Project, *instance.Decisions, error) { return p, d, nil }
+
+	if _, err := g.r.BackupNow(context.Background(), "app-prod", "env"); err != nil {
+		t.Fatal(err)
+	}
+	envPath := "/srv/deploy/app-prod/restic-env.env"
+	raw, err := g.fs.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(raw)
+	if !strings.Contains(content, "RESTIC_PASSWORD="+resticPass) {
+		t.Fatalf("restic-env.env must contain host password %q, got:\n%s", resticPass, content)
+	}
+	if strings.Contains(content, instPass) {
+		t.Fatalf("restic-env.env must NOT contain instance password %q, got:\n%s", instPass, content)
+	}
+}
+
+func TestListShowsEnvSnapshots(t *testing.T) {
+	g := newRig(t)
+	g.run.OnPrefix("docker compose", sys.Result{Stdout: []byte(`[{"backup_name":"base_0001","time":"2026-01-01T00:00:00Z"}]`)})
+	g.run.OnPrefix("docker run", sys.Result{Stdout: []byte(`[{"id":"abcdef0123","short_id":"abcdef01","time":"2026-01-02T00:00:00Z"}]`)})
+
+	// List only env
+	snaps, err := g.r.List(context.Background(), "app-prod", "env")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(snaps) != 1 || snaps[0].Service != "env" || snaps[0].Strategy != "env" || snaps[0].ID != "abcdef01" {
+		t.Fatalf("snaps for env: %+v", snaps)
+	}
+}
+
+func TestEnvDumpSuccess(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+
+	entry := secrets.Entry{
+		Path:  "/srv/deploy/app-prod/cvctl.env",
+		Mode:  0o600,
+		User:  "deployer",
+		Group: "deploy",
+		Data:  []byte("FOO=bar\n"),
+	}
+	tarBytes, err := secrets.Pack([]secrets.Entry{entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-env.env restic/restic:0.19.1 snapshots --json latest",
+		sys.Result{Stdout: []byte(`[{"id":"abcdef0123456789","short_id":"abcdef01","time":"2026-01-02T00:00:00Z"}]`)})
+	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-env.env restic/restic:0.19.1 dump abcdef01 /env.tar",
+		sys.Result{Stdout: tarBytes})
+
+	entries, shortID, err := g.r.EnvDump(context.Background(), "app-prod", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if shortID != "abcdef01" {
+		t.Fatalf("shortID: want abcdef01, got %q", shortID)
+	}
+	if len(entries) != 1 || entries[0].Path != "/srv/deploy/app-prod/cvctl.env" || string(entries[0].Data) != "FOO=bar\n" {
+		t.Fatalf("entries: %+v", entries)
+	}
+}
+
+func TestEnvDumpRejectsForeignPath(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+
+	entry := secrets.Entry{
+		Path:  "/srv/deploy/other-prod/cvctl.env",
+		Mode:  0o600,
+		User:  "deployer",
+		Group: "deploy",
+		Data:  []byte("FOO=bar\n"),
+	}
+	tarBytes, err := secrets.Pack([]secrets.Entry{entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-env.env restic/restic:0.19.1 snapshots --json latest",
+		sys.Result{Stdout: []byte(`[{"id":"abcdef0123456789","short_id":"abcdef01","time":"2026-01-02T00:00:00Z"}]`)})
+	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-env.env restic/restic:0.19.1 dump abcdef01 /env.tar",
+		sys.Result{Stdout: tarBytes})
+
+	_, _, err = g.r.EnvDump(context.Background(), "app-prod", "")
+	if err == nil || code(err) != "E_BACKUP_ENV_FOREIGN" {
+		t.Fatalf("want E_BACKUP_ENV_FOREIGN, got %v", err)
+	}
+}
+
+func TestEnvDumpNoEnv(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+
+	// Missing repo (exit code 10)
+	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-env.env restic/restic:0.19.1 snapshots --json latest",
+		sys.Result{ExitCode: 10, Stderr: []byte("Fatal: repository does not exist")})
+
+	_, _, err := g.r.EnvDump(context.Background(), "app-prod", "")
+	if err == nil || code(err) != "E_BACKUP_NO_ENV" {
+		t.Fatalf("want E_BACKUP_NO_ENV, got %v", err)
+	}
+
+	// Empty snapshots list
+	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-env.env restic/restic:0.19.1 snapshots --json latest",
+		sys.Result{Stdout: []byte("[]")})
+
+	_, _, err = g.r.EnvDump(context.Background(), "app-prod", "")
+	if err == nil || code(err) != "E_BACKUP_NO_ENV" {
+		t.Fatalf("want E_BACKUP_NO_ENV for empty snapshots, got %v", err)
+	}
+}
+
+type warnFS struct {
+	sys.FS
+	symlinks map[string]bool
+}
+
+func (w *warnFS) Lstat(p string) (sys.FileInfo, error) {
+	fi, err := w.FS.Lstat(p)
+	if err != nil {
+		return fi, err
+	}
+	if w.symlinks[p] {
+		fi.IsSymlink = true
+	}
+	return fi, nil
+}
+
+func TestEnvBackupCollectWarningFails(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+	_ = g.fs.WriteFile("/srv/deploy/app-prod/app.env", []byte("X=1"), 0o640, sys.Owner{})
+	symFS := &warnFS{FS: g.fs, symlinks: map[string]bool{"/srv/deploy/app-prod/app.env": true}}
+	g.r.FS = symFS
+
+	res, err := g.r.BackupNow(context.Background(), "app-prod", "env")
+	if err == nil || code(err) != "E_BACKUP_FAILED" {
+		t.Fatalf("want E_BACKUP_FAILED, got %v", err)
+	}
+	if len(res) != 1 || res[0].OK {
+		t.Fatalf("result should not be OK: %+v", res)
+	}
+	if !strings.Contains(err.Error(), "not a regular file") && !strings.Contains(res[0].Error, "not a regular file") {
+		t.Fatalf("expected warning text in error: %v / %s", err, res[0].Error)
+	}
+}
+
+func TestEnvBackupEmptyEntriesFails(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+	fsys := systest.NewFS()
+	_ = fsys.MkdirAll("/srv/deploy/app-prod", 0o755, sys.Owner{})
+	g.r.FS = fsys
+
+	res, err := g.r.BackupNow(context.Background(), "app-prod", "env")
+	if err == nil || code(err) != "E_BACKUP_FAILED" {
+		t.Fatalf("want E_BACKUP_FAILED, got %v", err)
+	}
+	if len(res) != 1 || res[0].OK {
+		t.Fatalf("result should not be OK: %+v", res)
+	}
+	if !strings.Contains(res[0].Error, "no env files found") {
+		t.Fatalf("expected 'no env files found' in error: %v / %s", err, res[0].Error)
 	}
 }

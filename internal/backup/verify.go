@@ -90,6 +90,9 @@ func (r *Runner) Verify(ctx context.Context, inst, only string) ([]Result, error
 	var results []Result
 	var failed, statusErrs []string
 	for _, t := range ts {
+		if t.Strategy == StrategyEnv {
+			continue
+		}
 		runErr := func() error {
 			tctx, cancel := context.WithTimeout(ctx, verifyTimeout)
 			defer cancel()

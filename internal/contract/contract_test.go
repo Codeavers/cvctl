@@ -389,3 +389,25 @@ func TestHealthTimeoutCap(t *testing.T) {
 		}
 	}
 }
+
+func TestReservedServiceNameEnv(t *testing.T) {
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load("testdata/valid", cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Data = append(p.Data, DataService{Name: "env", Kind: "redis", EnvPrefix: "ENV"})
+	p.Compose.Services["env"] = p.Compose.Services["main-db"]
+	found := false
+	for _, iss := range Validate(p, cat, nil) {
+		if iss.Code == "E_CONTRACT_NAME_RESERVED" && iss.Service == "env" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("want E_CONTRACT_NAME_RESERVED for data service named env")
+	}
+}
