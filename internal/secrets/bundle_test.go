@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"errors"
+	"io"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -359,5 +361,302 @@ func TestRoundTripKeepsInstanceBackupKeys(t *testing.T) {
 	// Old generations stay readable: the host key travels too.
 	if k, _ := dst.ReadFile("/etc/cvctl/secrets/walg_libsodium_key"); string(k) != "hostkey" {
 		t.Fatalf("host key: %q", k)
+	}
+}
+
+func TestCollectHost(t *testing.T) {
+	src := seed(t)
+	entries, warns, err := CollectHost(src, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("unexpected warnings: %v", warns)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("want 2 host entries, got %d", len(entries))
+	}
+	want := []string{"/etc/cvctl/host.env", "/etc/cvctl/secrets/restic_password"}
+	for i, w := range want {
+		if entries[i].Path != w {
+			t.Errorf("entry %d: want %s, got %s", i, w, entries[i].Path)
+		}
+	}
+}
+
+func TestCollectInstance(t *testing.T) {
+	src := seed(t)
+	entries, warns, err := CollectInstance(src, "", "shop-prod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("unexpected warnings: %v", warns)
+	}
+	// seed has app.env, backup-db.env, cvctl.env, docker-compose.yml (ignored),
+	// and deploy keys under /var/lib/cvctl (not under /srv/deploy).
+	if len(entries) != 3 {
+		t.Fatalf("want 3 instance entries, got %d", len(entries))
+	}
+	want := []string{
+		"/srv/deploy/shop-prod/app.env",
+		"/srv/deploy/shop-prod/backup-db.env",
+		"/srv/deploy/shop-prod/cvctl.env",
+	}
+	for i, w := range want {
+		if entries[i].Path != w {
+			t.Errorf("entry %d: want %s, got %s", i, w, entries[i].Path)
+		}
+	}
+
+	// Missing instance
+	if _, _, err := CollectInstance(src, "", "missing-prod"); code(err) != "E_SECRETS_NO_INSTANCE" {
+		t.Fatalf("want E_SECRETS_NO_INSTANCE, got %v", err)
+	}
+
+	// Invalid instance name
+	for _, bad := range []string{"shop--prod", "Shop-prod", "shop_prod", "-shop", "shop-", ""} {
+		if _, _, err := CollectInstance(src, "", bad); code(err) != "E_INSTANCE_NAME" {
+			t.Errorf("%q: want E_INSTANCE_NAME, got %v", bad, err)
+		}
+	}
+
+	// Instance path is a file, not a directory
+	_ = src.WriteFile("/srv/deploy/not-a-dir", []byte("file"), 0o640, sys.Owner{})
+	if _, _, err := CollectInstance(src, "", "not-a-dir"); code(err) != "E_SECRETS_NO_INSTANCE" {
+		t.Fatalf("want E_SECRETS_NO_INSTANCE for non-dir, got %v", err)
+	}
+
+	// Symlink instance directory produces a warning
+	sym := symlinkFS{FS: src, links: map[string]bool{"/srv/deploy/shop-prod": true}}
+	ents, warns, err := CollectInstance(sym, "", "shop-prod")
+	if err != nil || len(ents) != 0 || len(warns) != 1 || !strings.Contains(warns[0], "symlink") {
+		t.Fatalf("symlink instance dir: ents=%v, warns=%v, err=%v", ents, warns, err)
+	}
+}
+
+func TestPackUnpackRoundTrip(t *testing.T) {
+	src := seed(t)
+	entries, _, err := Collect(src, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	packed, err := Pack(entries)
+	if err != nil {
+		t.Fatalf("Pack failed: %v", err)
+	}
+	got, err := Unpack(packed)
+	if err != nil {
+		t.Fatalf("Unpack failed: %v", err)
+	}
+	if !reflect.DeepEqual(got, entries) {
+		t.Fatalf("Unpack mismatch:\ngot:  %+v\nwant: %+v", got, entries)
+	}
+}
+
+func TestPackOutputEqualsPlaintextTarInsideBundle(t *testing.T) {
+	src := seed(t)
+	entries, _, err := Collect(src, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	packed, err := Pack(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Prove that Encrypt streams the exact same tar payload into age
+	var buf bytes.Buffer
+	if err := Encrypt(&buf, entries, "pass", false); err != nil {
+		t.Fatal(err)
+	}
+	ciphertext := buf.Bytes()
+
+	id, err := age.NewScryptIdentity("pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dr, err := age.Decrypt(bytes.NewReader(ciphertext), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tarInside, err := io.ReadAll(dr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(tarInside, packed) {
+		t.Fatal("Pack output does not match the plaintext tar inside the age bundle")
+	}
+
+	// And Decrypt returns the same entries
+	decrypted, err := Decrypt(bytes.NewReader(ciphertext), "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decrypted, entries) {
+		t.Fatal("Decrypt output does not match original entries")
+	}
+}
+
+func TestPackRejectsInvalidEntries(t *testing.T) {
+	// Not allowed path
+	if _, err := Pack([]Entry{{Path: "/etc/shadow", Mode: 0o600, Data: []byte("x")}}); code(err) != "E_SECRETS_ENTRY_INVALID" {
+		t.Fatalf("want E_SECRETS_ENTRY_INVALID, got %v", err)
+	}
+
+	// Duplicate path
+	dups := []Entry{
+		{Path: "/etc/cvctl/host.env", Mode: 0o600, Data: []byte("a")},
+		{Path: "/etc/cvctl/host.env", Mode: 0o600, Data: []byte("b")},
+	}
+	if _, err := Pack(dups); code(err) != "E_SECRETS_ENTRY_INVALID" {
+		t.Fatalf("want E_SECRETS_ENTRY_INVALID, got %v", err)
+	}
+
+	// Exceeds max entry size
+	huge := []Entry{{Path: "/etc/cvctl/host.env", Mode: 0o600, Data: make([]byte, maxEntrySize+1)}}
+	if _, err := Pack(huge); code(err) != "E_SECRETS_CORRUPT" {
+		t.Fatalf("want E_SECRETS_CORRUPT, got %v", err)
+	}
+
+	// Exceeds max entries
+	many := make([]Entry, maxEntries+1)
+	for i := range many {
+		many[i] = Entry{Path: "/etc/cvctl/host.env", Mode: 0o600}
+	}
+	if _, err := Pack(many); code(err) != "E_SECRETS_CORRUPT" {
+		t.Fatalf("want E_SECRETS_CORRUPT for >maxEntries, got %v", err)
+	}
+
+	// Exceeds total size
+	var largeEntries []Entry
+	for i := 0; i < 17; i++ {
+		largeEntries = append(largeEntries, Entry{
+			Path: "/etc/cvctl/secrets/k" + string(rune('a'+i)),
+			Mode: 0o600,
+			Data: make([]byte, 4<<20),
+		})
+	}
+	if _, err := Pack(largeEntries); code(err) != "E_SECRETS_TOO_LARGE" {
+		t.Fatalf("want E_SECRETS_TOO_LARGE, got %v", err)
+	}
+}
+
+func TestPartialBundleRestore(t *testing.T) {
+	src := seed(t)
+
+	// Host-only bundle
+	hostEntries, _, err := CollectHost(src, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dstHost := systest.NewFS()
+	restoredHost, err := Restore(dstHost, "", hostEntries, false)
+	if err != nil {
+		t.Fatalf("host-only restore: %v", err)
+	}
+	if len(restoredHost) != 2 {
+		t.Fatalf("want 2 restored host files, got %d", len(restoredHost))
+	}
+	if _, err := dstHost.Stat("/etc/cvctl/host.env"); err != nil {
+		t.Errorf("host.env missing: %v", err)
+	}
+	if _, err := dstHost.Stat("/etc/cvctl/secrets/restic_password"); err != nil {
+		t.Errorf("restic_password missing: %v", err)
+	}
+
+	// Instance-only bundle
+	instEntries, _, err := CollectInstance(src, "", "shop-prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dstInst := systest.NewFS()
+	restoredInst, err := Restore(dstInst, "", instEntries, false)
+	if err != nil {
+		t.Fatalf("instance-only restore: %v", err)
+	}
+	if len(restoredInst) != 3 {
+		t.Fatalf("want 3 restored instance files, got %d", len(restoredInst))
+	}
+	fi, err := dstInst.Stat("/srv/deploy/shop-prod")
+	if err != nil || !fi.IsDir || fi.User != "deployer" || fi.Group != "deploy" {
+		t.Fatalf("deploy dir not created with deployer:deploy: %+v %v", fi, err)
+	}
+	if _, err := dstInst.Stat("/srv/deploy/shop-prod/cvctl.env"); err != nil {
+		t.Errorf("cvctl.env missing: %v", err)
+	}
+	if _, err := dstInst.Stat("/srv/deploy/shop-prod/app.env"); err != nil {
+		t.Errorf("app.env missing: %v", err)
+	}
+	if _, err := dstInst.Stat("/srv/deploy/shop-prod/backup-db.env"); err != nil {
+		t.Errorf("backup-db.env missing: %v", err)
+	}
+	// Verify host secrets were not created
+	if _, err := dstInst.Stat("/etc/cvctl/host.env"); err == nil {
+		t.Error("host.env should not exist in instance restore")
+	}
+}
+
+const goldenBundle = `-----BEGIN AGE ENCRYPTED FILE-----
+YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBVMjBFZFA3VHd1ODdmbEFT
+RUVOYjdnIDE4Ci9kVzE0TFF6WjRpTEpSYjdJcFU5eTd0b1pwbVBmNnNDajNjdFJl
+UXdUdE0KLS0tIEJPc3BUQXFXNVZGV3I3MHlzaW5xL0pEeGNHN1gxZGQ5Rlh3cVAr
+MGoycnMKsfPdpzY1i1SFujZfedD54oHff3F1uPDG1oQ4YzEV5mhw1TQr58Ng3ypF
+QkvuJLNgmbqTTfDhw+r6Yx2rzE2fMp6kHsZPEuOkv4w/e4arZVg477GUiFg8U00W
+E1jQbx3DIrVg0QibMT/9ogNnkzAskyrHSvuHXcDFpc6yagPLH0EQlArxynvo9+0J
+JuQknCutraqwBGigdvm/1deVtyvaWpo5R0535Hqc6TXKAzb1AvIGEj0UuzViJFAX
+3iZ07cVbb5r+E+RuY02wei6MoYrmiNaXzd8TqKt3my5oWOzoVpacv05KTeG1F/RG
+Hd4iQxv/UGzB8lb01TSiEarwqrBvF/nypS82v5iFUU3NO1Hn0dZwr2h2iEuIXltG
+SjBGsQ9a/1rB71Tn2TyHgiouI7Jg2r9hy40Y8oAfkKm+XQia36svj0PxM0XQphww
+bHsfzSxixgXsR8DWtnWzOqlPRN1QU5XsKo/BJcZ6V7CHLCj7M3TbacxPo7OxwaGD
+gCAxmGfjOHuzz4WosHJnUpcLmfi2/KovLBFwWiOjg5c62IkDdJE3vUhGzO8cNYXh
+a5rNfLbe6q2kANOo0l8zFRZp/MOL5zxQR1QP+UcXuqfH4ahO8P3R2BhNHgKyqLkr
+siArlUd7Mm+5zvqHywyceKcBWHSjsUt24CBWhhVMgu8lbVa9s9OSLrHDwcLC0D/K
+DeXFYz+/uYyzdPuVpddqO3oOAE59GgBY6SWhwuOgYTBYFyybUPbW5pWYHTs7rB3B
+3bhIWTeynb/IeUy/215ubF8SfqWm/RXYUIz1O4XoL4hXKooBPXYeWYtGbSJc1SWp
+Odf2Vqxr2MWcJICklkS0gtRGcAzKUWr5KCUMOIsHqZF/mlTkBB7H/FoBLzyMYRBz
+v2MPLNyWRnOWLg/qmNQnGmeLWJakmTDB0kqJSFFgJnYgXLrfbeI2/cA14KEqIvXN
+WDxfX+Kh6fYvtr2m9CG96lqMu83Yp8hhScNqzssNbbxODW/sbwRtN9GzYbZB1M8a
+AFQgM4tx44nGWnYHkGwfRKFTuZo2Uwn99d6zaP6SKlBwed95FHDVbrTf1bn8MPyZ
+5vFs8DJnzOtrIIyRBq1HsewgMJ3mVs3SHVIAPCcPvzVg1fpgTn03PnHE36wVE+iw
+s1K/1Bw1W6ZI/g0EX4mKKjJT71S/4NyE2Ca/E2Z3vhuy1CYiiwOPd3BRgqqgnnSh
+4/F6jmWdFtEQ/znMqjhb9edmyJB+xYqL88PSfIEYJRyJhx6FX7uva//GiMnk+Lez
+wz3py5aSTPn9LoYd2+6zCK3QRLypbJbnnPHlcrZ/HTa8Tvmp755eIJTU0q2Ij+Rx
+P303aEiydOylb23iE1OeqSJRhHA450p4JNq8ZOTtfPOJJRnJIrWQBGht5PB4vcwq
++Cldr8HZJOarmWC2ByB/RR5lDN6tA3nAV/+4tqPp6NjudxCYEqRdOSF4/ZCckFfw
+5FXCbatuZQ80OfKIBgPrQHykF32hXUbFbI3XoJes8ww/TSbBCeJRY94snyZZAio1
+//KQ2RAe1Av5ns+JHDmWXqp2tjTLrH6zbbcf3GiQ5ztThdJiinkRhqfkZlrHCzwe
+gICGbe+6dvEyvKf2YmOSHZLW0a6Dc0UZEIKrD7gy3QdbriEXGR6I2nbXVUaorpAL
+LalCCEI7gpzA6n4nv6OIsVFLFyxs7yWddyZrfyxZUjFptxRs0j3qJI4pUcNaZrFd
+JcN7ZG+wn7PnSc1hrYfD96Cf+DKTLzkG7RoORuKbTC2TxVnokGErk+y5jumhfD++
+oge+4TqgI1Z192IgIWLrjjclB6j/qzHcXiht5+9pgzxmLOodun7+z4IQCI6zD+yE
+6hEHd66XyxAGDc/mhUZO8G7wzCGLoGUhtoYhNvRSvWQi8p11MEBgoXchBaSMMVV3
+mXF8lQM3hAKoFhVREEhAWVrVPl5q2Z7Q82v19KJHAkKzPXrZQb6N+mCfiRY5V4zz
+A+Ht8hGjri7Oz/4tZ6BFC2tBQl0Iay6sxQPYFn8AjKmyRvAxq0JZpTEzkzd4CEO5
+TGHM5S5dYfsPSUwA4N1y4Ee74ORp4y+m/rx0SIAE21rUdAIOEbjnjKIwaZlCrB2d
+yZo8kHGFplizFvo9Qa2cLy/eanee5d/vsJfWEGHg8O8TLHfCrEbFWoD3tGChduPZ
+WceuQJgP+RCnnCdtjxmnOYlK6XYRW3ZXbngU8EuV72wG+rSmLT1alVTDbNJZJlId
+lmPCrUuYuPaO9UEI3VSs1g/rtlyvJySgacMYQHFoofOO2DmNv9Zz+Yg5VptLFLc/
+jmcKci2TDfVxniBsARsDuUfkeLdH5exfOMLinMJNAHzUT/K9Us12chO4rt2+OZOI
+ivjH2Co6SgRBypePsR2yaYVCU6/dcjsjlbQyweedYm5RsVZWnhdosCE/qq5kpjUt
+10sE7HnEPtrGYLpaM+pfR+RibJDndwd9H05kHgI5vGGHHHMIv/Op1VdmeafcLTJg
+IvDksLdhVlifge4nqylTZmzu6vldNO1FytU2o9bI5TbDu4b+94Fh/N7Ts8yjU1KS
+i9dnOJzUJugFJc18ixPMlU4ZgAfnX7JVgkNi3MTNDvda5zL9/TWb1ZP17YRcJ23G
+qwduoMwxta+VZ4hBdS0SZDRz24RaxGWANwliJzSfVZYHt61999c8f+8loVrG57sY
+wpF5mAFDbTm7oJDskMfFVUYRjmCF24N6AtdefMU1vYFrFSuH2heforc65i/9Lb8d
+RARTYRBGR+yQbdpyxBYviXvqGFpTOw==
+-----END AGE ENCRYPTED FILE-----`
+
+func TestExistingGoldenBundleDecrypts(t *testing.T) {
+	got, err := Decrypt(strings.NewReader(goldenBundle), "pass")
+	if err != nil {
+		t.Fatalf("failed to decrypt golden bundle: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 entry from golden bundle, got %d", len(got))
+	}
+	if got[0].Path != "/etc/cvctl/host.env" || string(got[0].Data) != "HOST=a\n" || got[0].User != "root" || got[0].Group != "deploy" || got[0].Mode != 0o640 {
+		t.Fatalf("unexpected entry: %+v", got[0])
 	}
 }

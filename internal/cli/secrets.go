@@ -33,6 +33,7 @@ var (
 var (
 	hostArgRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
 	userArgRe = regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`)
+	instArgRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 )
 
 type secretsExportReport struct {
@@ -74,17 +75,24 @@ func secretsRoot(cmd *cobra.Command) (string, error) {
 }
 
 func newSecretsExportCmd() *cobra.Command {
-	var out string
+	var out, instance string
+	var hostOnly bool
 	cmd := &cobra.Command{
 		Use:   "export",
 		Short: "Write an age-encrypted bundle of all secrets (run as root)",
 		Long: `Write an age-encrypted bundle of host.env, the host secrets, every instance
 cvctl.env/app.env/backup-*.env/restic-*.env and every deploy key.
 
+Pass --instance <name> to bundle only that instance's env files, or --host to
+bundle only host.env and /etc/cvctl/secrets/*. The two flags are mutually
+exclusive; omitting both bundles everything.
+
 The passphrase is typed twice on the terminal (hidden). Without a terminal it is
 read from CVCTL_SECRETS_PASSPHRASE. It is never accepted as a flag. Use -o - to
 write the (ASCII-armored) bundle to stdout.`,
 		Example: `  sudo cvctl secrets export -o secrets.age
+  sudo cvctl secrets export --instance shop-prod -o shop.age
+  sudo cvctl secrets export --host -o host.age
   sudo cvctl secrets export -o - > secrets.age.txt`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -93,12 +101,35 @@ write the (ASCII-armored) bundle to stdout.`,
 					Code: "E_USAGE_OUTPUT", Message: "-o is required", Hint: "pass -o FILE or -o -",
 				}}
 			}
+			if (instance != "" || cmd.Flags().Changed("instance")) && hostOnly {
+				return &output.UsageError{Err: &output.Error{
+					Code:    "E_USAGE_SCOPE",
+					Message: "--instance and --host cannot be used together",
+					Hint:    "choose either --instance or --host, or omit both for a full bundle",
+				}}
+			}
+			if cmd.Flags().Changed("instance") && (instance == "" || !instArgRe.MatchString(instance)) {
+				return &output.UsageError{Err: &output.Error{
+					Code:    "E_INSTANCE_NAME",
+					Message: fmt.Sprintf("invalid instance name %q", instance),
+					Hint:    "instance names must contain only lowercase letters, digits, and single hyphens",
+				}}
+			}
 			root, err := secretsRoot(cmd)
 			if err != nil {
 				return err
 			}
 			fsys := secretsFS()
-			entries, warns, err := secrets.Collect(fsys, root)
+			var entries []secrets.Entry
+			var warns []string
+			switch {
+			case hostOnly:
+				entries, warns, err = secrets.CollectHost(fsys, root)
+			case instance != "":
+				entries, warns, err = secrets.CollectInstance(fsys, root, instance)
+			default:
+				entries, warns, err = secrets.Collect(fsys, root)
+			}
 			for _, w := range warns {
 				fmt.Fprintln(cmd.ErrOrStderr(), "warning: "+w)
 			}
@@ -130,6 +161,8 @@ write the (ASCII-armored) bundle to stdout.`,
 		},
 	}
 	cmd.Flags().StringVarP(&out, "output", "o", "", "output file, or - for stdout")
+	cmd.Flags().StringVar(&instance, "instance", "", "export only secrets for this instance")
+	cmd.Flags().BoolVar(&hostOnly, "host", false, "export only host secrets (host.env and /etc/cvctl/secrets/*)")
 	return cmd
 }
 
@@ -240,14 +273,18 @@ func newRemoteCmd() *cobra.Command {
 
 func newRemoteExportCmd() *cobra.Command {
 	var port int
-	var user, out string
+	var user, out, instance string
+	var hostOnly bool
 	cmd := &cobra.Command{
 		Use:   "export <host>",
 		Short: "Fetch an encrypted secrets bundle from a host over ssh",
 		Long: `Run "sudo cvctl secrets export" on the host over ssh -t and save the bundle
-locally (0600). The remote prompts for the passphrase on your terminal.`,
+locally (0600). Pass --instance <name> or --host to export only a single instance
+or the host secrets. The remote prompts for the passphrase on your terminal.`,
 		Example: `  cvctl remote export server.example.com --user admin
-  cvctl remote export server.example.com --port 2228 -o backup.age`,
+  cvctl remote export server.example.com --port 2228 -o backup.age
+  cvctl remote export server.example.com --instance shop-prod
+  cvctl remote export server.example.com --host`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			host := args[0]
@@ -269,6 +306,20 @@ locally (0600). The remote prompts for the passphrase on your terminal.`,
 					Hint: "pass a port between 1 and 65535",
 				}}
 			}
+			if (instance != "" || cmd.Flags().Changed("instance")) && hostOnly {
+				return &output.UsageError{Err: &output.Error{
+					Code:    "E_USAGE_SCOPE",
+					Message: "--instance and --host cannot be used together",
+					Hint:    "choose either --instance or --host, or omit both for a full bundle",
+				}}
+			}
+			if cmd.Flags().Changed("instance") && (instance == "" || !instArgRe.MatchString(instance)) {
+				return &output.UsageError{Err: &output.Error{
+					Code:    "E_INSTANCE_NAME",
+					Message: fmt.Sprintf("invalid instance name %q", instance),
+					Hint:    "instance names must contain only lowercase letters, digits, and single hyphens",
+				}}
+			}
 			if out == "" {
 				out = fmt.Sprintf("cvctl-secrets-%s-%s.age", strings.ReplaceAll(host, ":", "_"), secretsNow().Format("2006-01-02"))
 			}
@@ -276,10 +327,16 @@ locally (0600). The remote prompts for the passphrase on your terminal.`,
 			if user != "" {
 				target = user + "@" + host
 			}
+			sshArgs := []string{"-t", "-p", fmt.Sprint(port), target, "sudo", "cvctl", "secrets", "export", "-o", "-"}
+			if hostOnly {
+				sshArgs = append(sshArgs, "--host")
+			} else if instance != "" {
+				sshArgs = append(sshArgs, "--instance", instance)
+			}
 			var raw bytes.Buffer
 			c := sys.Cmd{
 				Name:    "ssh",
-				Args:    []string{"-t", "-p", fmt.Sprint(port), target, "sudo", "cvctl", "secrets", "export", "-o", "-"},
+				Args:    sshArgs,
 				Stdout:  &raw,
 				Inherit: true,
 			}
@@ -314,5 +371,7 @@ locally (0600). The remote prompts for the passphrase on your terminal.`,
 	cmd.Flags().IntVar(&port, "port", 22, "ssh port")
 	cmd.Flags().StringVar(&user, "user", "", "ssh user")
 	cmd.Flags().StringVarP(&out, "output", "o", "", "output file (default cvctl-secrets-<host>-<date>.age)")
+	cmd.Flags().StringVar(&instance, "instance", "", "export only secrets for this instance")
+	cmd.Flags().BoolVar(&hostOnly, "host", false, "export only host secrets (host.env and /etc/cvctl/secrets/*)")
 	return cmd
 }

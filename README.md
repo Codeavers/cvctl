@@ -155,6 +155,32 @@ $ cvctl render --instance-dir /srv/deploy/demo-dev --json
 
 `examples/demo` is a complete sample project (an API, a worker, Postgres, Redis and S3).
 
+## secrets
+
+Backs up or restores host and instance secrets as an age-encrypted bundle (`0600`). Plaintext
+only lives in memory.
+
+```
+sudo cvctl secrets export -o secrets.age
+sudo cvctl secrets export --instance demo-prod -o demo-prod.age
+sudo cvctl secrets export --host -o host.age
+sudo cvctl secrets export -o - > secrets.age.txt
+
+sudo cvctl secrets import secrets.age
+sudo cvctl secrets import --force secrets.age
+```
+
+- **Scope flags**: `--instance <name>` bundles only the env files under `/srv/deploy/<inst>/`;
+  `--host` bundles only `host.env` and `/etc/cvctl/secrets/*`. The flags are mutually exclusive
+  (`E_USAGE_SCOPE`). Omitting both bundles every host secret, instance env file and deploy key.
+- **Passphrase**: prompted interactively on the terminal (typed twice, hidden) or read from
+  `CVCTL_SECRETS_PASSPHRASE`.
+- **Import**: validates every entry path, file mode, and owner before writing. Partial bundles
+  (host-only or instance-only) are accepted. Existing files are not overwritten unless `--force`
+  is given (`E_SECRETS_EXISTS`).
+- **Remote export**: `cvctl remote export <host> [--port <port>] [--user <user>]` runs export
+  over SSH with `-t` and accepts the same `--instance` and `--host` flags.
+
 ## Data kinds
 
 A service declares `cvctl.kind` to get a managed data service: `postgres` (15, 16, 17), `postgis`
