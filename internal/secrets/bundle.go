@@ -134,7 +134,11 @@ func CollectInstance(fsys sys.FS, root, inst string) ([]Entry, []string, error) 
 	}
 	if fi.IsSymlink || !fi.IsDir {
 		if fi.IsSymlink {
-			return nil, []string{"skipped " + instDir + ": symlink"}, nil
+			return nil, nil, &output.Error{
+				Code:    "E_SECRETS_UNSAFE_PATH",
+				Message: fmt.Sprintf("%s is a symlink", instDir),
+				Hint:    "instance directories must be real directories",
+			}
 		}
 		return nil, nil, &output.Error{
 			Code:    "E_SECRETS_NO_INSTANCE",
@@ -305,6 +309,10 @@ func Pack(entries []Entry) ([]byte, error) {
 // Unpack decodes an uncompressed tar archive into entries after validating every
 // path against Allowed and checking the size limits.
 func Unpack(b []byte) ([]Entry, error) {
+	// Callers outside Decrypt (restic dump) hand over raw bytes; bound them here too.
+	if len(b) > maxTotalSize+maxEntries*3*512 {
+		return nil, corrupt()
+	}
 	tr := tar.NewReader(bytes.NewReader(b))
 	var out []Entry
 	seen := map[string]bool{}

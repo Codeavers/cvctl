@@ -101,19 +101,8 @@ write the (ASCII-armored) bundle to stdout.`,
 					Code: "E_USAGE_OUTPUT", Message: "-o is required", Hint: "pass -o FILE or -o -",
 				}}
 			}
-			if (instance != "" || cmd.Flags().Changed("instance")) && hostOnly {
-				return &output.UsageError{Err: &output.Error{
-					Code:    "E_USAGE_SCOPE",
-					Message: "--instance and --host cannot be used together",
-					Hint:    "choose either --instance or --host, or omit both for a full bundle",
-				}}
-			}
-			if cmd.Flags().Changed("instance") && (instance == "" || !instArgRe.MatchString(instance)) {
-				return &output.UsageError{Err: &output.Error{
-					Code:    "E_INSTANCE_NAME",
-					Message: fmt.Sprintf("invalid instance name %q", instance),
-					Hint:    "instance names must contain only lowercase letters, digits, and single hyphens",
-				}}
+			if err := validateScope(cmd, instance, hostOnly); err != nil {
+				return err
 			}
 			root, err := secretsRoot(cmd)
 			if err != nil {
@@ -306,19 +295,8 @@ or the host secrets. The remote prompts for the passphrase on your terminal.`,
 					Hint: "pass a port between 1 and 65535",
 				}}
 			}
-			if (instance != "" || cmd.Flags().Changed("instance")) && hostOnly {
-				return &output.UsageError{Err: &output.Error{
-					Code:    "E_USAGE_SCOPE",
-					Message: "--instance and --host cannot be used together",
-					Hint:    "choose either --instance or --host, or omit both for a full bundle",
-				}}
-			}
-			if cmd.Flags().Changed("instance") && (instance == "" || !instArgRe.MatchString(instance)) {
-				return &output.UsageError{Err: &output.Error{
-					Code:    "E_INSTANCE_NAME",
-					Message: fmt.Sprintf("invalid instance name %q", instance),
-					Hint:    "instance names must contain only lowercase letters, digits, and single hyphens",
-				}}
+			if err := validateScope(cmd, instance, hostOnly); err != nil {
+				return err
 			}
 			if out == "" {
 				out = fmt.Sprintf("cvctl-secrets-%s-%s.age", strings.ReplaceAll(host, ":", "_"), secretsNow().Format("2006-01-02"))
@@ -374,4 +352,27 @@ or the host secrets. The remote prompts for the passphrase on your terminal.`,
 	cmd.Flags().StringVar(&instance, "instance", "", "export only secrets for this instance")
 	cmd.Flags().BoolVar(&hostOnly, "host", false, "export only host secrets (host.env and /etc/cvctl/secrets/*)")
 	return cmd
+}
+
+// validateScope checks the --instance/--host pair shared by secrets export and
+// remote export.
+func validateScope(cmd *cobra.Command, instance string, hostOnly bool) error {
+	if !cmd.Flags().Changed("instance") {
+		return nil
+	}
+	if hostOnly {
+		return &output.UsageError{Err: &output.Error{
+			Code:    "E_USAGE_SCOPE",
+			Message: "--instance and --host cannot be used together",
+			Hint:    "choose either --instance or --host, or omit both for a full bundle",
+		}}
+	}
+	if !instArgRe.MatchString(instance) {
+		return &output.UsageError{Err: &output.Error{
+			Code:    "E_INSTANCE_NAME",
+			Message: fmt.Sprintf("invalid instance name %q", instance),
+			Hint:    "instance names must contain only lowercase letters, digits, and single hyphens",
+		}}
+	}
+	return nil
 }

@@ -427,11 +427,10 @@ func TestCollectInstance(t *testing.T) {
 		t.Fatalf("want E_SECRETS_NO_INSTANCE for non-dir, got %v", err)
 	}
 
-	// Symlink instance directory produces a warning
+	// A symlinked instance dir must fail, not yield an empty bundle that looks valid.
 	sym := symlinkFS{FS: src, links: map[string]bool{"/srv/deploy/shop-prod": true}}
-	ents, warns, err := CollectInstance(sym, "", "shop-prod")
-	if err != nil || len(ents) != 0 || len(warns) != 1 || !strings.Contains(warns[0], "symlink") {
-		t.Fatalf("symlink instance dir: ents=%v, warns=%v, err=%v", ents, warns, err)
+	if _, _, err := CollectInstance(sym, "", "shop-prod"); code(err) != "E_SECRETS_UNSAFE_PATH" {
+		t.Fatalf("want E_SECRETS_UNSAFE_PATH for symlinked instance dir, got %v", err)
 	}
 }
 
