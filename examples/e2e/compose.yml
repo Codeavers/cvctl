@@ -49,6 +49,8 @@ services:
       cvctl.env: S3
       cvctl.expose: "9000"
       cvctl.external: allowed
+      # object storage is not backed up by default; the E2E keeps the restic path covered
+      cvctl.backup: volume
     deploy:
       resources:
         limits:
