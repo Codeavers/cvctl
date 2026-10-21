@@ -90,6 +90,13 @@ func (r *Runner) Verify(ctx context.Context, inst, only string) ([]Result, error
 	var results []Result
 	var failed, statusErrs []string
 	for _, t := range ts {
+		if t.Strategy == StrategyEnv {
+			return nil, &output.Error{
+				Code:    "E_BACKUP_NO_TARGET",
+				Message: fmt.Sprintf("service %q of %s has no backup (not a local data service with backups)", t.Service, inst),
+				Hint:    "run cvctl backup list <instance> to see which services are backed up",
+			}
+		}
 		runErr := func() error {
 			tctx, cancel := context.WithTimeout(ctx, verifyTimeout)
 			defer cancel()

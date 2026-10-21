@@ -1052,7 +1052,13 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, rollbackEnv, secrets, rollbackEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote backup env failed: %v", err))
 		}
 	}
-	d.removeStaleBackupEnvs(instDir, backupEnvs)
+	resticKeep := map[string]bool{}
+	for _, t := range backup.Targets(p, dec) {
+		if t.Strategy == backup.StrategyVolume {
+			resticKeep[t.Service] = true
+		}
+	}
+	d.removeStaleBackupEnvs(instDir, backupEnvs, resticKeep)
 	if routeBytes != nil {
 		if err := fsys.WriteFile(finalRoutePath, routeBytes, 0o640, deployOwner); err != nil {
 			return d.handlePromoteFailure(ctx, inst, st, want, deployID, actor, now, rollbackEnv, secrets, rollbackEnvAbsent, stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath, fmt.Sprintf("promote route failed: %v", err))
@@ -1346,8 +1352,10 @@ func (d *Deployer) backupSecrets() map[string]string {
 }
 
 // removeStaleBackupEnvs deletes backup-<svc>.env files of services that are no
-// longer wired for wal-g, so old credentials do not linger on disk.
-func (d *Deployer) removeStaleBackupEnvs(instDir string, keep map[string]map[string]string) {
+// longer wired for wal-g and restic-<svc>.env files of services that are no
+// longer restic volume targets, so old credentials do not linger on disk.
+// restic-env.env belongs to the host-level env backup and stays.
+func (d *Deployer) removeStaleBackupEnvs(instDir string, keep map[string]map[string]string, resticKeep map[string]bool) {
 	fsys := d.fs()
 	entries, err := fsys.ReadDir(instDir)
 	if err != nil {
@@ -1355,11 +1363,18 @@ func (d *Deployer) removeStaleBackupEnvs(instDir string, keep map[string]map[str
 	}
 	for _, e := range entries {
 		n := e.Name()
-		if e.IsDir() || !strings.HasPrefix(n, "backup-") || !strings.HasSuffix(n, ".env") {
+		if e.IsDir() || !strings.HasSuffix(n, ".env") {
 			continue
 		}
-		if _, ok := keep[strings.TrimSuffix(strings.TrimPrefix(n, "backup-"), ".env")]; !ok {
-			_ = fsys.Remove(filepath.Join(instDir, n))
+		switch {
+		case strings.HasPrefix(n, "backup-"):
+			if _, ok := keep[strings.TrimSuffix(strings.TrimPrefix(n, "backup-"), ".env")]; !ok {
+				_ = fsys.Remove(filepath.Join(instDir, n))
+			}
+		case strings.HasPrefix(n, "restic-") && n != "restic-env.env":
+			if !resticKeep[strings.TrimSuffix(strings.TrimPrefix(n, "restic-"), ".env")] {
+				_ = fsys.Remove(filepath.Join(instDir, n))
+			}
 		}
 	}
 }

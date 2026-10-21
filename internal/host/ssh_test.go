@@ -20,6 +20,8 @@ const testEd25519Key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA== test@host"
 func newSSHTestEnv(adminUser string, manage bool, interactive bool) (*Env, *systest.Runner, *systest.FS) {
 	r := &systest.Runner{}
 	fs := systest.NewFS()
+	seedOS(fs, ubuntu2404)
+	r.On("systemctl cat ssh.service", sys.Result{ExitCode: 0})
 	cfg := &hostcfg.Config{
 		AdminUser: adminUser,
 		SSHManage: manage,

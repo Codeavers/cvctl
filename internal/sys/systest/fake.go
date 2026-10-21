@@ -102,6 +102,10 @@ type FS struct {
 	m  map[string]*entry
 	// Users and Groups are the names LookupOwner accepts.
 	Users, Groups map[string]bool
+	// StrictParents makes WriteFile fail with fs.ErrNotExist when the parent
+	// directory is missing, like the real FS. Off by default: most fixtures
+	// write files without creating their directories.
+	StrictParents bool
 }
 
 func NewFS() *FS {
@@ -135,7 +139,11 @@ func (f *FS) ReadFile(p string) ([]byte, error) {
 func (f *FS) WriteFile(p string, data []byte, mode os.FileMode, o sys.Owner) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.put(path.Clean(p), append([]byte(nil), data...), mode, o, false)
+	p = path.Clean(p)
+	if parent := path.Dir(p); f.StrictParents && parent != "/" && parent != "." && f.m[parent] == nil {
+		return &fs.PathError{Op: "open", Path: p, Err: fs.ErrNotExist}
+	}
+	f.put(p, append([]byte(nil), data...), mode, o, false)
 	return nil
 }
 

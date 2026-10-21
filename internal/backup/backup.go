@@ -27,6 +27,7 @@ import (
 const (
 	StrategyWalG   = "wal-g"
 	StrategyVolume = "volume"
+	StrategyEnv    = "env"
 
 	// pgData is the image default; the render step keeps PGDATA at the volume root.
 	pgData         = "/var/lib/postgresql/data"
@@ -241,6 +242,19 @@ func (r *Runner) instanceDir(inst string) string {
 	return filepath.Join(root, inst)
 }
 
+func (r *Runner) secretsRoot() (string, error) {
+	if r.DeployRoot == "" || r.DeployRoot == "/srv/deploy" {
+		return "", nil
+	}
+	if strings.HasSuffix(r.DeployRoot, "/srv/deploy") {
+		return strings.TrimSuffix(r.DeployRoot, "/srv/deploy"), nil
+	}
+	return "", &output.Error{
+		Code:    "E_BACKUP_FAILED",
+		Message: fmt.Sprintf("deploy root %s does not end in /srv/deploy", r.DeployRoot),
+	}
+}
+
 func (r *Runner) secrets() []string {
 	if r.Host == nil {
 		return nil
@@ -329,6 +343,9 @@ func (r *Runner) targets(ctx context.Context, inst, only string) (*Runner, []Tar
 	if only == "" {
 		return rr, all, nil
 	}
+	if only == "env" {
+		return rr, []Target{{Service: "env", Strategy: StrategyEnv}}, nil
+	}
 	for _, t := range all {
 		if t.Service == only {
 			return rr, []Target{t}, nil
@@ -348,10 +365,7 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 	if r.Host == nil {
 		return nil, notConfigured()
 	}
-	r, ts, err := r.targets(ctx, inst, only)
-	if err != nil {
-		return nil, err
-	}
+	hostRunner := r
 	unlock, err := r.lockData(ctx, true)
 	if err != nil {
 		return nil, err
@@ -359,30 +373,74 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 	defer unlock()
 	var results []Result
 	var failed, statusErrs []string
-	for _, t := range ts {
-		runErr := func() error {
-			// a hung wal-g or restic must not hold the remaining services
-			tctx, cancel := context.WithTimeout(ctx, backupTimeout)
-			defer cancel()
-			if t.Strategy == StrategyWalG {
-				return r.walgBackup(tctx, inst, t)
+	var targetErr error
+
+	if only != "env" {
+		dataRunner, ts, err := r.targets(ctx, inst, only)
+		if err != nil {
+			if only != "" {
+				return nil, err
 			}
-			return r.resticBackup(tctx, inst, t)
-		}()
-		res := Result{Instance: inst, Service: t.Service, Strategy: t.Strategy, OK: runErr == nil}
-		if runErr != nil {
-			res.Error = r.redact(runErr.Error())
-			failed = append(failed, t.Service)
-		}
-		results = append(results, res)
-		if err := r.record(ctx, inst, t.Service, res); err != nil {
-			statusErrs = append(statusErrs, fmt.Sprintf("%s: %s", t.Service, r.redact(err.Error())))
+			targetErr = err
+			results = append(results, Result{
+				Instance: inst,
+				Service:  "",
+				OK:       false,
+				Error:    hostRunner.redact(err.Error()),
+			})
+		} else {
+			for _, t := range ts {
+				runErr := func() error {
+					// a hung wal-g or restic must not hold the remaining services
+					tctx, cancel := context.WithTimeout(ctx, backupTimeout)
+					defer cancel()
+					if t.Strategy == StrategyWalG {
+						return dataRunner.walgBackup(tctx, inst, t)
+					}
+					return dataRunner.resticBackup(tctx, inst, t)
+				}()
+				res := Result{Instance: inst, Service: t.Service, Strategy: t.Strategy, OK: runErr == nil}
+				if runErr != nil {
+					res.Error = dataRunner.redact(runErr.Error())
+					failed = append(failed, t.Service)
+				}
+				results = append(results, res)
+				if err := dataRunner.record(ctx, inst, t.Service, res); err != nil {
+					statusErrs = append(statusErrs, fmt.Sprintf("%s: %s", t.Service, dataRunner.redact(err.Error())))
+				}
+			}
 		}
 	}
-	if len(failed) > 0 {
+
+	if only == "" || only == "env" {
+		runErr := func() error {
+			tctx, cancel := context.WithTimeout(ctx, backupTimeout)
+			defer cancel()
+			return hostRunner.envBackup(tctx, inst)
+		}()
+		res := Result{Instance: inst, Service: "env", Strategy: StrategyEnv, OK: runErr == nil}
+		if runErr != nil {
+			res.Error = hostRunner.redact(runErr.Error())
+			failed = append(failed, "env")
+		}
+		results = append(results, res)
+		if err := hostRunner.record(ctx, inst, "env", res); err != nil {
+			statusErrs = append(statusErrs, fmt.Sprintf("%s: %s", "env", hostRunner.redact(err.Error())))
+		}
+	}
+
+	if targetErr != nil || len(failed) > 0 {
+		var msg string
+		if targetErr != nil && len(failed) > 0 {
+			msg = fmt.Sprintf("backup of %s failed: %s; and for: %s", inst, hostRunner.redact(targetErr.Error()), strings.Join(failed, ", "))
+		} else if targetErr != nil {
+			msg = fmt.Sprintf("backup of %s failed: %s", inst, hostRunner.redact(targetErr.Error()))
+		} else {
+			msg = fmt.Sprintf("backup of %s failed for: %s", inst, strings.Join(failed, ", "))
+		}
 		return results, &output.Error{
 			Code:    "E_BACKUP_FAILED",
-			Message: fmt.Sprintf("backup of %s failed for: %s", inst, strings.Join(failed, ", ")),
+			Message: msg,
 			Hint:    "see cvctl backup list and the per-service error; fix the storage or service and retry",
 		}
 	}
@@ -404,16 +462,28 @@ func (r *Runner) BackupService(ctx context.Context, inst, svc string) error {
 	if r.Host == nil {
 		return notConfigured()
 	}
-	r, ts, err := r.targets(ctx, inst, svc)
+	hostRunner := r
+	dataRunner, ts, err := r.targets(ctx, inst, svc)
 	if err != nil {
 		return err
 	}
 	tctx, cancel := context.WithTimeout(ctx, backupTimeout)
 	defer cancel()
 	if ts[0].Strategy == StrategyWalG {
-		return r.walgBackup(tctx, inst, ts[0])
+		return dataRunner.walgBackup(tctx, inst, ts[0])
 	}
-	return r.resticBackup(tctx, inst, ts[0])
+	if ts[0].Strategy == StrategyEnv {
+		if err := hostRunner.envBackup(tctx, inst); err != nil {
+			var oe *output.Error
+			if errors.As(err, &oe) {
+				oe.Message = hostRunner.redact(oe.Message)
+				return oe
+			}
+			return errors.New(hostRunner.redact(err.Error()))
+		}
+		return nil
+	}
+	return dataRunner.resticBackup(tctx, inst, ts[0])
 }
 
 // List returns the backups of one service, or of every target when svc is empty.
@@ -421,7 +491,15 @@ func (r *Runner) List(ctx context.Context, inst, svc string) ([]Snapshot, error)
 	if r.Host == nil {
 		return nil, notConfigured()
 	}
-	r, ts, err := r.targets(ctx, inst, svc)
+	hostRunner := r
+	if svc == "env" {
+		snaps, err := hostRunner.envList(ctx, inst)
+		if err != nil {
+			return nil, err
+		}
+		return append([]Snapshot{}, snaps...), nil
+	}
+	dataRunner, ts, err := r.targets(ctx, inst, svc)
 	if err != nil {
 		return nil, err
 	}
@@ -430,10 +508,17 @@ func (r *Runner) List(ctx context.Context, inst, svc string) ([]Snapshot, error)
 		var snaps []Snapshot
 		switch t.Strategy {
 		case StrategyWalG:
-			snaps, err = r.walgList(ctx, inst, t)
+			snaps, err = dataRunner.walgList(ctx, inst, t)
 		default:
-			snaps, err = r.resticList(ctx, inst, t)
+			snaps, err = dataRunner.resticList(ctx, inst, t)
 		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, snaps...)
+	}
+	if svc == "" {
+		snaps, err := hostRunner.envList(ctx, inst)
 		if err != nil {
 			return nil, err
 		}

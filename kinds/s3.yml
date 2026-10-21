@@ -14,7 +14,7 @@ env:
   ACCESS_KEY: "{app_user}"
   SECRET_KEY: "{app_password}"
   REGION: us-east-1
-backup: volume
+backup: none
 external: [endpoint, bucket, access_key, secret_key, region]
 health: ["CMD", "mc", "ready", "local"]
 buckets: true

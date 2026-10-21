@@ -93,6 +93,72 @@ func Collect(fsys sys.FS, root string) ([]Entry, []string, error) {
 	return c.entries, c.warns, nil
 }
 
+// CollectHost gathers only host.env and the files under /etc/cvctl/secrets/.
+func CollectHost(fsys sys.FS, root string) ([]Entry, []string, error) {
+	c := collector{fsys: fsys, root: strings.TrimRight(root, "/")}
+	c.file(hostEnvPath)
+	c.dirFiles(secretsDir, secretNameRe.MatchString)
+	if c.err != nil {
+		return nil, c.warns, c.err
+	}
+	sort.Slice(c.entries, func(i, j int) bool { return c.entries[i].Path < c.entries[j].Path })
+	return c.entries, c.warns, nil
+}
+
+// CollectInstance gathers the files of one instance that Collect would include:
+// those under /srv/deploy/<inst>/ and its deploy key under /var/lib/cvctl/<inst>/.
+func CollectInstance(fsys sys.FS, root, inst string) ([]Entry, []string, error) {
+	if !instRe.MatchString(inst) {
+		return nil, nil, &output.Error{
+			Code:    "E_INSTANCE_NAME",
+			Message: fmt.Sprintf("invalid instance name %q", inst),
+			Hint:    "instance names must contain only lowercase letters, digits, and single hyphens",
+		}
+	}
+	r := strings.TrimRight(root, "/")
+	instDir := path.Join(deployDir, inst)
+	fi, err := fsys.Lstat(r + instDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil, &output.Error{
+			Code:    "E_SECRETS_NO_INSTANCE",
+			Message: fmt.Sprintf("instance %q not found under %s", inst, deployDir),
+			Hint:    "check the instance name",
+		}
+	}
+	if err != nil {
+		return nil, nil, &output.Error{
+			Code:    "E_SECRETS_READ",
+			Message: fmt.Sprintf("cannot read %s: %v", instDir, err),
+			Hint:    "run as root (sudo cvctl secrets export)",
+		}
+	}
+	if fi.IsSymlink || !fi.IsDir {
+		if fi.IsSymlink {
+			return nil, nil, &output.Error{
+				Code:    "E_SECRETS_UNSAFE_PATH",
+				Message: fmt.Sprintf("%s is a symlink", instDir),
+				Hint:    "instance directories must be real directories",
+			}
+		}
+		return nil, nil, &output.Error{
+			Code:    "E_SECRETS_NO_INSTANCE",
+			Message: fmt.Sprintf("instance directory %s is not a directory", instDir),
+			Hint:    "check the instance name",
+		}
+	}
+	c := collector{fsys: fsys, root: r}
+	c.dirFiles(instDir, instFileRe.MatchString)
+	// The deploy key lives under the state dir, not the deploy dir; restore needs it.
+	for _, name := range []string{"deploy_key", "deploy_key.pub"} {
+		c.file(path.Join(stateDir, inst, name))
+	}
+	if c.err != nil {
+		return nil, c.warns, c.err
+	}
+	sort.Slice(c.entries, func(i, j int) bool { return c.entries[i].Path < c.entries[j].Path })
+	return c.entries, c.warns, nil
+}
+
 type collector struct {
 	fsys    sys.FS
 	root    string
@@ -191,11 +257,120 @@ func (c *collector) subdirs(dir string) []string {
 	return out
 }
 
-// Encrypt writes entries as a tar encrypted with passphrase. The tar is
-// streamed into age so no plaintext buffer other than the entries exists.
+// Pack writes entries as an uncompressed tar archive. Every entry is validated
+// against Allowed and the size limits before writing.
+func Pack(entries []Entry) ([]byte, error) {
+	if len(entries) > maxEntries {
+		return nil, corrupt()
+	}
+	seen := map[string]bool{}
+	total := 0
+	for _, e := range entries {
+		if !Allowed(e.Path) {
+			return nil, invalidEntry(e.Path, "path not allowed")
+		}
+		if seen[e.Path] {
+			return nil, invalidEntry(e.Path, "duplicate entry")
+		}
+		seen[e.Path] = true
+		if len(e.Data) > maxEntrySize {
+			return nil, corrupt()
+		}
+		total += len(e.Data)
+		if total > maxTotalSize {
+			return nil, &output.Error{
+				Code:    "E_SECRETS_TOO_LARGE",
+				Message: "the bundle content exceeds the size limit",
+				Hint:    "a cvctl secrets bundle is far smaller; check the file",
+			}
+		}
+	}
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, e := range entries {
+		h := &tar.Header{
+			Typeflag: tar.TypeReg,
+			Name:     e.Path,
+			Mode:     int64(e.Mode),
+			Size:     int64(len(e.Data)),
+			Uname:    e.User,
+			Gname:    e.Group,
+			Format:   tar.FormatPAX,
+		}
+		if err := tw.WriteHeader(h); err != nil {
+			return nil, err
+		}
+		if _, err := tw.Write(e.Data); err != nil {
+			return nil, err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// Unpack decodes an uncompressed tar archive into entries after validating every
+// path against Allowed and checking the size limits.
+func Unpack(b []byte) ([]Entry, error) {
+	// Callers outside Decrypt (restic dump) hand over raw bytes; bound them here too.
+	if len(b) > maxTotalSize+maxEntries*3*512 {
+		return nil, corrupt()
+	}
+	tr := tar.NewReader(bytes.NewReader(b))
+	var out []Entry
+	seen := map[string]bool{}
+	total := 0
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, corrupt()
+		}
+		if len(out) >= maxEntries {
+			return nil, corrupt()
+		}
+		if h.Typeflag != tar.TypeReg {
+			return nil, invalidEntry(h.Name, "not a regular file")
+		}
+		if !Allowed(h.Name) {
+			return nil, invalidEntry(h.Name, "path not allowed")
+		}
+		if seen[h.Name] {
+			return nil, invalidEntry(h.Name, "duplicate entry")
+		}
+		seen[h.Name] = true
+		data, err := io.ReadAll(io.LimitReader(tr, maxEntrySize+1))
+		if err != nil || len(data) > maxEntrySize {
+			return nil, corrupt()
+		}
+		total += len(data)
+		if total > maxTotalSize {
+			return nil, &output.Error{
+				Code:    "E_SECRETS_TOO_LARGE",
+				Message: "the bundle content exceeds the size limit",
+				Hint:    "a cvctl secrets bundle is far smaller; check the file",
+			}
+		}
+		out = append(out, Entry{
+			Path: h.Name, Mode: os.FileMode(h.Mode & 0o777),
+			User: h.Uname, Group: h.Gname, Data: data,
+		})
+	}
+	return out, nil
+}
+
+// Encrypt writes entries as an age-encrypted bundle (binary or ASCII armor)
+// encrypted with passphrase.
 func Encrypt(w io.Writer, entries []Entry, passphrase string, asciiArmor bool) error {
 	if passphrase == "" {
 		return emptyPassphrase()
+	}
+	raw, err := Pack(entries)
+	if err != nil {
+		return err
 	}
 	rcpt, err := age.NewScryptRecipient(passphrase)
 	if err != nil {
@@ -210,25 +385,7 @@ func Encrypt(w io.Writer, entries []Entry, passphrase string, asciiArmor bool) e
 	if err != nil {
 		return encryptErr(err)
 	}
-	tw := tar.NewWriter(ew)
-	for _, e := range entries {
-		h := &tar.Header{
-			Typeflag: tar.TypeReg,
-			Name:     e.Path,
-			Mode:     int64(e.Mode),
-			Size:     int64(len(e.Data)),
-			Uname:    e.User,
-			Gname:    e.Group,
-			Format:   tar.FormatPAX,
-		}
-		if err := tw.WriteHeader(h); err != nil {
-			return encryptErr(err)
-		}
-		if _, err := tw.Write(e.Data); err != nil {
-			return encryptErr(err)
-		}
-	}
-	if err := tw.Close(); err != nil {
+	if _, err := ew.Write(raw); err != nil {
 		return encryptErr(err)
 	}
 	if err := ew.Close(); err != nil {
@@ -277,49 +434,18 @@ func Decrypt(r io.Reader, passphrase string) ([]Entry, error) {
 			Hint:    "check the passphrase and that the file is a cvctl secrets bundle",
 		}
 	}
-	tr := tar.NewReader(dr)
-	var out []Entry
-	seen := map[string]bool{}
-	total := 0
-	for {
-		h, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, corrupt()
-		}
-		if len(out) >= maxEntries {
-			return nil, corrupt()
-		}
-		if h.Typeflag != tar.TypeReg {
-			return nil, invalidEntry(h.Name, "not a regular file")
-		}
-		if !Allowed(h.Name) {
-			return nil, invalidEntry(h.Name, "path not allowed")
-		}
-		if seen[h.Name] {
-			return nil, invalidEntry(h.Name, "duplicate entry")
-		}
-		seen[h.Name] = true
-		data, err := io.ReadAll(io.LimitReader(tr, maxEntrySize+1))
-		if err != nil || len(data) > maxEntrySize {
-			return nil, corrupt()
-		}
-		total += len(data)
-		if total > maxTotalSize {
-			return nil, &output.Error{
-				Code:    "E_SECRETS_TOO_LARGE",
-				Message: "the bundle content exceeds the size limit",
-				Hint:    "a cvctl secrets bundle is far smaller; check the file",
-			}
-		}
-		out = append(out, Entry{
-			Path: h.Name, Mode: os.FileMode(h.Mode & 0o777),
-			User: h.Uname, Group: h.Gname, Data: data,
-		})
+	tarBytes, err := io.ReadAll(io.LimitReader(dr, maxTotalSize+(maxEntries*2048)+1))
+	if err != nil {
+		return nil, corrupt()
 	}
-	return out, nil
+	if len(tarBytes) > maxTotalSize+(maxEntries*2048) {
+		return nil, &output.Error{
+			Code:    "E_SECRETS_TOO_LARGE",
+			Message: "the bundle content exceeds the size limit",
+			Hint:    "a cvctl secrets bundle is far smaller; check the file",
+		}
+	}
+	return Unpack(tarBytes)
 }
 
 func corrupt() error {

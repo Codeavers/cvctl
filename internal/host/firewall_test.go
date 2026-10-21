@@ -20,6 +20,7 @@ func newFirewallTestEnv(manage bool, edgeMode string) (*Env, *systest.Runner, *s
 		ExitCode: 0,
 	})
 	fs := systest.NewFS()
+	seedOS(fs, ubuntu2404)
 	cfg := &hostcfg.Config{
 		FirewallManage: manage,
 		EdgeMode:       edgeMode,

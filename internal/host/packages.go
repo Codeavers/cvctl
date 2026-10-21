@@ -78,16 +78,25 @@ func (PackagesStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	var changes []string
 	var actions []Action
 
+	osi, err := hostOS(e.FS)
+	if err != nil {
+		return Plan{}, err
+	}
+
 	resInfo, errInfo := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"info"}, Env: []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"}})
 	if errInfo == nil && resInfo.ExitCode == 0 {
 		resComp, errComp := e.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"compose", "version", "--short"}, Env: []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"}})
 		if errComp == nil && resComp.ExitCode == 0 && isComposeSatisfied(string(resComp.Stdout)) {
 			// Compose is installed and version is >= 2.24.0.
 		} else {
+			composeHint := "install the Docker compose plugin 2.24+ with your distribution's packages"
+			if osi.apt() {
+				composeHint = "install the compose plugin: apt-get install docker-compose-v2 (or docker-compose-plugin from Docker's repo)"
+			}
 			return Plan{}, &output.Error{
 				Code:    "E_DOCKER_COMPOSE_OLD",
 				Message: "docker is running but docker compose is missing or older than 2.24",
-				Hint:    "install the compose plugin: apt-get install docker-compose-v2 (or docker-compose-plugin from Docker's repo)",
+				Hint:    composeHint,
 			}
 		}
 	} else {
@@ -107,14 +116,23 @@ func (PackagesStep) Check(ctx context.Context, e *Env) (Plan, error) {
 				Hint:    "systemctl start docker",
 			}
 		}
+		if _, _, ok := osi.dockerRepo(); !ok {
+			return Plan{}, &output.Error{
+				Code:    "E_DOCKER_MISSING",
+				Message: "Docker is not installed and cvctl cannot add a Docker repository for this host",
+				Hint:    "install Docker Engine 28+ and the compose plugin 2.24+ with your distribution's packages, then re-run",
+			}
+		}
 		changes = append(changes, "install docker")
 		actions = append(actions, Action{Kind: "install", Target: "docker"})
 	}
 
-	for _, pkg := range defaultOtherPackages {
-		if !checkPackageInstalled(ctx, e, pkg) {
-			changes = append(changes, "install package "+pkg)
-			actions = append(actions, Action{Kind: "install", Target: "package", Arg: pkg})
+	if osi.apt() {
+		for _, pkg := range defaultOtherPackages {
+			if !checkPackageInstalled(ctx, e, pkg) {
+				changes = append(changes, "install package "+pkg)
+				actions = append(actions, Action{Kind: "install", Target: "package", Arg: pkg})
+			}
 		}
 	}
 	return Plan{Changes: changes, Actions: actions}, nil
@@ -153,6 +171,18 @@ func (PackagesStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 	}
 
 	if installDocker {
+		osi, err := hostOS(e.FS)
+		if err != nil {
+			return "", err
+		}
+		distro, codename, ok := osi.dockerRepo()
+		if !ok {
+			return "", &output.Error{
+				Code:    "E_DOCKER_MISSING",
+				Message: "Docker is not installed and cvctl cannot add a Docker repository for this host",
+				Hint:    "install Docker Engine 28+ and the compose plugin 2.24+ with your distribution's packages, then re-run",
+			}
+		}
 		if err := runRepoCmd(ctx, e, sys.Cmd{
 			Name: "install",
 			Args: []string{"-m", "0755", "-d", "/etc/apt/keyrings"},
@@ -162,7 +192,7 @@ func (PackagesStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 
 		if err := runRepoCmd(ctx, e, sys.Cmd{
 			Name: "curl",
-			Args: []string{"-fsSL", "https://download.docker.com/linux/ubuntu/gpg", "-o", "/etc/apt/keyrings/docker.asc"},
+			Args: []string{"-fsSL", "https://download.docker.com/linux/" + distro + "/gpg", "-o", "/etc/apt/keyrings/docker.asc"},
 		}); err != nil {
 			return "", err
 		}
@@ -179,24 +209,20 @@ func (PackagesStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 			return "", sys.CmdErr("E_DOCKER_REPO", dpkgCmd, res, nil, "check network access to download.docker.com")
 		}
 		arch := strings.TrimSpace(string(res.Stdout))
-		codename, err := ubuntuCodename(e.FS)
-		if err != nil {
-			return "", err
-		}
 		// A release newer than Docker's repository fails apt-get update with an unclear
 		// message; check the suite first.
-		release := sys.Cmd{Name: "curl", Args: []string{"-fsSI", "https://download.docker.com/linux/ubuntu/dists/" + codename + "/Release"}}
+		release := sys.Cmd{Name: "curl", Args: []string{"-fsSI", "https://download.docker.com/linux/" + distro + "/dists/" + codename + "/Release"}}
 		if rr, err := e.Run.Run(ctx, release); err != nil {
 			return "", err
 		} else if rr.ExitCode != 0 {
 			return "", &output.Error{
 				Code:    "E_DOCKER_REPO",
-				Message: fmt.Sprintf("download.docker.com has no repository for Ubuntu %q", codename),
-				Hint:    "Docker publishes new Ubuntu releases a few weeks after launch; install Docker Engine 28+ by hand or retry later",
+				Message: fmt.Sprintf("download.docker.com has no repository for %s %q", distro, codename),
+				Hint:    "Docker publishes new releases a few weeks after launch; install Docker Engine 28+ by hand or retry later",
 			}
 		}
 
-		dockerListContent := fmt.Sprintf("deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n", arch, codename)
+		dockerListContent := fmt.Sprintf("deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/%s %s stable\n", arch, distro, codename)
 		if err := e.FS.MkdirAll("/etc/apt/sources.list.d", 0o755, sys.Owner{User: "root", Group: "root"}); err != nil {
 			return "", err
 		}

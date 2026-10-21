@@ -41,6 +41,14 @@ func (FirewallStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		return Plan{Skip: firewallSkipMsg}, nil
 	}
 
+	osi, err := hostOS(e.FS)
+	if err != nil {
+		return Plan{}, err
+	}
+	if !osi.apt() && !hasCommand(ctx, e, "ufw") {
+		return Plan{Skip: "ufw not installed; firewall not managed: allow ssh, 80 and 443 yourself"}, nil
+	}
+
 	sshdCmd := sys.Cmd{
 		Name: "sshd",
 		Args: []string{"-T", "-C", "user=root,host=localhost,addr=127.0.0.1"},

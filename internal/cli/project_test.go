@@ -19,6 +19,7 @@ import (
 	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/project"
+	"github.com/codeavers/cvctl/internal/secrets"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/kinds"
 )
@@ -551,6 +552,9 @@ func (cliFakeData) BaseBackup(context.Context, string, string) error {
 	return nil
 }
 func (cliFakeData) BackupService(context.Context, string, string) error { return nil }
+func (cliFakeData) EnvDump(context.Context, string, string) ([]secrets.Entry, string, error) {
+	return nil, "", nil
+}
 
 type cliNoopCompose struct{}
 
@@ -657,6 +661,14 @@ func TestProjectRestoreCLIDeployFailureJSONIncludesVolumes(t *testing.T) {
 	}
 	if code != 1 || env.OK || len(env.Data.Volumes) != 1 || env.Data.Volumes[0] != "demo-dev_db-data" || env.Data.Status == "" {
 		t.Fatalf("code=%d env=%+v out=%s", code, env, out)
+	}
+}
+
+func TestProjectRestoreEnvSnapshotFlagRejectsExistingCvctlEnv(t *testing.T) {
+	setupRestoreDeployFailure(t)
+	code, _, errb := run(t, "project", "restore", "demo-dev", "--env-snapshot", "abcdef01")
+	if code != 2 || !strings.Contains(errb, "E_USAGE_ENV_SNAPSHOT") {
+		t.Fatalf("code=%d err=%s", code, errb)
 	}
 }
 

@@ -30,6 +30,17 @@ type UnattendedStep struct{}
 func (UnattendedStep) Name() string { return "unattended-upgrades" }
 
 func (UnattendedStep) Check(_ context.Context, e *Env) (Plan, error) {
+	osi, err := hostOS(e.FS)
+	if err != nil {
+		return Plan{}, err
+	}
+	if !osi.apt() {
+		id := osi.ID
+		if id == "" {
+			id = "this host"
+		}
+		return Plan{Skip: "automatic updates not managed on " + id}, nil
+	}
 	var changes []string
 	var actions []Action
 	for _, f := range unattendedFiles {

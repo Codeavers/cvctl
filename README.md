@@ -97,10 +97,16 @@ renamed first: `E_INSTANCE_NAME`, and bundle import rejects them. Run, in this o
 7. Registry logins other than the token host (`CVCTL_REGISTRY_HOST`, else the first
    `CVCTL_REGISTRIES` host) are pruned automatically by the agent on start.
 
+## Upgrading to v0.8.0
+
+`s3` services stop being backed up unless the contract sets `cvctl.backup: volume`. The old restic
+repository `<bucket>/<host>/<inst>/<svc>` is no longer used and can be deleted by hand.
+
 ## init
 
-Prepares an Ubuntu 24.04 or later VPS from scratch or adopts an existing server to the desired
-state idempotently: packages, docker daemon, accounts (`deployer` user), SSH hardening
+Prepares a Linux host with systemd. On Ubuntu and Debian it installs and hardens everything;
+elsewhere install Docker yourself and cvctl skips what the host lacks. It adopts an existing
+server to the desired state idempotently: packages, docker daemon, accounts (`deployer` user), SSH hardening
 with auto-revert timer, fail2ban, firewall (UFW), unattended security upgrades, Traefik v3
 reverse proxy (file provider only, no Docker socket), backup storage (local MinIO or S3),
 and notifications.
@@ -155,6 +161,32 @@ $ cvctl render --instance-dir /srv/deploy/demo-dev --json
 
 `examples/demo` is a complete sample project (an API, a worker, Postgres, Redis and S3).
 
+## secrets
+
+Backs up or restores host and instance secrets as an age-encrypted bundle (`0600`). Plaintext
+only lives in memory.
+
+```
+sudo cvctl secrets export -o secrets.age
+sudo cvctl secrets export --instance demo-prod -o demo-prod.age
+sudo cvctl secrets export --host -o host.age
+sudo cvctl secrets export -o - > secrets.age.txt
+
+sudo cvctl secrets import secrets.age
+sudo cvctl secrets import --force secrets.age
+```
+
+- **Scope flags**: `--instance <name>` bundles the instance's files under `/srv/deploy/<inst>/` and its deploy key;
+  `--host` bundles only `host.env` and `/etc/cvctl/secrets/*`. The flags are mutually exclusive
+  (`E_USAGE_SCOPE`). Omitting both bundles every host secret, instance env file and deploy key.
+- **Passphrase**: prompted interactively on the terminal (typed twice, hidden) or read from
+  `CVCTL_SECRETS_PASSPHRASE`.
+- **Import**: validates every entry path, file mode, and owner before writing. Partial bundles
+  (host-only or instance-only) are accepted. Existing files are not overwritten unless `--force`
+  is given (`E_SECRETS_EXISTS`).
+- **Remote export**: `cvctl remote export <host> [--port <port>] [--user <user>]` runs export
+  over SSH with `-t` and accepts the same `--instance` and `--host` flags.
+
 ## Data kinds
 
 A service declares `cvctl.kind` to get a managed data service: `postgres` (15, 16, 17), `postgis`
@@ -175,6 +207,8 @@ bucket, plus `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` and `S3_REGION`.
   `--ext <service>.<field>=<value>`). Every deploy probes each bucket with the app keys and fetches
   the probe object anonymously from each public URL. Backups are the provider's job.
 
+- **Not backed up by default**: object storage (photos, uploads) is treated as disposable. A
+  contract that needs it backed up sets `cvctl.backup: volume` on the service (restic, daily).
 - **Upgrading** an instance that already runs a local `s3` service: its deploys fail with
   `E_DECISION_MISSING` until `cvctl project update <instance>` generates the app keys; from then on
   the app holds scoped keys and cannot create buckets itself. Without declared buckets the bucket is
@@ -188,7 +222,17 @@ bucket, plus `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` and `S3_REGION`.
 
 Design: `docs/specs/2026-10-17-s3-buckets-design.md`.
 
-## Backup generations
+## Backups
+
+Per app the daily timer backs up databases (WAL-G) and the env files (`cvctl.env`, `app.env`, deploy key) encrypted with the host restic key; object storage (`s3` services) is not backed up by default: set `cvctl.backup: volume` on the service to back it up. Run manual env backups with `cvctl backup now <inst> env`.
+
+### Disaster recovery and restore
+
+With off-site backups (`CVCTL_STORAGE=s3`), rebuilding an instance on a new host only needs the host bundle (`cvctl secrets export --host`) plus `cvctl project restore <inst>`. `cvctl.env`, `app.env` and the deploy key are recovered automatically from the latest off-site env backup (or pick an older one with `--env-snapshot <id>`). If `cvctl.env` already exists locally, those files are kept as is and `--env-snapshot` is rejected (`E_USAGE_ENV_SNAPSHOT`).
+
+`cvctl project restore` clones the infra repository, restores every data service from its latest backup into a fresh volume, deploys the instance, and starts a new WAL-G backup generation. `s3` services without `cvctl.backup: volume` are recreated empty.
+
+### Backup generations
 
 `cvctl db restore` brings a data service back into a new volume and starts a new WAL-G backup
 generation: the restored cluster is on a new timeline, so it archives under

@@ -81,6 +81,10 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 			add("E_CONTRACT_NAME_RESERVED", name, "data service name backup is reserved",
 				"rename the service; `backup` is reserved for --ext backup.*")
 		}
+		if isData[name] && name == "env" {
+			add("E_CONTRACT_NAME_RESERVED", name, "data service name env is reserved",
+				"rename the service; `env` is reserved for instance env backups")
+		}
 
 		if role := svc.Labels[LabelRole]; role != "" && role != "app" && role != "worker" {
 			add("E_CONTRACT_ROLE_INVALID", name, fmt.Sprintf("%s %q is not app or worker", LabelRole, role),

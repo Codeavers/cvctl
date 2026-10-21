@@ -5,11 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/render"
+	"github.com/codeavers/cvctl/internal/secrets"
 	"github.com/codeavers/cvctl/internal/sys"
 )
+
+var snapshotIDRe = regexp.MustCompile(`^(latest|[0-9a-f]{4,64})$`)
 
 // resticExitNoRepo is restic's exit code for a repository that does not exist.
 const resticExitNoRepo = 10
@@ -41,6 +46,14 @@ func (r *Runner) writeResticEnv(inst, svc string, idx int) (string, error) {
 	}
 	body := envFileBody(env)
 	path := r.resticEnvPath(inst, svc)
+	// A new host has no instance directory yet (project restore from the host bundle).
+	if err := r.FS.MkdirAll(r.instanceDir(inst), 0o2775, deployOwner); err != nil {
+		return "", &output.Error{
+			Code:    "E_BACKUP_FAILED",
+			Message: fmt.Sprintf("cannot create %s: %v", r.instanceDir(inst), err),
+			Hint:    "check permissions on the deploy root",
+		}
+	}
 	if err := r.FS.WriteFile(path, body, 0o640, deployOwner); err != nil {
 		return "", &output.Error{
 			Code:    "E_BACKUP_FAILED",
@@ -58,6 +71,11 @@ func (r *Runner) resticCmd(inst, envFile, volume string, args ...string) sys.Cmd
 	}
 	a = append(a, "--env-file", envFile, resticImage)
 	return sys.Cmd{Name: "docker", Args: append(a, args...), Env: []string{dockerConfig}}
+}
+
+func (r *Runner) resticStdinCmd(inst, envFile string, stdin []byte, args ...string) sys.Cmd {
+	a := []string{"run", "-i", "--rm", "--network", render.NetworkBackup(inst), "--env-file", envFile, resticImage}
+	return sys.Cmd{Name: "docker", Args: append(a, args...), Stdin: stdin, Env: []string{dockerConfig}}
 }
 
 func (r *Runner) resticBackup(ctx context.Context, inst string, t Target) error {
@@ -155,4 +173,207 @@ func (r *Runner) resticRepoList(ctx context.Context, inst string, t Target, idx 
 		out = append(out, Snapshot{Service: t.Service, Strategy: StrategyVolume, ID: id, Time: s.Time})
 	}
 	return out, nil
+}
+
+func (r *Runner) envBackup(ctx context.Context, inst string) error {
+	root, err := r.secretsRoot()
+	if err != nil {
+		return err
+	}
+	entries, warns, err := secrets.CollectInstance(r.FS, root, inst)
+	if err != nil {
+		return &output.Error{
+			Code:    "E_BACKUP_FAILED",
+			Message: r.redact(err.Error()),
+			Hint:    "check permissions and files in the instance directory",
+		}
+	}
+	if len(warns) > 0 {
+		return &output.Error{
+			Code:    "E_BACKUP_FAILED",
+			Message: r.redact(strings.Join(warns, "; ")),
+			Hint:    "check permissions and files in the instance directory",
+		}
+	}
+	var kept []secrets.Entry
+	for _, e := range entries {
+		switch filepath.Base(e.Path) {
+		case "cvctl.env", "app.env", "deploy_key", "deploy_key.pub":
+			kept = append(kept, e)
+		}
+	}
+	entries = kept
+	if len(entries) == 0 {
+		return &output.Error{
+			Code:    "E_BACKUP_FAILED",
+			Message: fmt.Sprintf("no env files found for %s", inst),
+			Hint:    "check that the instance directory exists and contains cvctl.env",
+		}
+	}
+	tarBytes, err := secrets.Pack(entries)
+	if err != nil {
+		return &output.Error{
+			Code:    "E_BACKUP_FAILED",
+			Message: r.redact(err.Error()),
+			Hint:    "check permissions and files in the instance directory",
+		}
+	}
+	envFile, err := r.writeResticEnv(inst, "env", 0)
+	if err != nil {
+		return err
+	}
+	if _, err := r.backupNet(ctx, inst); err != nil {
+		return err
+	}
+	if _, err := provisionUser(ctx, r.Run, r.Host, inst); err != nil {
+		return err
+	}
+	if err := r.resticInit(ctx, inst, envFile); err != nil {
+		return err
+	}
+	backupCmd := r.resticStdinCmd(inst, envFile, tarBytes, "backup", "--stdin", "--stdin-filename", "env.tar", "--host", r.Host.Host, "--tag", inst)
+	if _, err := r.exec(ctx, backupCmd); err != nil {
+		return err
+	}
+	_, err = r.exec(ctx, r.resticCmd(inst, envFile, "", "forget", "--keep-daily", "7", "--keep-weekly", "4", "--prune"))
+	return err
+}
+
+func (r *Runner) envList(ctx context.Context, inst string) ([]Snapshot, error) {
+	envFile, err := r.writeResticEnv(inst, "env", 0)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := r.backupNet(ctx, inst); err != nil {
+		return nil, err
+	}
+	if _, err := provisionUser(ctx, r.Run, r.Host, inst); err != nil {
+		return nil, err
+	}
+	cmd := r.resticCmd(inst, envFile, "", "snapshots", "--json")
+	res, err := r.Run.Run(ctx, cmd)
+	if err == nil && res.ExitCode == resticExitNoRepo {
+		return nil, nil
+	}
+	if err != nil || res.ExitCode != 0 {
+		return nil, r.cmdFailed(cmd, res, err)
+	}
+	var raw []struct {
+		ShortID string `json:"short_id"`
+		ID      string `json:"id"`
+		Time    string `json:"time"`
+	}
+	if len(res.Stdout) > 0 {
+		if err := json.Unmarshal(res.Stdout, &raw); err != nil {
+			return nil, &output.Error{
+				Code:    "E_BACKUP_PARSE",
+				Message: fmt.Sprintf("cannot parse restic snapshots output for env: %v", err),
+				Hint:    "run restic snapshots --json against the repository to inspect the output",
+			}
+		}
+	}
+	out := make([]Snapshot, 0, len(raw))
+	for _, s := range raw {
+		id := s.ShortID
+		if id == "" {
+			id = s.ID
+		}
+		out = append(out, Snapshot{Service: "env", Strategy: StrategyEnv, ID: id, Time: s.Time})
+	}
+	return out, nil
+}
+
+// EnvDump unpacks the env tar archive from snapshot of inst.
+func (r *Runner) EnvDump(ctx context.Context, inst, snapshot string) ([]secrets.Entry, string, error) {
+	if r.Host == nil {
+		return nil, "", notConfigured()
+	}
+	if snapshot == "" {
+		snapshot = "latest"
+	}
+	if !snapshotIDRe.MatchString(snapshot) {
+		return nil, "", &output.Error{
+			Code:    "E_USAGE_SNAPSHOT",
+			Message: fmt.Sprintf("invalid snapshot ID %q: must be 'latest' or 4-64 hex digits", snapshot),
+			Hint:    "run cvctl backup list <instance> env to find snapshot IDs",
+		}
+	}
+	envFile, err := r.writeResticEnv(inst, "env", 0)
+	if err != nil {
+		return nil, "", err
+	}
+	if _, err := r.backupNet(ctx, inst); err != nil {
+		return nil, "", err
+	}
+	if _, err := provisionUser(ctx, r.Run, r.Host, inst); err != nil {
+		return nil, "", err
+	}
+	cmd := r.resticCmd(inst, envFile, "", "snapshots", "--json", snapshot)
+	res, err := r.Run.Run(ctx, cmd)
+	if err == nil && res.ExitCode == resticExitNoRepo {
+		return nil, "", &output.Error{
+			Code:    "E_BACKUP_NO_ENV",
+			Message: fmt.Sprintf("no env backup found for %s", inst),
+			Hint:    "run cvctl backup now " + inst + " env",
+		}
+	}
+	if err != nil || res.ExitCode != 0 {
+		if res.ExitCode == resticExitNoRepo || strings.Contains(string(res.Stderr), "does not exist") || strings.Contains(string(res.Stderr), "no matching ID") {
+			return nil, "", &output.Error{
+				Code:    "E_BACKUP_NO_ENV",
+				Message: fmt.Sprintf("no env backup found for %s", inst),
+				Hint:    "run cvctl backup now " + inst + " env",
+			}
+		}
+		return nil, "", r.cmdFailed(cmd, res, err)
+	}
+	var raw []struct {
+		ShortID string `json:"short_id"`
+		ID      string `json:"id"`
+		Time    string `json:"time"`
+	}
+	if len(res.Stdout) > 0 {
+		if err := json.Unmarshal(res.Stdout, &raw); err != nil {
+			return nil, "", &output.Error{
+				Code:    "E_BACKUP_PARSE",
+				Message: fmt.Sprintf("cannot parse restic snapshots output for env: %v", err),
+				Hint:    "run restic snapshots --json against the repository to inspect the output",
+			}
+		}
+	}
+	if len(raw) == 0 {
+		return nil, "", &output.Error{
+			Code:    "E_BACKUP_NO_ENV",
+			Message: fmt.Sprintf("no env backup found for %s", inst),
+			Hint:    "run cvctl backup now " + inst + " env",
+		}
+	}
+	resolved := raw[len(raw)-1].ShortID
+	if resolved == "" {
+		resolved = raw[len(raw)-1].ID
+	}
+	if len(resolved) > 8 {
+		resolved = resolved[:8]
+	}
+	dumpCmd := r.resticCmd(inst, envFile, "", "dump", resolved, "/env.tar")
+	dumpRes, err := r.Run.Run(ctx, dumpCmd)
+	if err != nil || dumpRes.ExitCode != 0 {
+		return nil, "", r.cmdFailed(dumpCmd, dumpRes, err)
+	}
+	entries, err := secrets.Unpack(dumpRes.Stdout)
+	if err != nil {
+		return nil, "", err
+	}
+	prefix := "/srv/deploy/" + inst + "/"
+	keyPrefix := "/var/lib/cvctl/" + inst + "/deploy_key"
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Path, prefix) && !strings.HasPrefix(e.Path, keyPrefix) {
+			return nil, "", &output.Error{
+				Code:    "E_BACKUP_ENV_FOREIGN",
+				Message: fmt.Sprintf("env backup entry %q is not under %s or %s", e.Path, prefix, keyPrefix),
+				Hint:    "the backup contains files from a different instance",
+			}
+		}
+	}
+	return entries, resolved, nil
 }
