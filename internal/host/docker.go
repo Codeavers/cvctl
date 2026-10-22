@@ -17,6 +17,16 @@ import (
 const dockerDaemonConfigPath = "/etc/docker/daemon.json"
 const dockerRestartPendingMsg = "daemon.json updated; run: systemctl restart docker (running containers will restart)"
 
+// Docker's built-in pools give only 31 networks (/16 and /20 blocks) and every
+// cvctl instance creates four, so a host runs out after a handful of projects.
+// /24 blocks from one /16 give 256. A pool the operator already set is kept.
+const (
+	dockerAddressPoolBase = "10.210.0.0/16"
+	dockerAddressPoolSize = 24
+)
+
+const dockerInfoFormat = "{{.LoggingDriver}} {{.LiveRestoreEnabled}} {{range .DefaultAddressPools}}{{.Base}}/{{.Size}},{{end}}"
+
 type DockerDaemonStep struct{}
 
 func (DockerDaemonStep) Name() string { return "docker-daemon" }
@@ -35,7 +45,34 @@ func isDaemonConfigDesired(m map[string]any) bool {
 	if logOpts["max-size"] != "20m" || logOpts["max-file"] != "5" {
 		return false
 	}
+	if _, ok := m["default-address-pools"]; !ok {
+		return false
+	}
 	return true
+}
+
+// configuredPools renders daemon.json default-address-pools the way
+// dockerInfoFormat prints the running ones. ok is false for a value it cannot
+// read, which then skips the running-state comparison for pools.
+func configuredPools(m map[string]any) (string, bool) {
+	list, ok := m["default-address-pools"].([]any)
+	if !ok {
+		return "", false
+	}
+	var b strings.Builder
+	for _, item := range list {
+		pool, ok := item.(map[string]any)
+		if !ok {
+			return "", false
+		}
+		base, ok := pool["base"].(string)
+		size, okSize := pool["size"].(float64)
+		if !ok || !okSize {
+			return "", false
+		}
+		fmt.Fprintf(&b, "%s/%d,", base, int(size))
+	}
+	return b.String(), true
 }
 
 // minDockerMajor is the oldest Docker Engine cvctl supports: Traefik relies
@@ -100,11 +137,24 @@ func (DockerDaemonStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	if isDaemonConfigDesired(m) {
 		res, err := e.Run.Run(ctx, sys.Cmd{
 			Name: "docker",
-			Args: []string{"info", "--format", "{{.LoggingDriver}} {{.LiveRestoreEnabled}}"},
+			Args: []string{"info", "--format", dockerInfoFormat},
 			Env:  []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"},
 		})
-		if err != nil || res.ExitCode != 0 || strings.TrimSpace(string(res.Stdout)) != "local true" {
+		if err != nil || res.ExitCode != 0 {
 			return Plan{Pending: dockerRestartPendingMsg}, nil
+		}
+		fields := strings.Fields(string(res.Stdout))
+		if len(fields) < 2 || fields[0] != "local" || fields[1] != "true" {
+			return Plan{Pending: dockerRestartPendingMsg}, nil
+		}
+		if want, ok := configuredPools(m); ok {
+			running := ""
+			if len(fields) > 2 {
+				running = fields[2]
+			}
+			if running != want {
+				return Plan{Pending: dockerRestartPendingMsg}, nil
+			}
 		}
 		return Plan{}, nil
 	}
@@ -148,6 +198,12 @@ func (DockerDaemonStep) Apply(ctx context.Context, e *Env, p Plan) (string, erro
 	logOpts["max-size"] = "20m"
 	logOpts["max-file"] = "5"
 	m["log-opts"] = logOpts
+
+	if _, ok := m["default-address-pools"]; !ok {
+		m["default-address-pools"] = []any{
+			map[string]any{"base": dockerAddressPoolBase, "size": dockerAddressPoolSize},
+		}
+	}
 
 	out, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
