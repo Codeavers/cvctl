@@ -447,6 +447,9 @@ func validHostname(h string) bool {
 	return true
 }
 
+// ValidHostname reports whether h is a domain cvctl can route (see validHostname).
+func ValidHostname(h string) bool { return validHostname(h) }
+
 func validPublicURL(raw string) bool {
 	if strings.HasSuffix(raw, "/") {
 		return false

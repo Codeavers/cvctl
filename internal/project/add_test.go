@@ -2733,3 +2733,43 @@ func TestAddStrategyDefaults(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdateChangesDomain(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+	_, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{Domains: map[string]string{"web": "www.example.org"}})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(rig.instDir, "cvctl.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "CVCTL_DOMAIN_WEB=www.example.org") || strings.Contains(string(raw), "web.example.com") {
+		t.Fatalf("cvctl.env should hold only the new domain:\n%s", raw)
+	}
+}
+
+func TestUpdateRejectsDomainForUnknownService(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+	_, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{Domains: map[string]string{"nope": "x.example.org"}})
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_PROJECT_UNKNOWN_SERVICE" {
+		t.Fatalf("want E_PROJECT_UNKNOWN_SERVICE, got %v", err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(rig.instDir, "cvctl.env"))
+	if !strings.Contains(string(raw), "CVCTL_DOMAIN_WEB=web.example.com") {
+		t.Fatalf("cvctl.env must be untouched on error:\n%s", raw)
+	}
+}
+
+func TestUpdateRejectsInvalidDomain(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+	_, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{Domains: map[string]string{"web": "Bad Host!"}})
+	if err == nil {
+		t.Fatal("want an error for an invalid hostname")
+	}
+	raw, _ := os.ReadFile(filepath.Join(rig.instDir, "cvctl.env"))
+	if !strings.Contains(string(raw), "CVCTL_DOMAIN_WEB=web.example.com") {
+		t.Fatalf("cvctl.env must be untouched on error:\n%s", raw)
+	}
+}

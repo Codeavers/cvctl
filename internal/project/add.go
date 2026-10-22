@@ -149,6 +149,8 @@ type AddOptions struct {
 
 type UpdateOptions struct {
 	Ext map[string]map[string]string
+	// Domains replaces the domain of each named service (svc -> host).
+	Domains map[string]string
 }
 
 type AddResult struct {
@@ -547,6 +549,41 @@ func promptDataServices(ctx context.Context, e *Env, cat kinds.Catalog, p *contr
 				sd.Version = ds.Version
 			}
 			d.Services[ds.Name] = sd
+		}
+	}
+	return nil
+}
+
+// checkDomainServices rejects a --domain for a service the contract does not
+// define or does not expose, or whose host is not a valid hostname.
+func checkDomainServices(p *contract.Project, domains map[string]string) error {
+	valid := make(map[string]bool, len(p.Apps)+len(p.Data))
+	for _, a := range p.Apps {
+		valid[a.Name] = true
+	}
+	for _, ds := range p.Data {
+		if ds.ExposePort > 0 {
+			valid[ds.Name] = true
+		}
+	}
+	for svc, host := range domains {
+		if valid[svc] && !instance.ValidHostname(host) {
+			return &output.UsageError{
+				Err: &output.Error{
+					Code:    "E_USAGE_DOMAIN",
+					Message: fmt.Sprintf("domain %q for %s is not a valid hostname", host, svc),
+					Hint:    "use a lowercase hostname such as api.example.com",
+				},
+			}
+		}
+		if !valid[svc] {
+			return &output.UsageError{
+				Err: &output.Error{
+					Code:    "E_PROJECT_UNKNOWN_SERVICE",
+					Message: fmt.Sprintf("unknown service %q for --domain", svc),
+					Hint:    "specify an app service defined in compose.yml",
+				},
+			}
 		}
 	}
 	return nil
@@ -1026,26 +1063,9 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		return nil, err
 	}
 
-	validDomainServices := make(map[string]bool, len(p.Apps)+len(p.Data))
-	for _, a := range p.Apps {
-		validDomainServices[a.Name] = true
-	}
-	for _, ds := range p.Data {
-		if ds.ExposePort > 0 {
-			validDomainServices[ds.Name] = true
-		}
-	}
-	for svc := range opts.Domains {
-		if !validDomainServices[svc] {
-			cleanupInst()
-			return nil, &output.UsageError{
-				Err: &output.Error{
-					Code:    "E_PROJECT_UNKNOWN_SERVICE",
-					Message: fmt.Sprintf("unknown service %q for --domain", svc),
-					Hint:    "specify an app service defined in compose.yml",
-				},
-			}
-		}
+	if err := checkDomainServices(p, opts.Domains); err != nil {
+		cleanupInst()
+		return nil, err
 	}
 
 	d := &instance.Decisions{
@@ -1276,6 +1296,12 @@ func Update(ctx context.Context, e *Env, inst string, opts UpdateOptions) (*AddR
 	d, err := instance.Read(cvctlEnvPath, p)
 	if err != nil {
 		return nil, err
+	}
+	if err := checkDomainServices(p, opts.Domains); err != nil {
+		return nil, err
+	}
+	for svc, host := range opts.Domains {
+		d.Domains[svc] = host
 	}
 
 	ext, err := takeBackupExt(d, opts.Ext, e.storage(), len(backup.Targets(p, d)) == 0)
