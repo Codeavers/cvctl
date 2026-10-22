@@ -14,6 +14,8 @@ import (
 	"github.com/codeavers/cvctl/internal/sys/systest"
 )
 
+const dockerInfoCmd = "docker info --format " + dockerInfoFormat
+
 func newDockerTestEnv() (*Env, *systest.Runner, *systest.FS) {
 	r := &systest.Runner{}
 	fs := systest.NewFS()
@@ -67,6 +69,9 @@ func TestDaemonMergeKeepsKeys(t *testing.T) {
 	}
 	if logOpts["max-size"] != "20m" || logOpts["max-file"] != "5" {
 		t.Fatalf("unexpected log-opts: %v", logOpts)
+	}
+	if got, _ := configuredPools(m); got != "10.210.0.0/16/24," {
+		t.Fatalf("expected default-address-pools 10.210.0.0/16 size 24, got %v", m["default-address-pools"])
 	}
 
 	fi, err := fs.Stat("/etc/docker/daemon.json")
@@ -171,11 +176,12 @@ func TestDaemonUnchanged(t *testing.T) {
     "max-file": "5",
     "max-size": "20m"
   },
-  "live-restore": true
+  "live-restore": true,
+  "default-address-pools": [{"base": "10.210.0.0/16", "size": 24}]
 }
 `
 	_ = fs.WriteFile("/etc/docker/daemon.json", []byte(content), 0o644, sys.Owner{User: "root", Group: "root"})
-	runner.On("docker info --format {{.LoggingDriver}} {{.LiveRestoreEnabled}}", sys.Result{Stdout: []byte("local true\n"), ExitCode: 0})
+	runner.On(dockerInfoCmd, sys.Result{Stdout: []byte("local true 10.210.0.0/16/24,\n"), ExitCode: 0})
 
 	step := DockerDaemonStep{}
 	plan, err := step.Check(context.Background(), env)
@@ -198,11 +204,12 @@ func TestDaemonNeedsRestartWhenRunningStateMismatch(t *testing.T) {
     "max-file": "5",
     "max-size": "20m"
   },
-  "live-restore": true
+  "live-restore": true,
+  "default-address-pools": [{"base": "10.210.0.0/16", "size": 24}]
 }
 `
 	_ = fs.WriteFile("/etc/docker/daemon.json", []byte(content), 0o644, sys.Owner{User: "root", Group: "root"})
-	runner.On("docker info --format {{.LoggingDriver}} {{.LiveRestoreEnabled}}", sys.Result{Stdout: []byte("json-file false\n"), ExitCode: 0})
+	runner.On(dockerInfoCmd, sys.Result{Stdout: []byte("json-file false\n"), ExitCode: 0})
 
 	step := DockerDaemonStep{}
 	plan, err := step.Check(context.Background(), env)
@@ -416,5 +423,68 @@ func TestDockerDaemonRejectsOldEngine(t *testing.T) {
 		if got != bad {
 			t.Errorf("version %s: E_DOCKER_TOO_OLD = %v, want %v (err %v)", v, got, bad, err)
 		}
+	}
+}
+
+const daemonWithoutPools = `{
+  "log-driver": "local",
+  "log-opts": {"max-file": "5", "max-size": "20m"},
+  "live-restore": true
+}
+`
+
+func TestDaemonAddsAddressPoolsToExistingConfig(t *testing.T) {
+	env, _, fs := newDockerTestEnv()
+	_ = fs.WriteFile("/etc/docker/daemon.json", []byte(daemonWithoutPools), 0o644, sys.Owner{User: "root", Group: "root"})
+
+	plan, err := DockerDaemonStep{}.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected Check error: %v", err)
+	}
+	if len(plan.Changes) == 0 {
+		t.Fatal("expected a change to add default-address-pools, got none")
+	}
+}
+
+func TestDaemonKeepsOperatorAddressPools(t *testing.T) {
+	env, runner, fs := newDockerTestEnv()
+	content := `{
+  "log-driver": "local",
+  "log-opts": {"max-file": "5", "max-size": "20m"},
+  "live-restore": true,
+  "default-address-pools": [{"base": "172.80.0.0/12", "size": 26}]
+}
+`
+	_ = fs.WriteFile("/etc/docker/daemon.json", []byte(content), 0o644, sys.Owner{User: "root", Group: "root"})
+	runner.On(dockerInfoCmd, sys.Result{Stdout: []byte("local true 172.80.0.0/12/26,\n"), ExitCode: 0})
+
+	plan, err := DockerDaemonStep{}.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected Check error: %v", err)
+	}
+	if len(plan.Changes) != 0 || plan.Pending != "" {
+		t.Fatalf("expected operator pools to be left alone, got changes=%v pending=%q", plan.Changes, plan.Pending)
+	}
+}
+
+func TestDaemonPendingWhenRunningPoolsDiffer(t *testing.T) {
+	env, runner, fs := newDockerTestEnv()
+	content := `{
+  "log-driver": "local",
+  "log-opts": {"max-file": "5", "max-size": "20m"},
+  "live-restore": true,
+  "default-address-pools": [{"base": "10.210.0.0/16", "size": 24}]
+}
+`
+	_ = fs.WriteFile("/etc/docker/daemon.json", []byte(content), 0o644, sys.Owner{User: "root", Group: "root"})
+	// Written but not applied yet: the daemon still runs its built-in pools.
+	runner.On(dockerInfoCmd, sys.Result{Stdout: []byte("local true\n"), ExitCode: 0})
+
+	plan, err := DockerDaemonStep{}.Check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected Check error: %v", err)
+	}
+	if plan.Pending != dockerRestartPendingMsg {
+		t.Fatalf("expected pending restart, got %q", plan.Pending)
 	}
 }
