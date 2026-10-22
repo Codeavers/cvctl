@@ -298,6 +298,7 @@ func newProjectUpdateCmd() *cobra.Command {
 		Use:   "update <instance>",
 		Short: "Update an existing project instance",
 		Example: `  cvctl project update myapp-dev
+  cvctl project update myapp-dev --domain web=www.example.com
   cvctl project update myapp-prod --json`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -305,8 +306,13 @@ func newProjectUpdateCmd() *cobra.Command {
 			nonInt, _ := cmd.Flags().GetBool("non-interactive")
 			asJSON, _ := cmd.Flags().GetBool("json")
 			extFlags, _ := cmd.Flags().GetStringArray("ext")
+			domainFlags, _ := cmd.Flags().GetStringArray("domain")
 
 			extMap, err := parseExt(extFlags)
+			if err != nil {
+				return err
+			}
+			domainMap, err := parseDomains(domainFlags)
 			if err != nil {
 				return err
 			}
@@ -320,7 +326,7 @@ func newProjectUpdateCmd() *cobra.Command {
 				return err
 			}
 
-			res, err := project.Update(cmd.Context(), e, inst, project.UpdateOptions{Ext: extMap})
+			res, err := project.Update(cmd.Context(), e, inst, project.UpdateOptions{Ext: extMap, Domains: domainMap})
 			if err != nil {
 				return err
 			}
@@ -354,6 +360,7 @@ func newProjectUpdateCmd() *cobra.Command {
 	}
 	cmd.Flags().Bool("non-interactive", false, "never prompt; use defaults")
 	cmd.Flags().StringArray("ext", nil, "pre-seed external service configuration (svc.field=value, repeatable)")
+	cmd.Flags().StringArray("domain", nil, "change the domain of an exposed service (svc=host, repeatable)")
 	return cmd
 }
 
