@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: es-ES
+
+reviews:
+  profile: chill
+  fail_commit_status: true
+  auto_approvals:
+    enabled: true
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!go.sum"
+    - "!dist/**"
+  path_instructions:
+    - path: "**/*.go"
+      instructions: |
+        - Nunca secretos (tokens, contraseñas, claves) en argv, logs ni mensajes de error.
+        - Nada específico de una organización en el código: registries, dominios y tokens vienen de la config del host.
+        - El binario debe compilar estático (CGO_ENABLED=0) para linux/amd64 y linux/arm64.
+        - Comentarios solo para el porqué, restricciones o workarounds; no narrar historia.
+    - path: "**/*_test.go"
+      instructions: "Preferir tests en tabla y sin dependencias de red ni de Docker salvo en los e2e."
+    - path: ".github/workflows/**"
+      instructions: "Acciones fijadas por SHA de commit, permisos mínimos y ningún secreto expuesto en logs."
+    - path: "scripts/e2e/**"
+      instructions: "Scripts idempotentes; no imprimir secretos."
+  tools:
+    golangci-lint:
+      enabled: true
+    shellcheck:
+      enabled: true
+    gitleaks:
+      enabled: true
+    actionlint:
+      enabled: true
+    hadolint:
+      enabled: true
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "AGENTS.md"
+      - "CONTRIBUTING.md"
