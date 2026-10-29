@@ -3,7 +3,9 @@ language: es-ES
 
 reviews:
   profile: chill
-  request_changes_workflow: false
+  fail_commit_status: true
+  auto_approvals:
+    enabled: true
   high_level_summary: true
   poem: false
   review_status: true
