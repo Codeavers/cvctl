@@ -7,8 +7,8 @@
   Pull requests get no CI run, so enable the pre-push hook that runs them once per clone:
   `git config core.hooksPath .githooks`.
 - End-to-end tests (`scripts/e2e/`, `.github/workflows/e2e-*.yml`) need a Linux host with
-  systemd and Docker; they run in GitHub Actions after merge to `main`, or on demand with
-  `workflow_dispatch`.
+  systemd and Docker. Each runs in GitHub Actions after a merge to `main` only when the merge
+  touches its `paths` filter, and on demand with `workflow_dispatch`.
 
 ## Pull requests
 

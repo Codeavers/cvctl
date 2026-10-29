@@ -1,14 +1,36 @@
 #!/bin/sh
+# Checks the tip of each pushed ref in a throwaway worktree, so uncommitted
+# changes in the working tree cannot make a broken commit pass.
 set -eu
 
-cd "$(git rev-parse --show-toplevel)"
+zero=0000000000000000000000000000000000000000
+root=$(git rev-parse --show-toplevel)
+tmp=$(mktemp -d)
+cleanup() {
+	for wt in "$tmp"/*; do
+		[ -d "$wt" ] && git -C "$root" worktree remove --force "$wt" >/dev/null 2>&1 || true
+	done
+	rm -rf "$tmp"
+	git -C "$root" worktree prune
+}
+trap cleanup EXIT
 
-unformatted=$(gofmt -l .)
-if [ -n "$unformatted" ]; then
-	echo "gofmt: unformatted files:" >&2
-	echo "$unformatted" >&2
-	exit 1
-fi
+check() {
+	unformatted=$(gofmt -l .)
+	if [ -n "$unformatted" ]; then
+		echo "gofmt: unformatted files:" >&2
+		echo "$unformatted" >&2
+		return 1
+	fi
+	go vet ./...
+	go test ./...
+}
 
-go vet ./...
-go test ./...
+checked=" "
+while read -r _ local_sha _ _; do
+	[ "$local_sha" = "$zero" ] && continue
+	case "$checked" in *" $local_sha "*) continue ;; esac
+	checked="$checked$local_sha "
+	git -C "$root" worktree add --quiet --detach "$tmp/$local_sha" "$local_sha"
+	(cd "$tmp/$local_sha" && check)
+done
