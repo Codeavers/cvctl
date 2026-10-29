@@ -4,8 +4,11 @@
 
 - Go version from `go.mod`. No cgo; the binary is static.
 - Before a pull request: `gofmt -l .` (must print nothing), `go vet ./...`, `go test ./...`.
+  Pull requests get no CI run, so enable the pre-push hook that runs them once per clone:
+  `git config core.hooksPath .githooks`.
 - End-to-end tests (`scripts/e2e/`, `.github/workflows/e2e-*.yml`) need a Linux host with
-  systemd and Docker; they run in GitHub Actions on every push.
+  systemd and Docker; they run in GitHub Actions after merge to `main`, or on demand with
+  `workflow_dispatch`.
 
 ## Pull requests
 
