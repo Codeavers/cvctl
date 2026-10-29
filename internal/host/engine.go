@@ -23,6 +23,9 @@ type Env struct {
 	Adopt       bool
 	EUID        int
 	Out         io.Writer
+	// NotifierChanged is set by NotifierStep so AgentStep restarts the
+	// agent, which builds its notifier only at start.
+	NotifierChanged bool
 }
 
 type Action struct {

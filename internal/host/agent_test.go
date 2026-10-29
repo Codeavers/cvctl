@@ -183,3 +183,39 @@ func TestAgentStepEnsuresDockerDir(t *testing.T) {
 		t.Fatalf("expected owner deployer:deploy, got %s:%s", fi.User, fi.Group)
 	}
 }
+
+func TestAgentStepRestartsOnNotifierChange(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		fsys := systest.NewFS()
+		run := &systest.Runner{}
+		exePath, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		bin := []byte("cvctl-binary")
+		root := sys.Owner{User: "root", Group: "root"}
+		for _, p := range []string{exePath, "/usr/local/bin/cvctl"} {
+			if err := fsys.WriteFile(p, bin, 0o755, root); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := fsys.WriteFile("/etc/systemd/system/cvctl-agent.service", []byte(goldenUnitContent), 0o644, root); err != nil {
+			t.Fatal(err)
+		}
+		if err := fsys.MkdirAll("/var/lib/cvctl/docker", 0o750, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
+			t.Fatal(err)
+		}
+		run.On("systemctl is-enabled cvctl-agent", sys.Result{Stdout: []byte("enabled\n")})
+		run.On("systemctl is-active cvctl-agent", sys.Result{Stdout: []byte("active\n")})
+
+		e := &host.Env{Run: run, FS: fsys, NotifierChanged: changed}
+		plan, err := host.AgentStep{}.Check(context.Background(), e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		restart := len(plan.Changes) == 1 && plan.Changes[0] == "restart cvctl-agent"
+		if changed != restart {
+			t.Fatalf("NotifierChanged=%v: changes %v", changed, plan.Changes)
+		}
+	}
+}
