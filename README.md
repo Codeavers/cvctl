@@ -139,10 +139,16 @@ sudo cvctl init
 sudo cvctl init --dry-run
 sudo cvctl init --adopt
 sudo cvctl init --non-interactive --json
+sudo cvctl init --reconfigure notify
 ```
 
 `--dry-run` prints the plan without changing anything. SSH changes are applied with a revert
 timer: if the new session cannot be confirmed, the previous sshd config comes back on its own.
+
+init only asks for values `host.env` and `secrets/` lack. `--reconfigure notify` asks the
+notification questions again (current values as defaults; an empty token keeps the stored one),
+sends a test message and restarts `cvctl-agent` so it uses the new settings. The agent and the
+backup timers log notifier errors (bad configuration, failed sends) to the journal.
 
 ## lint
 

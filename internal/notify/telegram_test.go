@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/output"
 )
@@ -250,5 +251,56 @@ func TestTelegramMessageTruncation(t *testing.T) {
 	}
 	if !strings.HasSuffix(sentText, "…[truncated]") {
 		t.Fatalf("sent text does not end with '…[truncated]'")
+	}
+}
+
+type failingNotifier struct{ err error }
+
+func (f failingNotifier) Send(context.Context, notify.Message) error { return f.err }
+
+func TestLoggedReportsFailedSend(t *testing.T) {
+	var buf strings.Builder
+	sendErr := &output.Error{Code: "E_NOTIFY_SEND", Message: "telegram sendMessage failed: chat not found"}
+	n := notify.Logged(failingNotifier{err: sendErr}, &buf)
+	if err := n.Send(context.Background(), notify.Message{Title: "app-dev deploy OK"}); !errors.Is(err, sendErr) {
+		t.Fatalf("error not passed through: %v", err)
+	}
+	if got := buf.String(); !strings.Contains(got, `"app-dev deploy OK" not sent`) || !strings.Contains(got, "chat not found") {
+		t.Fatalf("log = %q", got)
+	}
+
+	buf.Reset()
+	if err := notify.Logged(failingNotifier{}, &buf).Send(context.Background(), notify.Message{}); err != nil || buf.Len() != 0 {
+		t.Fatalf("successful send logged %q (err %v)", buf.String(), err)
+	}
+	if _, ok := notify.Logged(notify.NoopNotifier{}, &buf).(notify.NoopNotifier); !ok {
+		t.Fatal("no-op notifier wrapped")
+	}
+}
+
+func TestFromHostLoggedReportsConfigError(t *testing.T) {
+	cfg := hostcfg.NewConfig()
+	if err := cfg.Set("NOTIFY", "telegram"); err != nil {
+		t.Fatal(err)
+	}
+	sec := hostcfg.NewSecrets()
+	sec.Set("telegram_token", "123:secret-token")
+
+	var buf strings.Builder
+	n := notify.FromHostLogged(cfg, sec, &buf)
+	if _, ok := n.(notify.NoopNotifier); !ok {
+		t.Fatalf("got %T, want no-op", n)
+	}
+	if got := buf.String(); !strings.Contains(got, "CVCTL_TELEGRAM_CHAT_ID is not set") || strings.Contains(got, "secret-token") {
+		t.Fatalf("log = %q", got)
+	}
+
+	buf.Reset()
+	if err := cfg.Set("NOTIFY", "none"); err != nil {
+		t.Fatal(err)
+	}
+	notify.FromHostLogged(cfg, sec, &buf)
+	if buf.Len() != 0 {
+		t.Fatalf("disabled notifications logged %q", buf.String())
 	}
 }

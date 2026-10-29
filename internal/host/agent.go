@@ -127,7 +127,7 @@ func (AgentStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	if !enabled || !active {
 		changes = append(changes, "enable cvctl-agent")
 		actions = append(actions, Action{Kind: "enable", Target: "cvctl-agent"})
-	} else if binaryChanged || unitChanged {
+	} else if binaryChanged || unitChanged || e.NotifierChanged {
 		changes = append(changes, "restart cvctl-agent")
 		actions = append(actions, Action{Kind: "restart", Target: "cvctl-agent"})
 	}

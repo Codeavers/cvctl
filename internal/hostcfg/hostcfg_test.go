@@ -380,3 +380,81 @@ func TestRegistryHostValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func telegramCfg(t *testing.T) (*hostcfg.Config, *hostcfg.Secrets) {
+	t.Helper()
+	cfg, sec := fullCfg(t)
+	for k, v := range map[string]string{"NOTIFY": "telegram", "TELEGRAM_CHAT_ID": "3212345678", "TELEGRAM_THREAD_ID": "3301"} {
+		if err := cfg.Set(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sec.Set("telegram_token", "old-token")
+	return cfg, sec
+}
+
+type defPrompter struct {
+	answers map[string]string
+	defs    map[string]string
+}
+
+func (p *defPrompter) Ask(q hostcfg.Question, def string) (string, error) {
+	p.defs[q.Key] = def
+	return p.answers[q.Key], nil
+}
+
+func TestReconfigureNotify(t *testing.T) {
+	cfg, sec := telegramCfg(t)
+	p := &defPrompter{
+		answers: map[string]string{"NOTIFY": "telegram", "telegram_token": "", "TELEGRAM_CHAT_ID": "-1003212345678", "TELEGRAM_THREAD_ID": ""},
+		defs:    map[string]string{},
+	}
+	if err := hostcfg.Reconfigure(cfg, sec, hostcfg.Facts{}, p, []string{"notify"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.defs) != 4 {
+		t.Fatalf("asked %v", p.defs)
+	}
+	if p.defs["TELEGRAM_CHAT_ID"] != "3212345678" || p.defs["NOTIFY"] != "telegram" {
+		t.Fatalf("current values not offered as defaults: %v", p.defs)
+	}
+	if p.defs["telegram_token"] != "" {
+		t.Fatal("secret offered as default")
+	}
+	if v, _ := sec.Get("telegram_token"); v != "old-token" {
+		t.Fatal("empty secret answer did not keep the stored token")
+	}
+	if cfg.TelegramChatID != "-1003212345678" {
+		t.Fatalf("chat id = %q", cfg.TelegramChatID)
+	}
+	if cfg.TelegramThread != "" {
+		t.Fatalf("empty optional answer did not clear thread id: %q", cfg.TelegramThread)
+	}
+}
+
+func TestReconfigureUnknownGroup(t *testing.T) {
+	cfg, sec := telegramCfg(t)
+	err := hostcfg.Reconfigure(cfg, sec, hostcfg.Facts{}, hostcfgtest.NewPrompter(t, nil), []string{"dns"})
+	if code(t, err) != "E_INIT_RECONFIGURE" {
+		t.Fatal(err)
+	}
+}
+
+func TestTelegramIDValidation(t *testing.T) {
+	cfg := hostcfg.NewConfig()
+	for _, tc := range []struct {
+		key, val string
+		ok       bool
+	}{
+		{"TELEGRAM_CHAT_ID", "-1003212345678", true},
+		{"TELEGRAM_CHAT_ID", "@cvctl_alerts", true},
+		{"TELEGRAM_CHAT_ID", "t.me/c/321/33", false},
+		{"TELEGRAM_CHAT_ID", "@", false},
+		{"TELEGRAM_THREAD_ID", "3301", true},
+		{"TELEGRAM_THREAD_ID", "general", false},
+	} {
+		if err := cfg.Set(tc.key, tc.val); (err == nil) != tc.ok {
+			t.Errorf("Set(%s, %q) err = %v", tc.key, tc.val, err)
+		}
+	}
+}

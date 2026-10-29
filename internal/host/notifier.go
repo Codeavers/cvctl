@@ -92,6 +92,7 @@ func (NotifierStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 	if err := e.FS.WriteFile(notifyMarkerPath, []byte(wantHash+"\n"), 0o640, deployerOwner); err != nil {
 		return "", notifyFSErr(notifyMarkerPath, err)
 	}
+	e.NotifierChanged = true
 
 	return "", nil
 }
