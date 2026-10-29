@@ -2,14 +2,23 @@ name: ci
 
 on:
   push:
-  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - LICENSE
+      - .coderabbit.yaml
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5

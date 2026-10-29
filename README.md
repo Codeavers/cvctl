@@ -268,6 +268,11 @@ source of truth: every new generation is numbered above the highest one in the b
 `cvctl project restore` on a new host restores the newest generation holding a base backup even
 when the secrets bundle names an older one (it warns). Re-run `cvctl secrets export` after a restore.
 
+## Development
+
+Checks run locally before a push, not on pull requests. Enable the pre-push hook once per clone:
+`git config core.hooksPath .githooks`. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
 Apache License 2.0, see [LICENSE](LICENSE).
