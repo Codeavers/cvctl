@@ -1,6 +1,10 @@
 api:
   dashboard: false
-accessLog: {}
+accessLog:
+  format: json
+  fields:
+    names:
+      RequestPath: drop
 log:
   level: INFO
 ping:

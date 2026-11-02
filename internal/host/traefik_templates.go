@@ -14,7 +14,7 @@ import (
 
 type traefikStaticConfig struct {
 	API                   traefikAPI                     `yaml:"api"`
-	AccessLog             map[string]any                 `yaml:"accessLog"`
+	AccessLog             traefikAccessLog               `yaml:"accessLog"`
 	Log                   traefikLog                     `yaml:"log"`
 	Ping                  traefikPing                    `yaml:"ping"`
 	EntryPoints           map[string]traefikEntryPoint   `yaml:"entryPoints"`
@@ -24,6 +24,15 @@ type traefikStaticConfig struct {
 
 type traefikAPI struct {
 	Dashboard bool `yaml:"dashboard"`
+}
+
+type traefikAccessLog struct {
+	Format string                 `yaml:"format"`
+	Fields traefikAccessLogFields `yaml:"fields"`
+}
+
+type traefikAccessLogFields struct {
+	Names map[string]string `yaml:"names"`
 }
 
 type traefikLog struct {
@@ -41,6 +50,15 @@ type traefikEntryPoint struct {
 	HTTP             *traefikEntryPointHTTP   `yaml:"http,omitempty"`
 	HTTP3            *traefikHTTP3            `yaml:"http3,omitempty"`
 	ForwardedHeaders *traefikForwardedHeaders `yaml:"forwardedHeaders,omitempty"`
+	Transport        *traefikTransport        `yaml:"transport,omitempty"`
+}
+
+type traefikTransport struct {
+	RespondingTimeouts traefikRespondingTimeouts `yaml:"respondingTimeouts"`
+}
+
+type traefikRespondingTimeouts struct {
+	ReadTimeout string `yaml:"readTimeout"`
 }
 
 type traefikForwardedHeaders struct {
@@ -248,9 +266,24 @@ func renderTraefikStatic(cfg *hostcfg.Config) ([]byte, error) {
 		}
 	}
 
+	if cfg != nil && cfg.Get("TRAEFIK_READ_TIMEOUT") != "" {
+		t := &traefikTransport{RespondingTimeouts: traefikRespondingTimeouts{ReadTimeout: cfg.Get("TRAEFIK_READ_TIMEOUT")}}
+		for _, name := range []string{EntryWeb, EntryWebSecure} {
+			if ep, ok := eps[name]; ok {
+				ep.Transport = t
+				eps[name] = ep
+			}
+		}
+	}
+
 	doc := traefikStaticConfig{
-		API:         traefikAPI{Dashboard: false},
-		AccessLog:   map[string]any{},
+		API: traefikAPI{Dashboard: false},
+		// Paths can carry bearer tokens (one-shot upload links); the common
+		// format cannot drop fields, so log JSON without the path.
+		AccessLog: traefikAccessLog{
+			Format: "json",
+			Fields: traefikAccessLogFields{Names: map[string]string{"RequestPath": "drop"}},
+		},
 		Log:         traefikLog{Level: "INFO"},
 		Ping:        traefikPing{EntryPoint: "ping"},
 		EntryPoints: eps,
