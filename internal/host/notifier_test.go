@@ -181,3 +181,39 @@ func TestNotifierStepSkipWhenNone(t *testing.T) {
 		t.Fatalf("expected step to be skipped when NOTIFY=none")
 	}
 }
+
+func TestNotifierStepDisableRemovesMarker(t *testing.T) {
+	fs := systest.NewFS()
+	cfg, sec, _ := hostcfg.Load(fs, "/etc/cvctl")
+	_ = cfg.Set("NOTIFY", "none")
+	if err := fs.WriteFile(notifyMarkerPath, []byte("old\n"), 0o640, deployerOwner); err != nil {
+		t.Fatal(err)
+	}
+	env := &Env{FS: fs, Cfg: cfg, Secrets: sec, EUID: 0}
+	step := NotifierStep{}
+
+	p, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Skip != "" || len(p.Changes) == 0 {
+		t.Fatalf("expected a change to disable the notifier, got %+v", p)
+	}
+	if _, err := step.Apply(context.Background(), env, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fs.ReadFile(notifyMarkerPath); err == nil {
+		t.Fatal("marker still present after disabling")
+	}
+	if !env.NotifierChanged {
+		t.Fatal("NotifierChanged not set; the agent would keep the old notifier")
+	}
+
+	p, err = step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Skip == "" {
+		t.Fatalf("expected skip once the marker is gone, got %+v", p)
+	}
+}

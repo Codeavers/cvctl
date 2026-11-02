@@ -60,6 +60,10 @@ type Config struct {
 
 var dnsLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
+// Telegram usernames: 5-32 chars, letters, digits and underscores, starting
+// with a letter.
+var telegramUserRe = regexp.MustCompile(`^@[A-Za-z][A-Za-z0-9_]{4,31}$`)
+
 func oneOf(vals ...string) func(string) error {
 	return func(v string) error {
 		for _, x := range vals {
@@ -97,7 +101,10 @@ func validInt(v string) error {
 // validChatID accepts a numeric id or a public @channelname, the two forms
 // the Telegram Bot API takes for chat_id.
 func validChatID(v string) error {
-	if strings.HasPrefix(v, "@") && len(v) > 1 {
+	if strings.HasPrefix(v, "@") {
+		if !telegramUserRe.MatchString(v) {
+			return errors.New("must be @ plus a Telegram username (5-32 letters, digits or _, starting with a letter)")
+		}
 		return nil
 	}
 	if validInt(v) != nil {
