@@ -113,6 +113,8 @@ var validators = map[string]func(string) error{
 	"TIMEOUT_PULL":   validTimeout,
 	"TIMEOUT_HOOK":   validTimeout,
 	"TIMEOUT_DEPLOY": validTimeout,
+
+	"TRAEFIK_READ_TIMEOUT": validTimeout,
 }
 
 // Default step timeouts, used when the CVCTL_TIMEOUT_* key is unset.
@@ -212,7 +214,7 @@ var knownKeys = []string{
 	"HOST_NAME", "EDGE_MODE", "PROXY_PORT", "ADMIN_USER", "SSH_MANAGE", "FIREWALL_MANAGE",
 	"ACME_EMAIL", "ACME_CHALLENGE", "STORAGE", "S3_ENDPOINT", "S3_BUCKET", "S3_REGION", "S3_ENDPOINT_INTERNAL",
 	"NOTIFY", "TELEGRAM_CHAT_ID", "TELEGRAM_THREAD_ID", "REGISTRIES", "REGISTRY_USER", "REGISTRY_HOST",
-	"EDGE_SUBNET", "TIMEOUT_FETCH", "TIMEOUT_PULL", "TIMEOUT_HOOK", "TIMEOUT_DEPLOY",
+	"EDGE_SUBNET", "TIMEOUT_FETCH", "TIMEOUT_PULL", "TIMEOUT_HOOK", "TIMEOUT_DEPLOY", "TRAEFIK_READ_TIMEOUT",
 }
 
 func invalid(key string, err error) error {

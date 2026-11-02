@@ -1017,3 +1017,37 @@ func TestTraefikComposePinsProxyGateway(t *testing.T) {
 		}
 	}
 }
+
+func TestTraefikStaticReadTimeout(t *testing.T) {
+	for _, mode := range []string{"edge", "behind-proxy"} {
+		cfg := hostcfg.NewConfig()
+		_ = cfg.Set("EDGE_MODE", mode)
+		if err := cfg.Set("TRAEFIK_READ_TIMEOUT", "15m"); err != nil {
+			t.Fatal(err)
+		}
+		out, err := renderTraefikStatic(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc traefikStaticConfig
+		if err := yaml.Unmarshal(out, &doc); err != nil {
+			t.Fatal(err)
+		}
+		for name, ep := range doc.EntryPoints {
+			got := ""
+			if ep.Transport != nil {
+				got = ep.Transport.RespondingTimeouts.ReadTimeout
+			}
+			want := "15m"
+			if name == "ping" {
+				want = ""
+			}
+			if got != want {
+				t.Errorf("%s: entrypoint %s readTimeout = %q, want %q", mode, name, got, want)
+			}
+		}
+	}
+	if err := hostcfg.NewConfig().Set("TRAEFIK_READ_TIMEOUT", "slow"); err == nil {
+		t.Error("TRAEFIK_READ_TIMEOUT=slow accepted")
+	}
+}
