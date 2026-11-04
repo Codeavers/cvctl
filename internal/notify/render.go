@@ -243,8 +243,10 @@ func build(m Message, host string) (lines []line, buttons []Button, body string)
 	if n := field(d.Next, maxField*2); n != "" {
 		lines = append(lines, line{"Next", "<code>" + html.EscapeString(n) + "</code>", n})
 	}
-	if u := appURL(d.AppURL); u != "" {
-		buttons = append(buttons, Button{"Open app", u})
+	for _, l := range d.Links {
+		if u := appURL(l.URL); u != "" {
+			buttons = append(buttons, Button{"Open " + field(l.Service, 50), u})
+		}
 	}
 	return lines, buttons, ""
 }
