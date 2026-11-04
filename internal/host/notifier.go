@@ -64,10 +64,12 @@ func (NotifierStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 		return "", nil
 	}
 	if p.Actions[0].Kind == "notify-off" {
-		if err := e.FS.Remove(notifyMarkerPath); err != nil {
-			return "", notifyFSErr(notifyMarkerPath, err)
+		e.NotifierCommit = func() error {
+			if err := e.FS.Remove(notifyMarkerPath); err != nil {
+				return notifyFSErr(notifyMarkerPath, err)
+			}
+			return nil
 		}
-		e.NotifierChanged = true
 		return "", nil
 	}
 
@@ -103,13 +105,15 @@ func (NotifierStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 	}
 	wantHash := fmt.Sprintf("%x", sha256.Sum256([]byte(token+"|"+chatID+"|"+threadID)))
 
-	if err := e.FS.MkdirAll("/var/lib/cvctl", 0o750, deployerOwner); err != nil {
-		return "", notifyFSErr("/var/lib/cvctl", err)
+	e.NotifierCommit = func() error {
+		if err := e.FS.MkdirAll("/var/lib/cvctl", 0o750, deployerOwner); err != nil {
+			return notifyFSErr("/var/lib/cvctl", err)
+		}
+		if err := e.FS.WriteFile(notifyMarkerPath, []byte(wantHash+"\n"), 0o640, deployerOwner); err != nil {
+			return notifyFSErr(notifyMarkerPath, err)
+		}
+		return nil
 	}
-	if err := e.FS.WriteFile(notifyMarkerPath, []byte(wantHash+"\n"), 0o640, deployerOwner); err != nil {
-		return "", notifyFSErr(notifyMarkerPath, err)
-	}
-	e.NotifierChanged = true
 
 	return "", nil
 }

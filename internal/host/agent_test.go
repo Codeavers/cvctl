@@ -184,38 +184,74 @@ func TestAgentStepEnsuresDockerDir(t *testing.T) {
 	}
 }
 
-func TestAgentStepRestartsOnNotifierChange(t *testing.T) {
-	for _, changed := range []bool{false, true} {
-		fsys := systest.NewFS()
-		run := &systest.Runner{}
-		exePath, err := os.Executable()
-		if err != nil {
+func agentUpToDate(t *testing.T) (*systest.FS, *systest.Runner) {
+	t.Helper()
+	fsys := systest.NewFS()
+	run := &systest.Runner{}
+	exePath, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := sys.Owner{User: "root", Group: "root"}
+	for _, p := range []string{exePath, "/usr/local/bin/cvctl"} {
+		if err := fsys.WriteFile(p, []byte("cvctl-binary"), 0o755, root); err != nil {
 			t.Fatal(err)
 		}
-		bin := []byte("cvctl-binary")
-		root := sys.Owner{User: "root", Group: "root"}
-		for _, p := range []string{exePath, "/usr/local/bin/cvctl"} {
-			if err := fsys.WriteFile(p, bin, 0o755, root); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := fsys.WriteFile("/etc/systemd/system/cvctl-agent.service", []byte(goldenUnitContent), 0o644, root); err != nil {
-			t.Fatal(err)
-		}
-		if err := fsys.MkdirAll("/var/lib/cvctl/docker", 0o750, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
-			t.Fatal(err)
-		}
-		run.On("systemctl is-enabled cvctl-agent", sys.Result{Stdout: []byte("enabled\n")})
-		run.On("systemctl is-active cvctl-agent", sys.Result{Stdout: []byte("active\n")})
+	}
+	if err := fsys.WriteFile("/etc/systemd/system/cvctl-agent.service", []byte(goldenUnitContent), 0o644, root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.MkdirAll("/var/lib/cvctl/docker", 0o750, sys.Owner{User: "deployer", Group: "deploy"}); err != nil {
+		t.Fatal(err)
+	}
+	run.On("systemctl is-enabled cvctl-agent", sys.Result{Stdout: []byte("enabled\n")})
+	run.On("systemctl is-active cvctl-agent", sys.Result{Stdout: []byte("active\n")})
+	run.On("systemctl daemon-reload", sys.Result{})
+	return fsys, run
+}
 
-		e := &host.Env{Run: run, FS: fsys, NotifierChanged: changed}
-		plan, err := host.AgentStep{}.Check(context.Background(), e)
-		if err != nil {
-			t.Fatal(err)
-		}
-		restart := len(plan.Changes) == 1 && plan.Changes[0] == "restart cvctl-agent"
-		if changed != restart {
-			t.Fatalf("NotifierChanged=%v: changes %v", changed, plan.Changes)
-		}
+func TestAgentStepRestartsOnNotifierChange(t *testing.T) {
+	fsys, run := agentUpToDate(t)
+	e := &host.Env{Run: run, FS: fsys}
+	plan, err := host.AgentStep{}.Check(context.Background(), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Changes) != 0 {
+		t.Fatalf("no notifier change: changes %v", plan.Changes)
+	}
+
+	committed := 0
+	e.NotifierCommit = func() error { committed++; return nil }
+	plan, err = host.AgentStep{}.Check(context.Background(), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Changes) != 1 || plan.Changes[0] != "restart cvctl-agent" {
+		t.Fatalf("changes %v", plan.Changes)
+	}
+	run.On("systemctl try-restart cvctl-agent", sys.Result{})
+	if _, err := (host.AgentStep{}).Apply(context.Background(), e, plan); err != nil {
+		t.Fatal(err)
+	}
+	if committed != 1 || e.NotifierCommit != nil {
+		t.Fatalf("committed %d times, pending %v", committed, e.NotifierCommit != nil)
+	}
+}
+
+func TestAgentStepFailedRestartKeepsNotifierPending(t *testing.T) {
+	fsys, run := agentUpToDate(t)
+	committed := false
+	e := &host.Env{Run: run, FS: fsys, NotifierCommit: func() error { committed = true; return nil }}
+	plan, err := host.AgentStep{}.Check(context.Background(), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.On("systemctl try-restart cvctl-agent", sys.Result{ExitCode: 1})
+	if _, err := (host.AgentStep{}).Apply(context.Background(), e, plan); err == nil {
+		t.Fatal("want error from failed restart")
+	}
+	if committed {
+		t.Fatal("marker committed although the agent did not restart")
 	}
 }
