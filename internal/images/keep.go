@@ -27,10 +27,12 @@ func Decide(all []Instance, keepPrevious int) Plan {
 }
 
 func decideInstance(p *Plan, in Instance, keepPrevious int) {
-	// Per service, distinct digests newest first. Within an event To is newer than From.
+	// Per service, distinct digests that were really current, by most recent
+	// time current, newest first. Within an event To is newer than From.
 	hist := map[string][]string{}
+	var every []string
 	seen := map[string]map[string]bool{}
-	add := func(d *state.Desired) {
+	add := func(d *state.Desired, wasCurrent bool) {
 		if d == nil {
 			return
 		}
@@ -39,6 +41,10 @@ func decideInstance(p *Plan, in Instance, keepPrevious int) {
 				continue
 			}
 			p.Candidates[dig] = true
+			every = append(every, dig)
+			if !wasCurrent {
+				continue
+			}
 			if seen[svc] == nil {
 				seen[svc] = map[string]bool{}
 			}
@@ -49,17 +55,15 @@ func decideInstance(p *Plan, in Instance, keepPrevious int) {
 		}
 	}
 	for _, ev := range in.Events {
-		add(ev.To)
-		add(ev.From)
+		add(ev.To, becameCurrent(ev))
+		add(ev.From, true)
 	}
 
 	// Without a readable state the current version is unknown, and a deploy in
 	// progress has a target the state does not record.
 	if in.State == nil || in.State.Status == state.StatusDeploying {
-		for _, digs := range hist {
-			for _, dig := range digs {
-				p.Keep[dig] = true
-			}
+		for _, dig := range every {
+			p.Keep[dig] = true
 		}
 	}
 	if in.State == nil {
@@ -100,4 +104,12 @@ func decideInstance(p *Plan, in Instance, keepPrevious int) {
 			n++
 		}
 	}
+}
+
+// becameCurrent is an allowlist: the To of a failed, blocked, interrupted or
+// still-pending event never ran as Current and must not use a window slot.
+// A paused manual rollback is left out on purpose: its To shows up as the
+// From of the next event and in State, and leaving it out only keeps more.
+func becameCurrent(ev state.Event) bool {
+	return ev.Result == string(state.StatusOK) && (ev.Kind == "deploy" || ev.Kind == "rollback")
 }

@@ -15,13 +15,19 @@ func des(m map[string]string) *state.Desired { return &state.Desired{Digests: m}
 
 // ev builds a deploy event; events are passed newest first, as Store.History returns them.
 func ev(from, to map[string]string) state.Event {
-	e := state.Event{}
+	e := state.Event{Kind: "deploy", Result: "OK"}
 	if from != nil {
 		e.From = des(from)
 	}
 	if to != nil {
 		e.To = des(to)
 	}
+	return e
+}
+
+func evk(kind, result string, from, to map[string]string) state.Event {
+	e := ev(from, to)
+	e.Kind, e.Result = kind, result
 	return e
 }
 
@@ -154,5 +160,88 @@ func TestDecideFiveVersionsDeletable(t *testing.T) {
 	}
 	if n != 2 {
 		t.Fatalf("deletable = %d, want 2", n)
+	}
+}
+
+func TestDecideIgnoresDeploysThatNeverRan(t *testing.T) {
+	ok := func(from, to map[string]string) state.Event { return evk("deploy", "OK", from, to) }
+	tests := []struct {
+		name     string
+		cur      int
+		prev     int
+		events   []state.Event
+		wantKeep []string
+		wantDel  []string
+	}{
+		{
+			name: "failed deploys use no slot",
+			cur:  5, prev: 4,
+			events: []state.Event{
+				evk("failed", "FAILED", api(5), api(7)),
+				evk("failed", "FAILED", api(5), api(6)),
+				ok(api(4), api(5)), ok(api(3), api(4)), ok(api(2), api(3)), ok(nil, api(2)),
+			},
+			wantKeep: []string{dg(3), dg(4), dg(5)},
+			wantDel:  []string{dg(2), dg(6), dg(7)},
+		},
+		{
+			name: "rollback_failed and blocked use no slot",
+			cur:  5, prev: 4,
+			events: []state.Event{
+				evk("rollback", "rollback_failed", api(5), api(8)),
+				evk("blocked", "BLOCKED", api(5), api(9)),
+				ok(api(4), api(5)), ok(api(3), api(4)), ok(api(2), api(3)),
+			},
+			wantKeep: []string{dg(3), dg(4), dg(5)},
+			wantDel:  []string{dg(2), dg(8), dg(9)},
+		},
+		{
+			name: "interrupted event does not take a slot",
+			cur:  5, prev: 4,
+			events: []state.Event{
+				evk("interrupted", "interrupted", api(5), api(6)),
+				ok(api(4), api(5)), ok(api(3), api(4)), ok(api(2), api(3)),
+			},
+			wantKeep: []string{dg(3), dg(4), dg(5)},
+			wantDel:  []string{dg(2), dg(6)},
+		},
+		{
+			name: "repeated rollbacks keep true order",
+			cur:  3, prev: 1,
+			events: []state.Event{
+				ok(api(1), api(3)),                    // C after the rollback
+				evk("rollback", "OK", api(2), api(1)), // back to A
+				ok(api(1), api(2)),                    // B
+				ok(nil, api(1)),                       // A
+			},
+			wantKeep: []string{dg(1), dg(2), dg(3)},
+		},
+		{
+			name: "rollback window order",
+			cur:  4, prev: 1,
+			events: []state.Event{
+				ok(api(1), api(4)),
+				evk("rollback", "OK", api(3), api(1)),
+				ok(api(2), api(3)),
+				ok(api(1), api(2)),
+				ok(nil, api(1)),
+				ok(nil, api(0)),
+			},
+			wantKeep: []string{dg(1), dg(3), dg(4)},
+			wantDel:  []string{dg(0), dg(2)},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := Decide([]Instance{{Name: "a", State: &state.State{Current: des(api(tc.cur)), Previous: des(api(tc.prev))}, Events: tc.events}}, 2)
+			if got := sorted(p.Keep); !reflect.DeepEqual(got, tc.wantKeep) {
+				t.Errorf("Keep = %v, want %v", got, tc.wantKeep)
+			}
+			for _, d := range tc.wantDel {
+				if !p.Candidates[d] || p.Keep[d] {
+					t.Errorf("%s: want deletable (candidate=%v keep=%v)", d, p.Candidates[d], p.Keep[d])
+				}
+			}
+		})
 	}
 }
