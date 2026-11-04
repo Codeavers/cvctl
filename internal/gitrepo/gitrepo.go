@@ -59,6 +59,9 @@ func (r *Repo) gitCmd(args []string, env []string) sys.Cmd {
 			Name: "setpriv",
 			Args: append([]string{"--reuid=deployer", "--regid=deploy", "--init-groups", "--", "git"}, args...),
 			Env:  env,
+			// deployer may not be able to enter the admin's cwd, and git >= 2.56
+			// aborts a clone there ("fatal: Invalid path").
+			Dir: "/",
 		}
 	}
 	return sys.Cmd{

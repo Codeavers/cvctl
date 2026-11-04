@@ -14,6 +14,7 @@ func NewExecRunner() Runner { return execRunner{} }
 
 func (execRunner) Run(ctx context.Context, c Cmd) (Result, error) {
 	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
+	cmd.Dir = c.Dir
 	if c.Env != nil {
 		cmd.Env = append(os.Environ(), c.Env...)
 	}
