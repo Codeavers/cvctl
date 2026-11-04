@@ -79,6 +79,24 @@ installed contract and embedded `kinds` catalog (read-only, no network, no docke
 keys and no secrets (no `app.env` values or `cvctl.env` credentials), so two runs of the same
 binary are byte-equal and two versions can be diffed. An unreadable instance appears with `error`.
 
+## upgrade
+
+`sudo cvctl upgrade [--version vX.Y.Z] [--check] [--yes] [--accept-changes]` replaces the installed
+`/usr/local/bin/cvctl` with the latest stable release (or `--version`), verifies its checksum, restarts
+`cvctl-agent` and watches it for 30 s; if it does not hold, the previous binary is put back
+(`E_UPGRADE_FAILED`). It refuses while any instance is `DEPLOYING`. Releases come from
+`Codeavers/cvctl`; set `CVCTL_UPGRADE_REPO` for a fork.
+
+Before installing it shows both versions, the release notes and the differences between what the
+current and the new binary would do per instance (`cvctl plan`). Without differences it asks `y/N`
+(`--yes` answers it). With differences, or when the comparison failed, you must type the target version;
+`--yes` alone is not enough, it also needs `--accept-changes`. Without a terminal and those options it
+fails with `E_UPGRADE_CONFIRM` and installs nothing. `--check` shows everything and exits. With `--json`
+there are no questions.
+
+The host notifier gets `upgraded vA -> vB` (`info`), or an `error` notice if the install failed. A
+notifier failure is logged and does not fail the upgrade.
+
 ## Deploy strategy
 
 `recreate` (default for dev) replaces containers in place: a few seconds of downtime per deploy.
