@@ -2,9 +2,14 @@ package deploy_test
 
 import (
 	"context"
+	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +18,7 @@ import (
 	"github.com/codeavers/cvctl/internal/deploy"
 	"github.com/codeavers/cvctl/internal/gitrepo"
 	"github.com/codeavers/cvctl/internal/hostcfg"
+	"github.com/codeavers/cvctl/internal/registry"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/internal/sys/systest"
 	"github.com/codeavers/cvctl/kinds"
@@ -209,5 +215,54 @@ func TestWireSetsRestorePointer(t *testing.T) {
 	deploy.Wire(d, &systest.Runner{})
 	if _, ok := d.Restore.(*backup.RestorePoint); !ok {
 		t.Fatalf("Restore = %T, want *backup.RestorePoint", d.Restore)
+	}
+}
+
+func TestWireSetsLabels(t *testing.T) {
+	var auth atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h := r.Header.Get("Authorization"); h != "" {
+			auth.Store(h)
+		} else {
+			w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+	t.Setenv("CVCTL_INSECURE_REGISTRIES", host)
+
+	sec := hostcfg.NewSecrets()
+	sec.Set("registry_token", "the-token")
+	d := &deploy.Deployer{Host: &hostcfg.Config{RegistryHost: host, RegistryUser: "the-user"}, Secrets: sec}
+	deploy.Wire(d, &systest.Runner{})
+	if d.Labels == nil {
+		t.Fatal("Wire left Labels nil")
+	}
+	if _, err := d.Labels.Labels(context.Background(), host+"/org/app", "sha256:"+strings.Repeat("0", 64)); err == nil {
+		t.Fatal("expected the fake registry's 404")
+	}
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("the-user:the-token"))
+	if got := auth.Load(); got != want {
+		t.Fatalf("Authorization = %v, want the host credentials", got)
+	}
+}
+
+func TestWireKeepsLabelsReader(t *testing.T) {
+	keep := registry.NewLabels("", "", "", nil)
+	d := &deploy.Deployer{Host: &hostcfg.Config{}, Labels: keep}
+	deploy.Wire(d, &systest.Runner{})
+	if d.Labels != keep {
+		t.Fatal("Wire replaced a Labels reader already set")
+	}
+}
+
+func TestWireWithoutHostHasNoLabels(t *testing.T) {
+	d := &deploy.Deployer{}
+	deploy.Wire(d, &systest.Runner{})
+	if d.Labels != nil {
+		t.Fatalf("Labels = %#v without host config", d.Labels)
 	}
 }

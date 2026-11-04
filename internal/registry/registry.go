@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
@@ -180,6 +182,69 @@ func (r *resolver) Digest(ctx context.Context, image, tag string) (string, error
 	}
 
 	return desc.Digest.String(), nil
+}
+
+// LabelReader reads the OCI config labels of an image pinned by digest.
+type LabelReader interface {
+	Labels(ctx context.Context, image, digest string) (map[string]string, error)
+}
+
+// NewLabels returns a LabelReader. The token is sent only to tokenHost.
+func NewLabels(user, token, tokenHost string, insecureHosts []string) LabelReader {
+	return &resolver{
+		user:          user,
+		token:         token,
+		tokenHost:     tokenHost,
+		insecureHosts: insecureHosts,
+	}
+}
+
+// Labels returns every label of the image config, unfiltered. For an index it
+// reads the manifest matching the host architecture.
+func (r *resolver) Labels(ctx context.Context, image, digest string) (map[string]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	base := stripTagAndDigest(image)
+	refStr := base + "@" + digest
+
+	var nameOpts []name.Option
+	if isInsecure(imageHost(refStr), r.insecureHosts) {
+		nameOpts = append(nameOpts, name.Insecure)
+	}
+	ref, err := name.ParseReference(refStr, nameOpts...)
+	if err != nil {
+		return nil, r.sanitizeError(&output.Error{
+			Code:    "E_REGISTRY_RESOLVE",
+			Message: fmt.Sprintf("cannot reach registry %s", imageHost(refStr)),
+			Hint:    "check image and digest syntax",
+		})
+	}
+	regHost := ref.Context().RegistryStr()
+
+	img, err := remote.Image(ref,
+		remote.WithContext(ctx),
+		remote.WithAuth(AuthFor(r.user, r.token, r.tokenHost, regHost)),
+		remote.WithPlatform(v1.Platform{OS: "linux", Architecture: runtime.GOARCH}),
+	)
+	if err == nil {
+		var cfg *v1.ConfigFile
+		if cfg, err = img.ConfigFile(); err == nil {
+			return cfg.Config.Labels, nil
+		}
+	}
+	msg := fmt.Sprintf("cannot reach registry %s", regHost)
+	hint := "check registry connectivity and credentials"
+	var terr *transport.Error
+	if errors.As(err, &terr) {
+		msg = fmt.Sprintf("HTTP %d reading labels of %s", terr.StatusCode, base)
+		if terr.StatusCode == 401 || terr.StatusCode == 403 {
+			hint = "check the registry token (needs read:packages)"
+		} else if terr.StatusCode == 404 {
+			hint = "verify image name and digest exist in registry"
+		}
+	}
+	return nil, r.sanitizeError(&output.Error{Code: "E_REGISTRY_RESOLVE", Message: msg, Hint: hint})
 }
 
 func (r *resolver) sanitizeError(err *output.Error) *output.Error {

@@ -2,13 +2,18 @@ package deploy
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/codeavers/cvctl/internal/contract"
+	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
 )
@@ -301,5 +306,30 @@ func TestDeployTimeoutDuringHookIsTransient(t *testing.T) {
 	st, _ := rig.store.Load("demo-dev")
 	if res.Status != state.StatusFailed || !strings.Contains(res.Detail, "E_TIMEOUT") || st.FailedHash != "" {
 		t.Fatalf("result %+v, FailedHash %q", res, st.FailedHash)
+	}
+}
+
+func TestDeployTimeoutStillSendsNotice(t *testing.T) {
+	var posts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer srv.Close()
+
+	rig := setupTestRig(t, "dev", "demo-dev")
+	if err := rig.deployer.Host.Set("TIMEOUT_DEPLOY", "100ms"); err != nil {
+		t.Fatal(err)
+	}
+	rig.deployer.Notify = notify.NewTelegram("t", "1", "", srv.URL)
+	rig.deployer.Health = func(ctx context.Context, _, _ string) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := posts.Load(); got != 1 {
+		t.Fatalf("telegram POSTs = %d, want 1", got)
 	}
 }

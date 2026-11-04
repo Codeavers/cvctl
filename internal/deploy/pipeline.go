@@ -84,11 +84,13 @@ type Deployer struct {
 	Compose    func(inst, override, envFile string) ComposeAPI
 	Repo       func(inst string) CheckoutAPI
 	Notify     notify.Notifier
-	Restore    RestorePointer
-	Host       *hostcfg.Config
-	Catalog    kinds.Catalog
-	Clock      func() time.Time
-	Health     func(ctx context.Context, inst, override string) error
+	// Labels reads image labels for deploy notices; nil means no labels.
+	Labels  registry.LabelReader
+	Restore RestorePointer
+	Host    *hostcfg.Config
+	Catalog kinds.Catalog
+	Clock   func() time.Time
+	Health  func(ctx context.Context, inst, override string) error
 	// Run executes the docker network commands; Wire sets it.
 	Run sys.Runner
 	// Contracts pulls the contract artifact of OCI-sourced instances.
@@ -381,6 +383,17 @@ func (d *Deployer) cvctlSecrets(path string) map[string]string {
 	return out
 }
 
+// firstLine is the first non-empty line of text. Redact before calling it: a
+// secret that spans lines is only recognized whole.
+func firstLine(text string) string {
+	for _, l := range strings.Split(text, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			return l
+		}
+	}
+	return ""
+}
+
 func lastLines(text string, n int) string {
 	lines := strings.Split(text, "\n")
 	if len(lines) <= n {
@@ -469,10 +482,13 @@ func (d *Deployer) failPermanent(ctx context.Context, inst string, st *state.Sta
 		Detail: redacted,
 	}
 	_ = d.notifier().Send(ctx, notify.Message{
-		Host:  d.hostName(),
-		Level: "error",
-		Title: fmt.Sprintf("%s deploy FAILED", inst),
-		Text:  redacted,
+		Host:    d.hostName(),
+		Level:   "error",
+		Title:   fmt.Sprintf("%s deploy FAILED", inst),
+		Text:    redacted,
+		Project: inst,
+		Status:  "FAILED",
+		Deploy:  d.deployInfo(ctx, inst, st, want, "error"),
 	})
 	var errs []error
 	if err := d.Store.Save(st); err != nil {
@@ -515,10 +531,13 @@ func (d *Deployer) failTransient(ctx context.Context, inst string, st *state.Sta
 	}
 	if !repeated {
 		_ = d.notifier().Send(ctx, notify.Message{
-			Host:  d.hostName(),
-			Level: "error",
-			Title: fmt.Sprintf("%s deploy FAILED", inst),
-			Text:  detail,
+			Host:    d.hostName(),
+			Level:   "error",
+			Title:   fmt.Sprintf("%s deploy FAILED", inst),
+			Text:    detail,
+			Project: inst,
+			Status:  "FAILED, will retry",
+			Deploy:  d.deployInfo(ctx, inst, st, want, "error"),
 		})
 	}
 	var errs []error
@@ -810,10 +829,14 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			Detail:  warnText,
 		}
 		_ = d.notifier().Send(ctx, notify.Message{
-			Host:  d.hostName(),
-			Level: "warn",
-			Title: fmt.Sprintf("%s deploy BLOCKED", inst),
-			Text:  warnText,
+			Host:    d.hostName(),
+			Level:   "warn",
+			Title:   fmt.Sprintf("%s deploy BLOCKED", inst),
+			Text:    warnText,
+			Error:   "missing: " + strings.Join(resEnv.Missing, ", "),
+			Project: inst,
+			Status:  "BLOCKED",
+			Deploy:  d.deployInfo(ctx, inst, st, want, "warn"),
 		})
 
 		var errs []error
@@ -1113,6 +1136,10 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 
 	if upErr == nil && healthErr == nil {
+		// One read serves the hook and OK notices: a slow registry must not
+		// delay the deploy once per notice.
+		okInfo := d.deployInfo(ctx, inst, st, want, "info")
+
 		// Post-deploy hooks
 		for _, hook := range p.X.Hooks.PostDeploy {
 			hookCtx, hookCancel := withStepTimeout(ctx, d.hookTimeout(hook), "post-deploy hook "+hook.Service)
@@ -1130,21 +1157,29 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 					rawHook = hErr.Error()
 				}
 				redactedHook := lastLines(redact(rawHook, secrets), 20)
+				hookInfo := *okInfo
+				hookInfo.Logs = historyCmd(inst)
 				_ = d.notifier().Send(ctx, notify.Message{
-					Host:  d.hostName(),
-					Level: "warn",
-					Title: fmt.Sprintf("%s deploy OK", inst),
-					Text:  fmt.Sprintf("post-deploy hook failed: %s", redactedHook),
+					Host:    d.hostName(),
+					Level:   "warn",
+					Title:   fmt.Sprintf("%s deploy OK", inst),
+					Text:    fmt.Sprintf("post-deploy hook failed: %s", redactedHook),
+					Project: inst,
+					Status:  "OK, post-deploy hook failed",
+					Deploy:  &hookInfo,
 				})
 			}
 		}
 
 		okDetail := fmt.Sprintf("%s %s deployed", revWord(want), RevShort(want))
 		_ = d.notifier().Send(ctx, notify.Message{
-			Host:  d.hostName(),
-			Level: "info",
-			Title: fmt.Sprintf("%s deploy OK", inst),
-			Text:  fmt.Sprintf("%s %s deployed successfully", revWord(want), RevShort(want)),
+			Host:    d.hostName(),
+			Level:   "info",
+			Title:   fmt.Sprintf("%s deploy OK", inst),
+			Text:    fmt.Sprintf("%s %s deployed successfully", revWord(want), RevShort(want)),
+			Project: inst,
+			Status:  "OK, deployed in " + d.clock().Sub(now).Round(time.Second).String(),
+			Deploy:  okInfo,
 		})
 
 		st.Previous = st.Current
@@ -1209,6 +1244,16 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		}
 	}
 	redactedLogs := lastLines(redact(timeoutPrefix+logs, secrets), 20)
+	// The logs end in whatever the containers printed last; the cause is the
+	// step's own error.
+	cause := upErr
+	if cause == nil {
+		cause = healthErr
+	}
+	causeLine := firstLine(redact(cause.Error(), secrets))
+	if timeoutPrefix != "" {
+		causeLine = strings.TrimSpace(timeoutPrefix) + ": " + causeLine
+	}
 
 	if !hasInfra(st.Current) {
 		st.Status = state.StatusFailed
@@ -1236,10 +1281,14 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			return Result{}, err
 		}
 		_ = d.notifier().Send(ctx, notify.Message{
-			Host:  d.hostName(),
-			Level: "error",
-			Title: fmt.Sprintf("%s deploy FAILED", inst),
-			Text:  redactedLogs,
+			Host:    d.hostName(),
+			Level:   "error",
+			Title:   fmt.Sprintf("%s deploy FAILED", inst),
+			Text:    redactedLogs,
+			Error:   causeLine,
+			Project: inst,
+			Status:  "FAILED",
+			Deploy:  d.deployInfo(ctx, inst, st, want, "error"),
 		})
 
 		return Result{
@@ -1269,10 +1318,14 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			Detail: rbRedacted,
 		}
 		_ = d.notifier().Send(ctx, notify.Message{
-			Host:  d.hostName(),
-			Level: "error",
-			Title: fmt.Sprintf("%s ROLLBACK FAILED", inst),
-			Text:  rbRedacted,
+			Host:    d.hostName(),
+			Level:   "error",
+			Title:   fmt.Sprintf("%s ROLLBACK FAILED", inst),
+			Text:    rbRedacted,
+			Error:   firstLine(redact(rollbackErr.Error(), secrets)),
+			Project: inst,
+			Status:  "ROLLBACK FAILED",
+			Deploy:  d.deployInfo(ctx, inst, st, want, "error"),
 		})
 
 		var errs []error
@@ -1300,6 +1353,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	st.RollbackFailed = false
 
 	errText := redactedLogs
+	next := ""
 	if preHooksRan && dec.Env == "prod" {
 		dataSvc := ""
 		for _, ds := range p.Data {
@@ -1314,7 +1368,8 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		if dataSvc == "" && len(p.X.Hooks.PreDeploy) > 0 {
 			dataSvc = p.X.Hooks.PreDeploy[0].Service
 		}
-		errText += fmt.Sprintf("\nmigrations ran; restore point %s: cvctl db restore %s %s --to %s", deployID, inst, dataSvc, deployID)
+		next = fmt.Sprintf("cvctl db restore %s %s --to %s", inst, dataSvc, deployID)
+		errText += fmt.Sprintf("\nmigrations ran; restore point %s: %s", deployID, next)
 	}
 
 	res = Result{
@@ -1323,11 +1378,17 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		Detail: errText,
 	}
 
+	info := d.deployInfo(ctx, inst, st, want, "error")
+	info.Next = next
 	_ = d.notifier().Send(ctx, notify.Message{
-		Host:  d.hostName(),
-		Level: "error",
-		Title: fmt.Sprintf("%s deploy FAILED", inst),
-		Text:  errText,
+		Host:    d.hostName(),
+		Level:   "error",
+		Title:   fmt.Sprintf("%s deploy FAILED", inst),
+		Text:    errText,
+		Error:   causeLine,
+		Project: inst,
+		Status:  "ROLLED BACK",
+		Deploy:  info,
 	})
 
 	var errs []error

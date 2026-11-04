@@ -1,0 +1,77 @@
+# Copy to .github/workflows/ in a project, or copy the "Commit info" step and the
+# `labels:` block into the existing image build workflow. Adjust the branches, the
+# build context and the image name, which defaults to the repository name.
+#
+# cvctl reads these labels from the deployed image to fill the Telegram deploy
+# notice (PR link, commit, title, author). Without them the notice still goes
+# out, just without those lines.
+name: build-image
+
+on:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image name
+        id: image
+        # GHCR rejects uppercase names; the owner in github.repository may have it.
+        env:
+          REPO: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPO,,}" >> "$GITHUB_OUTPUT"
+      - name: Commit info
+        id: info
+        # The commit message and author are attacker-influenced: they reach the
+        # script only through env, never through ${{ }} inside run.
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          AUTHOR: ${{ github.event.head_commit.author.name }}
+        run: |
+          pr=''
+          title=''
+          # workflow_dispatch has no head_commit: PR, title and author stay empty.
+          if [ -n "$COMMIT_MESSAGE" ]; then
+            first=$(printf '%s\n' "$COMMIT_MESSAGE" | sed -n '1p')
+            if [[ "$first" =~ ^Merge\ pull\ request\ \#([0-9]+) ]]; then
+              # Merge commit: the PR title is the third line.
+              pr=${BASH_REMATCH[1]}
+              title=$(printf '%s\n' "$COMMIT_MESSAGE" | sed -n '3p')
+            elif [[ "$first" =~ \(\#([0-9]+)\)[[:space:]]*$ ]]; then
+              # Squash merge: "title (#N)".
+              pr=${BASH_REMATCH[1]}
+              first=${first%"${first##*[![:space:]]}"}
+              title=${first% "(#$pr)"}
+            fi
+          fi
+          # One line per output value.
+          title=$(printf '%s' "$title" | tr -d '\r\n')
+          author=$(printf '%s' "$AUTHOR" | tr -d '\r\n')
+          {
+            echo "pr=$pr"
+            echo "title=$title"
+            echo "author=$author"
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image.outputs.name }}:${{ github.ref_name }}
+          labels: |
+            cvctl.repo=${{ github.server_url }}/${{ github.repository }}
+            cvctl.commit=${{ github.sha }}
+            cvctl.pr=${{ steps.info.outputs.pr }}
+            cvctl.title=${{ steps.info.outputs.title }}
+            cvctl.author=${{ steps.info.outputs.author }}

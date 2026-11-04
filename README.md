@@ -156,6 +156,27 @@ When the settings change, init sends a test message and restarts `cvctl-agent` s
 disabling notifications only restarts the agent. The agent and the backup timers log notifier
 errors (bad configuration, failed sends) to the journal.
 
+### Deploy notices and image labels
+
+Telegram deploy notices show the PR, commit, title and author of what was deployed. cvctl reads
+them from the labels of the changed images, so the build must set `cvctl.repo`, `cvctl.commit`,
+`cvctl.pr`, `cvctl.title` and `cvctl.author` (`cvctl.pr`, `cvctl.title` and `cvctl.author` may be
+empty). `cvctl.repo` is the repository URL (`https://github.com/org/app`); the notice links the
+PR and commit from it, and a value that is not an https URL drops the links. `cvctl.author` is the
+commit author name. [examples/ci/image-labels.yml](examples/ci/image-labels.yml) sets them with
+`docker/build-push-action`, taking the PR number and title from the merge or squash commit.
+
+Without labels the notice still goes out with the result only. Labels are read with a 5 second
+timeout; a failed read never fails the deploy.
+
+A failed deploy adds an `Error` line with the cause and a `Logs` line with the history command.
+When there is something to do, a `Next` line gives the command: `sudo cvctl resume <instance>` after
+a manual rollback, or `cvctl db restore <instance> <service> --to <id>` when a rolled back deploy
+had already run its migrations.
+
+`info` notices are silent: successful deploys, the pause after a manual rollback, finished restores
+and `cvctl notify test`. `warn` and `error` notices make a sound.
+
 ## lint
 
 Validates `compose.yml` and `env.spec.yml` against the cvctl contract.

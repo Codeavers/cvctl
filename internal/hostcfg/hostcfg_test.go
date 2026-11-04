@@ -448,6 +448,8 @@ func TestTelegramIDValidation(t *testing.T) {
 	}{
 		{"TELEGRAM_CHAT_ID", "-1003212345678", true},
 		{"TELEGRAM_CHAT_ID", "@cvctl_alerts", true},
+		{"TELEGRAM_CHAT_ID", "@abcd", true},
+		{"TELEGRAM_CHAT_ID", "@abc", false},
 		{"TELEGRAM_CHAT_ID", "t.me/c/321/33", false},
 		{"TELEGRAM_CHAT_ID", "@", false},
 		{"TELEGRAM_CHAT_ID", "@x", false},

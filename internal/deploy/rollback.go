@@ -220,10 +220,14 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 			Detail: redactedSwapErr,
 		}
 		_ = d.notifier().Send(ctx, notify.Message{
-			Host:  d.hostName(),
-			Level: "error",
-			Title: fmt.Sprintf("%s ROLLBACK FAILED", inst),
-			Text:  fmt.Sprintf("manual rollback failed: %s", redactedSwapErr),
+			Host:    d.hostName(),
+			Level:   "error",
+			Title:   fmt.Sprintf("%s ROLLBACK FAILED", inst),
+			Text:    fmt.Sprintf("manual rollback failed: %s", redactedSwapErr),
+			Error:   firstLine(redactedSwapErr),
+			Project: inst,
+			Status:  "ROLLBACK FAILED",
+			Deploy:  d.deployInfo(ctx, inst, st, *target, "error"),
 		})
 
 		var errs []error
@@ -276,11 +280,16 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 	}); err != nil {
 		return Result{}, err
 	}
+	info := d.deployInfo(ctx, inst, &state.State{Current: st.Previous}, *st.Current, "info")
+	info.Next = "sudo cvctl resume " + inst
 	_ = d.notifier().Send(ctx, notify.Message{
-		Host:  d.hostName(),
-		Level: "info",
-		Title: fmt.Sprintf("%s deploy PAUSED", inst),
-		Text:  pausedReason,
+		Host:    d.hostName(),
+		Level:   "info",
+		Title:   fmt.Sprintf("%s deploy PAUSED", inst),
+		Text:    pausedReason,
+		Project: inst,
+		Status:  "PAUSED",
+		Deploy:  info,
 	})
 
 	return Result{

@@ -60,9 +60,9 @@ type Config struct {
 
 var dnsLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-// Telegram usernames: 5-32 chars, letters, digits and underscores, starting
-// with a letter.
-var telegramUserRe = regexp.MustCompile(`^@[A-Za-z][A-Za-z0-9_]{4,31}$`)
+// Telegram usernames: 4-32 chars, letters, digits and underscores, starting
+// with a letter. Regular ones start at 5; collectible ones can have 4.
+var telegramUserRe = regexp.MustCompile(`^@[A-Za-z][A-Za-z0-9_]{3,31}$`)
 
 func oneOf(vals ...string) func(string) error {
 	return func(v string) error {

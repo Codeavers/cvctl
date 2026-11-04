@@ -13,6 +13,7 @@ import (
 	"github.com/codeavers/cvctl/internal/gitrepo"
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/instance"
+	"github.com/codeavers/cvctl/internal/registry"
 	"github.com/codeavers/cvctl/internal/render"
 	"github.com/codeavers/cvctl/internal/sys"
 )
@@ -25,8 +26,12 @@ func Wire(d *Deployer, run sys.Runner) {
 		d.Backup = BackupTargetFrom(d.Host, d.Secrets)
 	}
 
+	auth := OCIAuth(d.Host, d.Secrets)
 	if d.Contracts == nil {
-		d.Contracts = OCIFetcher(OCIAuth(d.Host, d.Secrets))
+		d.Contracts = OCIFetcher(auth)
+	}
+	if d.Labels == nil && d.Host != nil {
+		d.Labels = registry.NewLabels(auth.User, auth.Token, auth.TokenHost, auth.Insecure)
 	}
 
 	d.Repo = func(inst string) CheckoutAPI {

@@ -17,10 +17,30 @@ var DefaultBaseURL = "https://api.telegram.org"
 
 // Message is an alert or notification dispatched to configured notifiers.
 type Message struct {
-	Host  string
-	Level string // info | warn | error
-	Title string
-	Text  string
+	Host    string
+	Project string
+	Level   string // info | warn | error
+	Title   string
+	Text    string
+	// Status is the result shown on the Status line; empty falls back to Title.
+	Status string
+	// Error is the redacted cause shown on the Error line of a deploy notice;
+	// empty falls back to Summary(Text).
+	Error string
+	// Deploy is nil for notices that are not about a deploy.
+	Deploy *Deploy
+}
+
+// Build is the provenance of one image, read from its cvctl.* labels.
+type Build struct{ Service, Repo, Commit, PR, Title, Author string }
+
+// Deploy carries what a deploy notice adds to the common fields.
+type Deploy struct {
+	Changed []string // services whose image changed; empty means unchanged
+	Builds  []Build  // only images that carry labels
+	AppURL  string
+	Logs    string
+	Next    string // command to run next, shown at any level
 }
 
 // Notifier sends formatted notifications to external endpoints.
@@ -92,7 +112,11 @@ func Logged(n Notifier, w io.Writer) Notifier {
 func (l loggedNotifier) Send(ctx context.Context, m Message) error {
 	err := l.n.Send(ctx, m)
 	if err != nil {
-		fmt.Fprintf(l.w, "notify: %q not sent: %v\n", m.Title, err)
+		name := m.Title
+		if name == "" {
+			name = m.Status
+		}
+		fmt.Fprintf(l.w, "notify: %q not sent: %v\n", name, err)
 	}
 	return err
 }

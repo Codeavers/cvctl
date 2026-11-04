@@ -26,11 +26,27 @@ type telegramNotifier struct {
 	client   *http.Client
 }
 
+type linkPreviewOptions struct {
+	IsDisabled bool `json:"is_disabled"`
+}
+
+type inlineButton struct {
+	Text string `json:"text"`
+	URL  string `json:"url"`
+}
+
+type replyMarkup struct {
+	InlineKeyboard [][]inlineButton `json:"inline_keyboard"`
+}
+
 type telegramPayload struct {
-	ChatID                string `json:"chat_id"`
-	MessageThreadID       *int   `json:"message_thread_id,omitempty"`
-	Text                  string `json:"text"`
-	DisableWebPagePreview bool   `json:"disable_web_page_preview"`
+	ChatID              string             `json:"chat_id"`
+	MessageThreadID     *int               `json:"message_thread_id,omitempty"`
+	Text                string             `json:"text"`
+	ParseMode           string             `json:"parse_mode,omitempty"`
+	ReplyMarkup         *replyMarkup       `json:"reply_markup,omitempty"`
+	DisableNotification bool               `json:"disable_notification"`
+	LinkPreviewOptions  linkPreviewOptions `json:"link_preview_options"`
 }
 
 type telegramResponse struct {
@@ -65,6 +81,10 @@ func NewTelegram(token, chatID, threadID, baseURL string) Notifier {
 }
 
 func (t *telegramNotifier) Send(ctx context.Context, m Message) error {
+	// A failure notice is most needed after a deploy timeout or shutdown, when
+	// ctx is already dead; the client timeout bounds each POST instead.
+	ctx = context.WithoutCancel(ctx)
+
 	var threadIDInt *int
 	if t.threadID != "" {
 		parsed, err := strconv.Atoi(t.threadID)
@@ -89,32 +109,43 @@ func (t *telegramNotifier) Send(ctx context.Context, m Message) error {
 		h = "unknown"
 	}
 
-	level := strings.ToUpper(m.Level)
-	if level == "" {
-		level = "INFO"
-	}
-
-	header := fmt.Sprintf("[%s] %s %s", h, level, m.Title)
-	if m.Title == "" {
-		header = fmt.Sprintf("[%s] %s", h, level)
-	}
-
-	text := header
-	if m.Text != "" {
-		text = header + "\n" + m.Text
-	}
-	text = truncateMessageText(text, 4000)
-
 	payload := telegramPayload{
-		ChatID:                t.chatID,
-		MessageThreadID:       threadIDInt,
-		Text:                  text,
-		DisableWebPagePreview: true,
+		ChatID:              t.chatID,
+		MessageThreadID:     threadIDInt,
+		DisableNotification: m.Level == "" || m.Level == "info",
+		LinkPreviewOptions:  linkPreviewOptions{IsDisabled: true},
+	}
+	var buttons []Button
+	payload.Text, buttons = renderHTML(m, h)
+	payload.ParseMode = "HTML"
+	if len(buttons) > 0 {
+		rm := &replyMarkup{}
+		for _, b := range buttons {
+			rm.InlineKeyboard = append(rm.InlineKeyboard, []inlineButton{{Text: b.Text, URL: b.URL}})
+		}
+		payload.ReplyMarkup = rm
 	}
 
+	status, err := t.post(ctx, payload)
+	if status != http.StatusBadRequest {
+		return err
+	}
+
+	// Telegram rejects markup it cannot parse (e.g. a button URL it dislikes)
+	// with 400; the notice still has to arrive, so resend it as plain text.
+	payload.Text = renderPlain(m, h)
+	payload.ParseMode = ""
+	payload.ReplyMarkup = nil
+	_, err = t.post(ctx, payload)
+	return err
+}
+
+// post sends one sendMessage request and returns the HTTP status (0 when no
+// response arrived) with a sanitized error.
+func (t *telegramNotifier) post(ctx context.Context, payload telegramPayload) (int, error) {
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
-		return &output.Error{
+		return 0, &output.Error{
 			Code:    "E_NOTIFY_SEND",
 			Message: fmt.Sprintf("failed to encode telegram payload: %v", err),
 			Hint:    "check message content",
@@ -124,7 +155,7 @@ func (t *telegramNotifier) Send(ctx context.Context, m Message) error {
 	endpoint := fmt.Sprintf("%s/bot%s/sendMessage", t.baseURL, t.token)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return &output.Error{
+		return 0, &output.Error{
 			Code:    "E_NOTIFY_SEND",
 			Message: sanitizeError(err, t.baseURL, t.token),
 			Hint:    "check telegram configuration",
@@ -134,7 +165,7 @@ func (t *telegramNotifier) Send(ctx context.Context, m Message) error {
 
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return &output.Error{
+		return 0, &output.Error{
 			Code:    "E_NOTIFY_SEND",
 			Message: sanitizeError(err, t.baseURL, t.token),
 			Hint:    "check network connectivity and telegram base URL",
@@ -154,22 +185,14 @@ func (t *telegramNotifier) Send(ctx context.Context, m Message) error {
 		if t.token != "" {
 			desc = strings.ReplaceAll(desc, t.token, "<redacted>")
 		}
-		return &output.Error{
+		return resp.StatusCode, &output.Error{
 			Code:    "E_NOTIFY_SEND",
 			Message: fmt.Sprintf("telegram sendMessage failed: %s", desc),
 			Hint:    "verify telegram bot token and chat id",
 		}
 	}
 
-	return nil
-}
-
-func truncateMessageText(s string, maxRunes int) string {
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	return string(runes[:maxRunes]) + "…[truncated]"
+	return resp.StatusCode, nil
 }
 
 func sanitizeError(err error, baseURL, token string) string {
