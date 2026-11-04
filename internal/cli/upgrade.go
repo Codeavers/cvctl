@@ -50,9 +50,9 @@ var newUpgradeEnv = func(current string) (*upgradeEnv, error) {
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
 	}
-	repo := os.Getenv("CVCTL_UPGRADE_REPO")
-	if repo == "" {
-		repo = defaultUpgradeRepo
+	repo, err := upgradeRepo(os.Getenv, sys.NewOSFS())
+	if err != nil {
+		return nil, err
 	}
 	return &upgradeEnv{
 		Upgrader: &upgrade.Upgrader{
@@ -69,6 +69,24 @@ var newUpgradeEnv = func(current string) (*upgradeEnv, error) {
 		Interactive: term.IsTerminal(int(os.Stdin.Fd())),
 		Notifier:    hostNotifier,
 	}, nil
+}
+
+// upgradeRepo prefers the process environment, then host.env: sudo usually
+// drops the variable, and a fork's host would silently fall back to the default.
+// A missing host.env is fine; an unreadable or invalid one fails, so a typo does
+// not send the upgrade to another repository.
+func upgradeRepo(getenv func(string) string, fsys sys.FS) (string, error) {
+	if v := getenv("CVCTL_UPGRADE_REPO"); v != "" {
+		return v, nil
+	}
+	cfg, _, err := hostcfg.Load(fsys, hostCfgDir)
+	if err != nil {
+		return "", err
+	}
+	if v := cfg.Get("UPGRADE_REPO"); v != "" {
+		return v, nil
+	}
+	return defaultUpgradeRepo, nil
 }
 
 func deployingInstances() ([]string, error) {
@@ -111,6 +129,7 @@ type upgradeChange struct {
 }
 
 type upgradeReport struct {
+	Repo         string          `json:"repo"`
 	From         string          `json:"from"`
 	To           string          `json:"to"`
 	Notes        string          `json:"notes"`
@@ -170,7 +189,7 @@ func doUpgrade(cmd *cobra.Command, e *upgradeEnv, o upgradeOpts) error {
 	}
 	defer p.Cleanup()
 
-	rep := upgradeReport{From: p.From, To: p.To, Notes: p.Notes, Changes: []upgradeChange{},
+	rep := upgradeReport{Repo: e.Upgrader.Client.Repo, From: p.From, To: p.To, Notes: p.Notes, Changes: []upgradeChange{},
 		PlanFailed: p.PlanFailed, UpToDate: p.UpToDate}
 	for _, c := range p.Changes {
 		rep.Changes = append(rep.Changes, upgradeChange{Path: c.Path, From: c.From, To: c.To})
@@ -181,11 +200,11 @@ func doUpgrade(cmd *cobra.Command, e *upgradeEnv, o upgradeOpts) error {
 		return nil
 	}
 	if o.check {
-		pr.Result(rep, func(w io.Writer) { writeUpgradeReview(w, p) })
+		pr.Result(rep, func(w io.Writer) { writeUpgradeReview(w, rep.Repo, p) })
 		return nil
 	}
 	if !o.json {
-		writeUpgradeReview(cmd.OutOrStdout(), p)
+		writeUpgradeReview(cmd.OutOrStdout(), rep.Repo, p)
 	}
 	if err := confirmUpgrade(cmd, e, o, p); err != nil {
 		return err
@@ -227,8 +246,8 @@ func lockUpgrade() (func(), error) {
 	return unlock, nil
 }
 
-func writeUpgradeReview(w io.Writer, p *upgrade.Prepared) {
-	fmt.Fprintf(w, "Versión actual: %s\nVersión nueva:  %s\n", p.From, p.To)
+func writeUpgradeReview(w io.Writer, repo string, p *upgrade.Prepared) {
+	fmt.Fprintf(w, "Repo de releases: %s\nVersión actual: %s\nVersión nueva:  %s\n", repo, p.From, p.To)
 	if strings.TrimSpace(p.Notes) != "" {
 		fmt.Fprintf(w, "\nNotas de la release:\n%s\n", strings.TrimSpace(p.Notes))
 	}

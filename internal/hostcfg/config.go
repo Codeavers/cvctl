@@ -143,6 +143,8 @@ var validators = map[string]func(string) error{
 	"TIMEOUT_DEPLOY": validTimeout,
 
 	"TRAEFIK_READ_TIMEOUT": validTimeout,
+
+	"UPGRADE_REPO": validUpgradeRepo,
 }
 
 // Default step timeouts, used when the CVCTL_TIMEOUT_* key is unset.
@@ -152,6 +154,15 @@ const (
 	DefaultTimeoutHook   = 15 * time.Minute
 	DefaultTimeoutDeploy = 45 * time.Minute
 )
+
+var upgradeRepoRe = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
+
+func validUpgradeRepo(v string) error {
+	if !upgradeRepoRe.MatchString(v) {
+		return errors.New("must be owner/repo (letters, digits, '.', '_' and '-')")
+	}
+	return nil
+}
 
 func validTimeout(v string) error {
 	d, err := time.ParseDuration(v)
@@ -243,6 +254,7 @@ var knownKeys = []string{
 	"ACME_EMAIL", "ACME_CHALLENGE", "STORAGE", "S3_ENDPOINT", "S3_BUCKET", "S3_REGION", "S3_ENDPOINT_INTERNAL",
 	"NOTIFY", "TELEGRAM_CHAT_ID", "TELEGRAM_THREAD_ID", "REGISTRIES", "REGISTRY_USER", "REGISTRY_HOST",
 	"EDGE_SUBNET", "TIMEOUT_FETCH", "TIMEOUT_PULL", "TIMEOUT_HOOK", "TIMEOUT_DEPLOY", "TRAEFIK_READ_TIMEOUT",
+	"UPGRADE_REPO",
 }
 
 func invalid(key string, err error) error {

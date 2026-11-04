@@ -113,9 +113,11 @@ catches a corrupt download, not a compromised release.
 Without a terminal and those options it fails with `E_UPGRADE_CONFIRM` and installs nothing. With
 `--json` there are no questions.
 
-Releases come from `Codeavers/cvctl`; set `CVCTL_UPGRADE_REPO` for a fork. `sudo` may drop that variable
-from the environment, and then the default repository is used without warning: pass it with
-`sudo env CVCTL_UPGRADE_REPO=owner/repo cvctl upgrade`, or allow it with `env_keep` in sudoers.
+Releases come from `Codeavers/cvctl`. For a fork, set `CVCTL_UPGRADE_REPO=owner/repo` in
+`/etc/cvctl/host.env` (`sudo` usually drops it from the environment, so a variable there is not
+reliable); a `CVCTL_UPGRADE_REPO` in the environment takes precedence. An invalid value in `host.env`
+makes the command fail instead of falling back. The review shows the repository the release comes
+from (`repo` in `--json`).
 
 The host notifier gets `upgraded vA -> vB` (`info`), with a note if the agent was not started, or an
 `error` notice if the install failed. A notifier failure is logged and does not fail the upgrade.

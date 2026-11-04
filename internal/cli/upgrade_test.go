@@ -299,6 +299,9 @@ func TestUpgradeCheckJSONInstallsNothing(t *testing.T) {
 		t.Fatalf("not json: %q", out)
 	}
 	rep := doc.Data
+	if rep.Repo != "o/r" {
+		t.Fatalf("repo %q", rep.Repo)
+	}
 	if !doc.OK || rep.From != "v0.8.2" || rep.To != upNew || rep.Installed || rep.PlanFailed || rep.UpToDate {
 		t.Fatalf("report: %+v", doc)
 	}
@@ -318,6 +321,42 @@ func TestUpgradeCheckJSONInstallsNothing(t *testing.T) {
 		if _, err := f.fs.Stat(p); err == nil {
 			t.Fatalf("%s left behind", p)
 		}
+	}
+}
+
+func TestUpgradeRepoPrecedence(t *testing.T) {
+	cases := []struct {
+		name, env, hostEnv, want string
+		wantErr                  bool
+	}{
+		{name: "default without config", want: defaultUpgradeRepo},
+		{name: "host config", hostEnv: "CVCTL_UPGRADE_REPO=fork/cvctl\n", want: "fork/cvctl"},
+		{name: "environment wins", env: "env/cvctl", hostEnv: "CVCTL_UPGRADE_REPO=fork/cvctl\n", want: "env/cvctl"},
+		{name: "config without the key", hostEnv: "CVCTL_HOST_NAME=box\n", want: defaultUpgradeRepo},
+		{name: "invalid config", hostEnv: "CVCTL_UPGRADE_REPO=nope\n", wantErr: true},
+		{name: "environment skips invalid config", env: "env/cvctl", hostEnv: "CVCTL_UPGRADE_REPO=nope\n", want: "env/cvctl"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fsys := systest.NewFS()
+			if c.hostEnv != "" {
+				if err := fsys.WriteFile(hostCfgDir+"/host.env", []byte(c.hostEnv), 0o640, sys.Owner{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := upgradeRepo(func(string) string { return c.env }, fsys)
+			if (err != nil) != c.wantErr || got != c.want {
+				t.Fatalf("got %q, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestUpgradeReviewShowsRepo(t *testing.T) {
+	newUpFixture(t, upPlanB)
+	code, out, errb := runUpgrade(t, "", "--check")
+	if code != 0 || !strings.Contains(out, "Repo de releases: o/r\n") {
+		t.Fatalf("code %d out %q err %q", code, out, errb)
 	}
 }
 

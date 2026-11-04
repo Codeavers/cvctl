@@ -463,3 +463,22 @@ func TestTelegramIDValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestUpgradeRepoValidation(t *testing.T) {
+	for v, ok := range map[string]bool{
+		"owner/repo": true, "My-Org/cv_ctl.fork": true,
+		"": false, "owner": false, "a/b/c": false, "/repo": false, "owner/": false, "o w/r": false, "o/r;x": false,
+	} {
+		fs := systest.NewFS()
+		if err := fs.WriteFile("/etc/cvctl/host.env", []byte("CVCTL_UPGRADE_REPO="+v+"\n"), 0o640, sys.Owner{}); err != nil {
+			t.Fatal(err)
+		}
+		cfg, _, err := hostcfg.Load(fs, "/etc/cvctl")
+		if ok && (err != nil || cfg.Get("UPGRADE_REPO") != v) {
+			t.Fatalf("%q: cfg %v err %v", v, cfg, err)
+		}
+		if !ok && v != "" && (err == nil || code(t, err) != "E_HOSTCFG_INVALID") {
+			t.Fatalf("%q accepted: %v", v, err)
+		}
+	}
+}
