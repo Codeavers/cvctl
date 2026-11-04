@@ -37,7 +37,7 @@ User=deployer
 Group=deploy
 ExecStart=%s %s
 TimeoutStartSec=%s
-%s`, u.desc, agentBinaryPath, u.command, u.timeout, agentSandboxDirectives)
+%s`, u.desc, AgentBinaryPath, u.command, u.timeout, agentSandboxDirectives)
 }
 
 func (u timerUnit) timerContent() string {

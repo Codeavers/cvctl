@@ -25,7 +25,7 @@ Environment=DOCKER_CONFIG=/var/lib/cvctl/docker
 `
 
 const (
-	agentBinaryPath  = "/usr/local/bin/cvctl"
+	AgentBinaryPath  = "/usr/local/bin/cvctl"
 	agentServicePath = "/etc/systemd/system/cvctl-agent.service"
 	agentUnitContent = `[Unit]
 Description=cvctl deploy agent
@@ -57,7 +57,7 @@ func (AgentStep) Check(ctx context.Context, e *Env) (Plan, error) {
 
 	exePath, err := os.Executable()
 	if err != nil {
-		return Plan{}, agentFSErr(agentBinaryPath, err)
+		return Plan{}, agentFSErr(AgentBinaryPath, err)
 	}
 
 	exeBytes, err := e.FS.ReadFile(exePath)
@@ -68,7 +68,7 @@ func (AgentStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		}
 	}
 
-	dstBytes, dstErr := e.FS.ReadFile(agentBinaryPath)
+	dstBytes, dstErr := e.FS.ReadFile(AgentBinaryPath)
 	binaryChanged := false
 	if dstErr != nil {
 		binaryChanged = true
@@ -78,7 +78,7 @@ func (AgentStep) Check(ctx context.Context, e *Env) (Plan, error) {
 		if hExe != hDst {
 			binaryChanged = true
 		} else {
-			fi, sErr := e.FS.Stat(agentBinaryPath)
+			fi, sErr := e.FS.Stat(AgentBinaryPath)
 			if sErr != nil || fi.Mode != 0o755 || fi.User != "root" || fi.Group != "root" {
 				binaryChanged = true
 			}
@@ -86,8 +86,8 @@ func (AgentStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	}
 
 	if binaryChanged {
-		changes = append(changes, fmt.Sprintf("install cvctl binary to %s", agentBinaryPath))
-		actions = append(actions, Action{Kind: "install_binary", Target: agentBinaryPath})
+		changes = append(changes, fmt.Sprintf("install cvctl binary to %s", AgentBinaryPath))
+		actions = append(actions, Action{Kind: "install_binary", Target: AgentBinaryPath})
 	}
 
 	unitChanged, err := fileNeedsWrite(e.FS, agentServicePath, []byte(agentUnitContent), 0o644, rootOwner)
@@ -148,7 +148,7 @@ func (AgentStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 		case a.Kind == "install_binary":
 			exePath, err := os.Executable()
 			if err != nil {
-				return "", agentFSErr(agentBinaryPath, err)
+				return "", agentFSErr(AgentBinaryPath, err)
 			}
 			exeBytes, err := e.FS.ReadFile(exePath)
 			if err != nil {
@@ -157,11 +157,11 @@ func (AgentStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 					return "", agentFSErr(exePath, err)
 				}
 			}
-			if err := e.FS.MkdirAll(path.Dir(agentBinaryPath), 0o755, rootOwner); err != nil {
-				return "", agentFSErr(agentBinaryPath, err)
+			if err := e.FS.MkdirAll(path.Dir(AgentBinaryPath), 0o755, rootOwner); err != nil {
+				return "", agentFSErr(AgentBinaryPath, err)
 			}
-			if err := e.FS.WriteFile(agentBinaryPath, exeBytes, 0o755, rootOwner); err != nil {
-				return "", agentFSErr(agentBinaryPath, err)
+			if err := e.FS.WriteFile(AgentBinaryPath, exeBytes, 0o755, rootOwner); err != nil {
+				return "", agentFSErr(AgentBinaryPath, err)
 			}
 		case a.Kind == "configure":
 			if err := e.FS.MkdirAll(path.Dir(agentServicePath), 0o755, rootOwner); err != nil {
