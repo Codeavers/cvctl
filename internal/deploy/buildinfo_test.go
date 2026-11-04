@@ -265,7 +265,7 @@ func TestDeployInfoLinksEveryAppWithADomain(t *testing.T) {
 
 func TestDeployInfoLinksSkipAppsWithoutExpose(t *testing.T) {
 	rig, _ := twoAppsRig(t)
-	compose := strings.Replace(compose, `, cvctl.expose: "3001"`, "", 1)
+	compose := strings.Replace(, `, cvctl.expose: "3001"`, "", 1)
 	if err := os.WriteFile(filepath.Join(rig.infraDir, "compose.yml"), []byte(compose), 0o644); err != nil {
 		t.Fatal(err)
 	}
