@@ -196,12 +196,12 @@ func writeUpgradeReview(w io.Writer, p *upgrade.Prepared) {
 	if strings.TrimSpace(p.Notes) != "" {
 		fmt.Fprintf(w, "\nNotas de la release:\n%s\n", strings.TrimSpace(p.Notes))
 	}
-	switch {
-	case p.PlanFailed:
+	if p.PlanFailed {
 		fmt.Fprintln(w, "\nNo se han podido comparar los planes de ambas versiones (cvctl plan falló o una instancia no se pudo leer): no se puede descartar un cambio de comportamiento.")
-	case len(p.Changes) == 0:
+	} else if len(p.Changes) == 0 {
 		fmt.Fprintln(w, "\nSin diferencias de comportamiento por instancia.")
-	default:
+	}
+	if len(p.Changes) > 0 {
 		fmt.Fprintln(w, "\nDiferencias de comportamiento:")
 		for _, c := range p.Changes {
 			fmt.Fprintf(w, "  %s: %s -> %s\n", c.Path, c.From, c.To)

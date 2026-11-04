@@ -156,6 +156,26 @@ func TestUpgradeCheckInstallsNothing(t *testing.T) {
 	}
 }
 
+func TestUpgradePlanFailedStillShowsChanges(t *testing.T) {
+	f := newUpFixture(t, upPlanA)
+	from := `{"ok":true,"data":{"schema":1,"instances":{"broken-dev":{"error":"E_X: unreadable"},"cute-prod":{"data":{"media":{"backup":"volume"}}}}}}`
+	to := `{"ok":true,"data":{"schema":1,"instances":{"broken-dev":{"error":"E_X: unreadable"},"cute-prod":{"data":{"media":{"backup":"none"}}}}}}`
+	f.run.On(host.AgentBinaryPath+" plan --json", sys.Result{Stdout: []byte(from)})
+	f.run.On(upTmp+" plan --json", sys.Result{Stdout: []byte(to)})
+	code, out, errb := runUpgrade(t, "", "--check")
+	if code != 0 {
+		t.Fatalf("code %d: %s", code, errb)
+	}
+	for _, want := range []string{"No se han podido comparar", "instances.cute-prod.data.media.backup: volume -> none"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Sin diferencias") {
+		t.Fatalf("a failed comparison must not claim there are no differences:\n%s", out)
+	}
+}
+
 func TestUpgradeYesWithoutChanges(t *testing.T) {
 	f := newUpFixture(t, upPlanA)
 	code, _, errb := runUpgrade(t, "", "--yes")
