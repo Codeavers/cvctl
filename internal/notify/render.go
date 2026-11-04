@@ -28,9 +28,9 @@ const retrySuffix = ": will retry next cycle"
 // Summary reduces an error detail to one line: its E_* code, if any, and the
 // last non-empty line, so a compose pull log does not reach the chat.
 func Summary(text string) string {
-	lines := strings.Split(text, "\n")
+	text = strings.TrimSuffix(strings.TrimSpace(text), retrySuffix)
 	last, code := "", ""
-	for _, l := range lines {
+	for _, l := range strings.Split(text, "\n") {
 		if l = strings.TrimSpace(l); l != "" {
 			if code == "" {
 				code = codeRe.FindString(l)
@@ -41,7 +41,6 @@ func Summary(text string) string {
 	if last == "" {
 		return ""
 	}
-	last = strings.TrimSuffix(last, retrySuffix)
 	if code != "" && !strings.HasPrefix(last, code) {
 		last = code + ": " + last
 	}

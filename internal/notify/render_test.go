@@ -258,6 +258,9 @@ func TestSummary(t *testing.T) {
 		{"trailing blanks", "E_X: a\nb\n\n  \n", "E_X: b"},
 		{"empty", "", ""},
 		{"blank", " \n\n", ""},
+		{"bare retry line", "E_X: boom\n: will retry next cycle", "E_X: boom"},
+		{"bare retry line after a blank", "real cause\n\n: will retry next cycle\n", "real cause"},
+		{"only the retry suffix", ": will retry next cycle", ""},
 		{"limit", "E_X: a\n" + strings.Repeat("é", 500), ""},
 	}
 	for _, tc := range tests {
