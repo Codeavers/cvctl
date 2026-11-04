@@ -70,6 +70,15 @@ no docker) and prints its env, strategy, contract source, tracked tag, domains, 
 whether it is paused. An instance whose contract cannot be read is listed with the error.
 `cvctl status` shows the strategy too.
 
+## plan
+
+`cvctl plan [--json]` describes what this binary would do for each instance, from its `cvctl.env`,
+installed contract and embedded `kinds` catalog (read-only, no network, no docker). Per instance:
+`env`, `strategy`, `apps` (image without digest, exposed port, domain), `data` (`kind`, `version`,
+`mode`, `backup`, buckets), `health` and hook counts. The document has a `schema` number, sorted
+keys and no secrets (no `app.env` values or `cvctl.env` credentials), so two runs of the same
+binary are byte-equal and two versions can be diffed. An unreadable instance appears with `error`.
+
 ## Deploy strategy
 
 `recreate` (default for dev) replaces containers in place: a few seconds of downtime per deploy.
