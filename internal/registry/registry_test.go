@@ -7,8 +7,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/google/go-containerregistry/pkg/name"
+	ggcrregistry "github.com/google/go-containerregistry/pkg/registry"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/registry"
@@ -412,5 +420,136 @@ func TestPruneAuthsKeepsOnlyTokenHost(t *testing.T) {
 	}
 	if err := registry.PruneAuths(systest.NewFS(), "ghcr.io"); err != nil {
 		t.Fatalf("missing config: %v", err)
+	}
+}
+
+func labeledImage(t *testing.T, arch string, labels map[string]string) v1.Image {
+	t.Helper()
+	img, err := mutate.ConfigFile(empty.Image, &v1.ConfigFile{
+		OS:           "linux",
+		Architecture: arch,
+		Config:       v1.Config{Labels: labels},
+	})
+	if err != nil {
+		t.Fatalf("build image: %v", err)
+	}
+	return img
+}
+
+func newLabelRegistry(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(ggcrregistry.New())
+	t.Cleanup(srv.Close)
+	return srv.Listener.Addr().String()
+}
+
+func TestLabelsSingleImage(t *testing.T) {
+	host := newLabelRegistry(t)
+	want := map[string]string{"cvctl.pr": "42", "cvctl.commit": "abc123"}
+	img := labeledImage(t, runtime.GOARCH, want)
+	ref, err := name.ParseReference(host+"/myrepo/app:v1", name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Write(ref, img); err != nil {
+		t.Fatal(err)
+	}
+	d, err := img.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := registry.NewLabels("cvctl", "tok", host, []string{host}).Labels(context.Background(), host+"/myrepo/app:v1", d.String())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("labels = %v, want %v", got, want)
+	}
+}
+
+func TestLabelsIndexUsesHostPlatform(t *testing.T) {
+	host := newLabelRegistry(t)
+	amd := labeledImage(t, "amd64", map[string]string{"cvctl.commit": "amd"})
+	arm := labeledImage(t, "arm64", map[string]string{"cvctl.commit": "arm"})
+	idx := mutate.AppendManifests(empty.Index,
+		mutate.IndexAddendum{Add: amd, Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "linux", Architecture: "amd64"}}},
+		mutate.IndexAddendum{Add: arm, Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "linux", Architecture: "arm64"}}},
+	)
+	ref, err := name.ParseReference(host+"/myrepo/app:v1", name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.WriteIndex(ref, idx); err != nil {
+		t.Fatal(err)
+	}
+	d, err := idx.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := "amd"
+	if runtime.GOARCH == "arm64" {
+		want = "arm"
+	} else if runtime.GOARCH != "amd64" {
+		t.Skipf("index has no %s manifest", runtime.GOARCH)
+	}
+	got, err := registry.NewLabels("cvctl", "tok", host, []string{host}).Labels(context.Background(), host+"/myrepo/app:v1", d.String())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got["cvctl.commit"] != want {
+		t.Fatalf("cvctl.commit = %q, want %q", got["cvctl.commit"], want)
+	}
+}
+
+func TestLabelsInheritedOCIOnlyReturnedUnchanged(t *testing.T) {
+	host := newLabelRegistry(t)
+	want := map[string]string{
+		"org.opencontainers.image.source":   "https://example.com/org/repo",
+		"org.opencontainers.image.revision": "deadbeef",
+	}
+	img := labeledImage(t, runtime.GOARCH, want)
+	ref, err := name.ParseReference(host+"/myrepo/app:v1", name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Write(ref, img); err != nil {
+		t.Fatal(err)
+	}
+	d, err := img.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := registry.NewLabels("cvctl", "tok", host, []string{host}).Labels(context.Background(), host+"/myrepo/app:v1", d.String())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("labels = %v, want %v", got, want)
+	}
+	for k := range got {
+		if strings.HasPrefix(k, "cvctl.") {
+			t.Errorf("unexpected cvctl key %q", k)
+		}
+	}
+}
+
+func TestLabelsMissingDigest(t *testing.T) {
+	host := newLabelRegistry(t)
+	secret := "secret-super-token-12345"
+	missing := "sha256:" + strings.Repeat("0", 64)
+
+	_, err := registry.NewLabels("cvctl", secret, host, []string{host}).Labels(context.Background(), host+"/myrepo/app", missing)
+	if err == nil {
+		t.Fatal("expected error for missing digest")
+	}
+	var oe *output.Error
+	if !errors.As(err, &oe) {
+		t.Fatalf("expected *output.Error, got %T: %v", err, err)
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(oe.Hint, secret) {
+		t.Fatalf("token leaked in error: %v / %s", err, oe.Hint)
 	}
 }
