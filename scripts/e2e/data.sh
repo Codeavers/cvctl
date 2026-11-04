@@ -13,6 +13,7 @@ HOST_NAME=e2e
 on_fail() {
   echo "::group::failure diagnostics"
   echo "last res: ${res:-}"
+  echo "last add: ${add_res:-}"
   docker ps -a --format '{{.Names}} {{.Status}}' || true
   for c in $(docker ps -a --filter "label=com.docker.compose.project=${INST}" --format '{{.Names}}'); do
     echo "--- logs $c"; docker logs --tail 60 "$c" 2>&1 || true
