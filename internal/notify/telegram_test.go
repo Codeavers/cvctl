@@ -272,7 +272,7 @@ func deployMsg() notify.Message {
 		Deploy: &notify.Deploy{
 			Changed: []string{"web"},
 			Builds:  []notify.Build{{Service: "web", Repo: "https://github.com/o/r", Commit: "abcdef1234", PR: "7", Title: "Fix"}},
-			AppURL:  "https://app.example.com",
+			Links:   []notify.Link{{Service: "api", URL: "https://api.example.com"}, {Service: "web", URL: "https://app.example.com"}},
 		},
 	}
 }
@@ -292,7 +292,7 @@ func TestSendHTML(t *testing.T) {
 	}
 	rm, _ := b["reply_markup"].(map[string]any)
 	rows, _ := rm["inline_keyboard"].([]any)
-	if len(rows) != 3 {
+	if len(rows) != 4 {
 		t.Fatalf("inline_keyboard = %v", rm)
 	}
 	var urls []string
@@ -303,7 +303,7 @@ func TestSendHTML(t *testing.T) {
 		}
 		urls = append(urls, row[0].(map[string]any)["url"].(string))
 	}
-	want := []string{"https://github.com/o/r/pull/7", "https://github.com/o/r/commit/abcdef1234", "https://app.example.com"}
+	want := []string{"https://github.com/o/r/pull/7", "https://github.com/o/r/commit/abcdef1234", "https://api.example.com", "https://app.example.com"}
 	if strings.Join(urls, " ") != strings.Join(want, " ") {
 		t.Fatalf("urls = %v, want %v", urls, want)
 	}

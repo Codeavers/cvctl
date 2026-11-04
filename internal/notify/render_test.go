@@ -78,10 +78,11 @@ func TestRenderHTML(t *testing.T) {
 				"<b>PR:</b> #7 T\n<b>Commit:</b> a1b2c3d by ana\n<b>Images:</b> api",
 		},
 		{
-			name:    "unchanged and app button",
-			m:       okMsg(&Deploy{AppURL: "https://app.example.com"}),
+			name: "unchanged and one button per app",
+			m: okMsg(&Deploy{Links: []Link{
+				{"api", "https://api.example.com"}, {"bad", "http://bad.example.com"}, {"web", "https://web.example.com"}}}),
 			want:    "<b>Server:</b> demo-server\n<b>Project:</b> demo-dev\n<b>Status:</b> OK, deployed in 42s\n<b>Images:</b> unchanged",
-			buttons: []Button{{"Open app", "https://app.example.com"}},
+			buttons: []Button{{"Open api", "https://api.example.com"}, {"Open web", "https://web.example.com"}},
 		},
 		{
 			name: "failure",
@@ -193,7 +194,7 @@ func TestRenderPlain(t *testing.T) {
 	}{
 		{
 			name: "one image",
-			m:    okMsg(&Deploy{Changed: []string{"api"}, Builds: []Build{b("api", "123")}, AppURL: "https://app.example.com"}),
+			m:    okMsg(&Deploy{Changed: []string{"api"}, Builds: []Build{b("api", "123")}, Links: []Link{{"api", "https://app.example.com"}}}),
 			want: "Server: demo-server\nProject: demo-dev\nStatus: OK, deployed in 42s\n" +
 				"PR: #123 Fix login redirect\nCommit: a1b2c3d by ana\nImages: api",
 		},

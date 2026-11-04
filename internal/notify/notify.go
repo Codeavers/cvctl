@@ -34,11 +34,14 @@ type Message struct {
 // Build is the provenance of one image, read from its cvctl.* labels.
 type Build struct{ Service, Repo, Commit, PR, Title, Author string }
 
+// Link is the public URL of an app service.
+type Link struct{ Service, URL string }
+
 // Deploy carries what a deploy notice adds to the common fields.
 type Deploy struct {
 	Changed []string // services whose image changed; empty means unchanged
 	Builds  []Build  // only images that carry labels
-	AppURL  string
+	Links   []Link   // one button each, in this order
 	Logs    string
 	Next    string // command to run next, shown at any level
 }
