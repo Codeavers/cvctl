@@ -32,11 +32,11 @@ jobs:
         # script only through env, never through ${{ }} inside run.
         env:
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
-          AUTHOR: ${{ github.actor }}
+          AUTHOR: ${{ github.event.head_commit.author.name }}
         run: |
           pr=''
           title=''
-          # workflow_dispatch has no head_commit: PR and title stay empty.
+          # workflow_dispatch has no head_commit: PR, title and author stay empty.
           if [ -n "$COMMIT_MESSAGE" ]; then
             first=$(printf '%s\n' "$COMMIT_MESSAGE" | sed -n '1p')
             if [[ "$first" =~ ^Merge\ pull\ request\ \#([0-9]+) ]]; then
@@ -46,7 +46,8 @@ jobs:
             elif [[ "$first" =~ \(\#([0-9]+)\)[[:space:]]*$ ]]; then
               # Squash merge: "title (#N)".
               pr=${BASH_REMATCH[1]}
-              title=${first% \(#*}
+              first=${first%"${first##*[![:space:]]}"}
+              title=${first% "(#$pr)"}
             fi
           fi
           # One line per output value.
@@ -63,7 +64,7 @@ jobs:
           push: true
           tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
           labels: |
-            cvctl.repo=${{ github.repository }}
+            cvctl.repo=${{ github.server_url }}/${{ github.repository }}
             cvctl.commit=${{ github.sha }}
             cvctl.pr=${{ steps.info.outputs.pr }}
             cvctl.title=${{ steps.info.outputs.title }}

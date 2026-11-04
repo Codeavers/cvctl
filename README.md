@@ -161,7 +161,9 @@ errors (bad configuration, failed sends) to the journal.
 Telegram deploy notices show the PR, commit, title and author of what was deployed. cvctl reads
 them from the labels of the changed images, so the build must set `cvctl.repo`, `cvctl.commit`,
 `cvctl.pr`, `cvctl.title` and `cvctl.author` (`cvctl.pr`, `cvctl.title` and `cvctl.author` may be
-empty). [examples/ci/image-labels.yml](examples/ci/image-labels.yml) sets them with
+empty). `cvctl.repo` is the repository URL (`https://github.com/org/app`); the notice links the
+PR and commit from it, and a value that is not an https URL drops the links. `cvctl.author` is the
+commit author name. [examples/ci/image-labels.yml](examples/ci/image-labels.yml) sets them with
 `docker/build-push-action`, taking the PR number and title from the merge or squash commit.
 
 Without labels the notice still goes out with the result only. Labels are read with a 5 second
