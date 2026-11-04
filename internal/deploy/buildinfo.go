@@ -44,7 +44,7 @@ func (d *Deployer) deployInfo(ctx context.Context, inst string, st *state.State,
 		return info
 	}
 	for _, a := range p.Apps {
-		if dom := dec.Domains[a.Name]; dom != "" {
+		if dom := dec.Domains[a.Name]; dom != "" && a.ExposePort > 0 {
 			info.Links = append(info.Links, notify.Link{Service: a.Name, URL: "https://" + dom})
 		}
 	}

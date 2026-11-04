@@ -263,6 +263,20 @@ func TestDeployInfoLinksEveryAppWithADomain(t *testing.T) {
 	}
 }
 
+func TestDeployInfoLinksSkipAppsWithoutExpose(t *testing.T) {
+	rig, _ := twoAppsRig(t)
+	compose := strings.Replace(compose, `, cvctl.expose: "3001"`, "", 1)
+	if err := os.WriteFile(filepath.Join(rig.infraDir, "compose.yml"), []byte(compose), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	same := desiredOf("sha256:a1", "sha256:b1")
+	info := rig.deployer.deployInfo(context.Background(), "demo-dev", &state.State{Current: &same}, same, "info")
+	want := []notify.Link{{Service: "api", URL: "https://api.example.com"}}
+	if !reflect.DeepEqual(info.Links, want) {
+		t.Fatalf("Links = %+v", info.Links)
+	}
+}
+
 func TestDeployInfoUnreadableContractKeepsChanged(t *testing.T) {
 	rig, fl := twoAppsRig(t)
 	if err := os.WriteFile(filepath.Join(rig.infraDir, "compose.yml"), []byte("services: [broken"), 0o644); err != nil {
