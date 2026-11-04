@@ -303,9 +303,11 @@ when the secrets bundle names an older one (it warns). Re-run `cvctl secrets exp
 
 ## images prune
 
-`sudo cvctl images prune [--dry-run] [--instance <inst>]` removes the images that deploys left behind. Per service it keeps the current digest, the previous one and the last two earlier versions that really ran, plus every digest of an instance that is deploying or has no state yet. After each successful deploy the same cleanup runs on its own, so the command is mostly for hosts that already hold many images.
+`sudo cvctl images prune [--dry-run] [--instance <inst>]` removes the images that deploys left behind. Per service it keeps the current version and the 2 previous ones that really ran, 3 in total, plus every digest of an instance that is deploying or has no state yet. After each successful deploy the same cleanup runs on its own, so the command is mostly for hosts that already hold many images.
 
-Only images whose digest cvctl recorded in an instance's history are touched; other images on the host are never listed or removed. Images in use by a container are skipped (Docker refuses them). `--instance` limits what is removed to that instance's images, but the keep list still covers every instance. If any instance's state cannot be read, nothing is removed.
+Only images whose digest cvctl recorded in an instance's history are touched; other digests on the host are never listed or removed. An image with a tag is never touched, in any repository: a tag on a digest protects that digest everywhere. An untagged image of another repository with the same digest can be removed, since it is the same content. Images in use by a container are skipped (Docker refuses them).
+
+A rollback to a version beyond those kept pulls the image again, so it needs the image to still be in the registry. If the pull fails, the rollback stops with an error that names the image, and nothing changes. `--instance` limits what is removed to that instance's images, but the keep list still covers every instance. If any instance's state cannot be read, nothing is removed.
 
 On a host with many images run `--dry-run` first: it lists each image with its size and the reason, plus the total, without removing anything.
 
