@@ -19,6 +19,7 @@ const (
 	previousPath = host.AgentBinaryPath + ".previous"
 	agentUnit    = "cvctl-agent"
 	fetchTimeout = 5 * time.Minute
+	execTimeout  = time.Minute
 	watchSteps   = 6
 	watchStep    = 5 * time.Second
 )
@@ -36,7 +37,6 @@ type Upgrader struct {
 	Exe       string
 	Deploying func() ([]string, error)
 	Sleep     func(time.Duration)
-	Now       func() time.Time
 }
 
 // Prepared is a downloaded and verified release, ready for Apply. Callers must
@@ -86,19 +86,26 @@ func (u *Upgrader) Prepare(ctx context.Context, target string) (*Prepared, error
 				Hint:    "para bajar de versión indícala con --version"}
 		}
 	}
-	busy, err := u.Deploying()
-	if err != nil {
+	if err := u.refuseBusy(); err != nil {
 		return nil, err
-	}
-	if len(busy) > 0 {
-		return nil, &output.Error{Code: "E_UPGRADE_BUSY",
-			Message: "hay despliegues en curso: " + strings.Join(busy, ", "),
-			Hint:    "reintenta cuando terminen"}
 	}
 	if err := u.stage(ctx, p, r); err != nil {
 		return nil, err
 	}
 	return p, nil
+}
+
+func (u *Upgrader) refuseBusy() error {
+	busy, err := u.Deploying()
+	if err != nil {
+		return err
+	}
+	if len(busy) > 0 {
+		return &output.Error{Code: "E_UPGRADE_BUSY",
+			Message: "hay despliegues en curso: " + strings.Join(busy, ", "),
+			Hint:    "reintenta cuando terminen"}
+	}
+	return nil
 }
 
 func (u *Upgrader) resolve(ctx context.Context, target string) (Release, error) {
@@ -150,6 +157,8 @@ func (u *Upgrader) stage(ctx context.Context, p *Prepared, r Release) (err error
 }
 
 func (u *Upgrader) checkVersion(ctx context.Context, bin, want string) error {
+	ctx, cancel := context.WithTimeout(ctx, execTimeout)
+	defer cancel()
 	c := sys.Cmd{Name: bin, Args: []string{"version", "--json"}}
 	res, err := u.Run.Run(ctx, c)
 	if err != nil || res.ExitCode != 0 {
@@ -183,10 +192,29 @@ func (u *Upgrader) comparePlans(ctx context.Context, newBin string) ([]Change, b
 	if err != nil {
 		return nil, true
 	}
-	return changes, false
+	return changes, hasInstanceError(from) || hasInstanceError(to)
+}
+
+// hasInstanceError is the only field read from a plan: an instance that could
+// not be described was not compared, so an empty diff says nothing about it.
+func hasInstanceError(plan []byte) bool {
+	var doc struct {
+		Instances map[string]map[string]json.RawMessage `json:"instances"`
+	}
+	if err := json.Unmarshal(plan, &doc); err != nil {
+		return true
+	}
+	for _, inst := range doc.Instances {
+		if _, ok := inst["error"]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (u *Upgrader) plan(ctx context.Context, bin string) ([]byte, bool) {
+	ctx, cancel := context.WithTimeout(ctx, execTimeout)
+	defer cancel()
 	res, err := u.Run.Run(ctx, sys.Cmd{Name: bin, Args: []string{"plan", "--json"}})
 	if err != nil || res.ExitCode != 0 {
 		return nil, false
@@ -225,6 +253,10 @@ func (u *Upgrader) Apply(ctx context.Context, p *Prepared) error {
 // swap returns NRestarts as read before touching anything: an agent whose
 // counter cannot be read could not be watched, so it must not be replaced.
 func (u *Upgrader) swap(ctx context.Context, p *Prepared) (int, error) {
+	// A deploy may have started while a person read the confirmation prompt.
+	if err := u.refuseBusy(); err != nil {
+		return 0, err
+	}
 	before, err := u.nRestarts(ctx)
 	if err != nil {
 		return 0, installErr("no se pudo leer NRestarts", err)
@@ -278,14 +310,17 @@ func (u *Upgrader) rollback(ctx context.Context, p *Prepared, cause error) error
 			Hint: fmt.Sprintf("el agente sigue con el binario nuevo; ejecuta mv %s %s y systemctl restart %s",
 				previousPath, host.AgentBinaryPath, agentUnit)}
 	}
+	restored := "restaurado y agente reiniciado"
 	if _, err := u.systemctl(ctx, "restart", agentUnit); err != nil {
-		return &output.Error{Code: "E_UPGRADE_FAILED",
-			Message: fmt.Sprintf("%s falló (%v); %s restaurado, pero el agente no se pudo reiniciar: %v", p.To, cause, p.From, err),
-			Hint:    "revisa systemctl status " + agentUnit}
+		restored = fmt.Sprintf("restaurado, pero el agente no se pudo reiniciar: %v", err)
+	}
+	state := "el agente está activo"
+	if _, err := u.systemctl(ctx, "is-active", agentUnit); err != nil {
+		state = "el agente no está activo"
 	}
 	return &output.Error{Code: "E_UPGRADE_FAILED",
-		Message: fmt.Sprintf("%s falló (%v); %s restaurado y agente reiniciado", p.To, cause, p.From),
-		Hint:    "revisa journalctl -u " + agentUnit + " antes de reintentar"}
+		Message: fmt.Sprintf("%s falló (%v); %s %s; %s", p.To, cause, p.From, restored, state),
+		Hint:    "revisa systemctl status " + agentUnit + " y journalctl -u " + agentUnit + " antes de reintentar"}
 }
 
 func (u *Upgrader) nRestarts(ctx context.Context) (int, error) {

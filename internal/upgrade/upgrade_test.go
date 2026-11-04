@@ -425,6 +425,92 @@ func TestPreparePlanFailureCounts(t *testing.T) {
 	}
 }
 
+func TestPreparePlanInstanceErrorCounts(t *testing.T) {
+	broken := `{"ok":true,"data":{"schema":1,"instances":{"a":{"env":"prod"},"b":{"error":"contrato ilegible"}}}}`
+	good := `{"ok":true,"data":{"schema":1,"instances":{"a":{"env":"staging"},"b":{"env":"prod"}}}}`
+	for _, tt := range []struct{ name, from, to string }{
+		{"en el actual", broken, good},
+		{"en el nuevo", good, broken},
+		{"en los dos", broken, broken},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t, "v0.8.2")
+			f.run.On(host.AgentBinaryPath+" plan --json", sys.Result{Stdout: []byte(tt.from)})
+			f.run.On(latestTmp+" plan --json", sys.Result{Stdout: []byte(tt.to)})
+			p := f.prepare(t)
+			defer p.Cleanup()
+			if !p.PlanFailed {
+				t.Fatalf("%+v", p)
+			}
+		})
+	}
+}
+
+func TestPrepareKeepsChangesWhenAnInstanceFailed(t *testing.T) {
+	f := newFixture(t, "v0.8.2")
+	f.run.On(host.AgentBinaryPath+" plan --json",
+		sys.Result{Stdout: []byte(`{"ok":true,"data":{"instances":{"a":{"env":"x"},"b":{"error":"e"}}}}`)})
+	f.run.On(latestTmp+" plan --json",
+		sys.Result{Stdout: []byte(`{"ok":true,"data":{"instances":{"a":{"env":"y"},"b":{"error":"e"}}}}`)})
+	p := f.prepare(t)
+	defer p.Cleanup()
+	want := Change{Path: "instances.a.env", From: "x", To: "y"}
+	if !p.PlanFailed || len(p.Changes) != 1 || p.Changes[0] != want {
+		t.Fatalf("%+v", p)
+	}
+}
+
+func TestPreparePlanWithoutInstanceShapeCounts(t *testing.T) {
+	f := newFixture(t, "v0.8.2")
+	f.run.On(latestTmp+" plan --json", sys.Result{Stdout: []byte(`{"ok":true,"data":{"instances":{"a":"x"}}}`)})
+	p := f.prepare(t)
+	defer p.Cleanup()
+	if !p.PlanFailed {
+		t.Fatalf("%+v", p)
+	}
+}
+
+// Each run must get a fresh minute, so a slow plan cannot eat the next one's.
+func TestPrepareBoundsEachBinaryRun(t *testing.T) {
+	f := newFixture(t, "v0.8.2")
+	bounds := map[string]time.Duration{}
+	f.u.Run = runnerFunc(func(ctx context.Context, c sys.Cmd) (sys.Result, error) {
+		if d, ok := ctx.Deadline(); ok {
+			bounds[c.String()] = time.Until(d)
+		}
+		return f.run.Run(ctx, c)
+	})
+	f.prepare(t).Cleanup()
+	for _, cmd := range []string{latestTmp + " version --json", host.AgentBinaryPath + " plan --json", latestTmp + " plan --json"} {
+		if d := bounds[cmd]; d <= 50*time.Second || d > time.Minute {
+			t.Errorf("%s: plazo = %v", cmd, d)
+		}
+	}
+}
+
+func TestPrepareVersionTimeoutFails(t *testing.T) {
+	f := newFixture(t, "v0.8.2")
+	f.run.OnError(latestTmp+" version --json", context.DeadlineExceeded)
+	if _, err := f.u.Prepare(context.Background(), ""); code(err) != "E_UPGRADE_VERIFY" {
+		t.Fatalf("err = %v", err)
+	}
+	f.noTemp(t)
+}
+
+func TestPreparePlanTimeoutCounts(t *testing.T) {
+	for _, bin := range []string{host.AgentBinaryPath, latestTmp} {
+		t.Run(path.Base(bin), func(t *testing.T) {
+			f := newFixture(t, "v0.8.2")
+			f.run.OnError(bin+" plan --json", context.DeadlineExceeded)
+			p := f.prepare(t)
+			defer p.Cleanup()
+			if !p.PlanFailed {
+				t.Fatalf("%+v", p)
+			}
+		})
+	}
+}
+
 func TestPrepareRejectsMalformedLatestTag(t *testing.T) {
 	f := newFixture(t, "v0.8.2")
 	srv := newTagServer(t, "../../../etc/cron.d/x")
@@ -539,6 +625,40 @@ func TestApplyFailureBeforeSwapChangesNothing(t *testing.T) {
 	}
 }
 
+func TestApplyRefusesWhileDeploying(t *testing.T) {
+	f := newFixture(t, "v0.8.2")
+	p := f.prepare(t)
+	f.u.Deploying = func() ([]string, error) { return []string{"cute-prod"}, nil }
+	f.run.Calls = nil
+	err := f.u.Apply(context.Background(), p)
+	if code(err) != "E_UPGRADE_BUSY" || !strings.Contains(err.Error(), "cute-prod") {
+		t.Fatalf("err = %v", err)
+	}
+	if f.binary(t) != oldBinary {
+		t.Errorf("binario = %q", f.binary(t))
+	}
+	f.noTemp(t)
+	if _, ok := f.fs.Files()["/usr/local/bin/cvctl.previous"]; ok {
+		t.Error("no debe escribir cvctl.previous")
+	}
+	if len(f.run.Calls) != 0 {
+		t.Errorf("calls = %v", f.run.Calls)
+	}
+}
+
+func TestApplyStopsWhenDeployingFails(t *testing.T) {
+	f := newFixture(t, "v0.8.2")
+	p := f.prepare(t)
+	f.u.Deploying = func() ([]string, error) { return nil, errors.New("estado ilegible") }
+	if err := f.u.Apply(context.Background(), p); err == nil {
+		t.Fatal("se esperaba error")
+	}
+	if f.binary(t) != oldBinary {
+		t.Errorf("binario = %q", f.binary(t))
+	}
+	f.noTemp(t)
+}
+
 func TestApplyWithoutPreparedBinary(t *testing.T) {
 	f := newFixture(t, "v0.9.0")
 	err := f.u.Apply(context.Background(), f.prepare(t))
@@ -571,7 +691,34 @@ func TestApplyRestoresWhenAgentFails(t *testing.T) {
 	f := newFixture(t, "v0.8.2")
 	p := f.prepare(t)
 	f.run.On(isActiveCmd, sys.Result{ExitCode: 3, Stdout: []byte("failed\n")})
-	assertRestored(t, f, f.u.Apply(context.Background(), p))
+	err := f.u.Apply(context.Background(), p)
+	assertRestored(t, f, err)
+	if !strings.Contains(err.Error(), "el agente no está activo") {
+		t.Errorf("mensaje = %v", err)
+	}
+	if n := f.count(isActiveCmd); n != 2 {
+		t.Errorf("is-active = %d: una en la vigilancia y otra tras restaurar", n)
+	}
+}
+
+func TestApplyRollbackReportsActiveAgent(t *testing.T) {
+	f := newFixture(t, "v0.8.2")
+	p := f.prepare(t)
+	f.run.On(isActiveCmd, sys.Result{ExitCode: 3})
+	restarts := 0
+	f.u.Run = runnerFunc(func(ctx context.Context, c sys.Cmd) (sys.Result, error) {
+		if c.String() == restartCmd {
+			if restarts++; restarts == 2 {
+				f.run.On(isActiveCmd, sys.Result{Stdout: []byte("active\n")})
+			}
+		}
+		return f.run.Run(ctx, c)
+	})
+	err := f.u.Apply(context.Background(), p)
+	assertRestored(t, f, err)
+	if !strings.Contains(err.Error(), "el agente está activo") {
+		t.Errorf("mensaje = %v", err)
+	}
 }
 
 func TestApplyRestoresWhenAgentDiesLate(t *testing.T) {
@@ -659,7 +806,11 @@ func TestApplyRestoresEvenIfInterrupted(t *testing.T) {
 	defer cancel()
 	f.u.Run = ctxRunner{f.run}
 	f.onSleep = func(int) { cancel() }
-	assertRestored(t, f, f.u.Apply(ctx, p))
+	err := f.u.Apply(ctx, p)
+	assertRestored(t, f, err)
+	if !strings.Contains(err.Error(), "el agente está activo") {
+		t.Errorf("mensaje = %v", err)
+	}
 }
 
 func TestApplyReportsFailedRestoreOfBinary(t *testing.T) {
@@ -692,6 +843,9 @@ func TestApplyReportsFailedRestartAfterRestore(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "el agente no se pudo reiniciar") {
 		t.Errorf("mensaje = %v", err)
+	}
+	if n := f.count(isActiveCmd); n != 1 {
+		t.Errorf("is-active = %d: debe comprobarse aunque falle el reinicio", n)
 	}
 	if f.binary(t) != oldBinary {
 		t.Errorf("binario = %q", f.binary(t))
