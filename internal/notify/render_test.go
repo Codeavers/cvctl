@@ -1,8 +1,10 @@
 package notify
 
 import (
+	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 const repo = "https://github.com/acme/app"
@@ -278,5 +280,43 @@ func TestRenderHTMLEscapesServiceLabel(t *testing.T) {
 	got, _ := renderHTML(okMsg(&Deploy{Changed: []string{"<i>a", "b"}, Builds: []Build{b("<i>a", "1")}}), "h")
 	if strings.Contains(got, "<i>") {
 		t.Errorf("service name not escaped:\n%s", got)
+	}
+}
+
+func TestRenderHTMLLongTitleCutInRunes(t *testing.T) {
+	bd := b("api", "1")
+	bd.Title = strings.Repeat("ñ<&é世", 100)
+	got, _ := renderHTML(okMsg(&Deploy{Changed: []string{"api"}, Builds: []Build{bd}}), "h")
+	if !utf8.ValidString(got) {
+		t.Fatalf("invalid UTF-8: %q", got)
+	}
+	if strings.Contains(got, "<&") || strings.Contains(got, "ñ<") {
+		t.Errorf("unescaped markup:\n%s", got)
+	}
+	// every '&' must start a complete entity, every '<' a tag we wrote
+	for _, m := range regexp.MustCompile(`&[^;\s]*.?`).FindAllString(got, -1) {
+		if !regexp.MustCompile(`^&(lt|gt|amp|#34|#39);`).MatchString(m) {
+			t.Errorf("broken entity %q", m)
+		}
+	}
+	if !strings.Contains(got, "…") {
+		t.Errorf("title not cut:\n%s", got)
+	}
+	if strings.Count(got, "<a ") != strings.Count(got, "</a>") || strings.Count(got, "<b>") != strings.Count(got, "</b>") {
+		t.Errorf("unbalanced tags:\n%s", got)
+	}
+}
+
+func TestRenderHTMLJavascriptRepo(t *testing.T) {
+	bd := Build{Service: "api", Repo: "javascript:alert(1)", Commit: "a1b2c3d", PR: "5", Title: "t", Author: "ana"}
+	got, btns := renderHTML(okMsg(&Deploy{Changed: []string{"api"}, Builds: []Build{bd}}), "h")
+	if strings.Contains(got, "<a ") || strings.Contains(got, "javascript") {
+		t.Errorf("unsafe repo linked or shown:\n%s", got)
+	}
+	if !strings.Contains(got, "#5 t") || !strings.Contains(got, "a1b2c3d") {
+		t.Errorf("values missing:\n%s", got)
+	}
+	if len(btns) != 0 {
+		t.Errorf("buttons = %v, want none", btns)
 	}
 }
