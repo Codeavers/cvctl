@@ -36,11 +36,7 @@ func (d *Deployer) removeSurplusImages(ctx context.Context, inst string) error {
 	}
 	items, err := d.Images.Prune(ctx, plan, false)
 	d.logPruned(inst, items)
-	if err != nil {
-		return err
-	}
-	// Prune records a failed removal per image, which hides an expired context.
-	return ctx.Err()
+	return err
 }
 
 // ImagePlan applies the cleanup rules to every instance. Keep is host-wide;

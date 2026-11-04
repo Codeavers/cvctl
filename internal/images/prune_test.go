@@ -214,3 +214,55 @@ func TestPruneRemovesNothingWhenTheListingIsUnreadable(t *testing.T) {
 		})
 	}
 }
+
+// cancelOnRm cancels the context when the nth rm has run, as Ctrl-C would.
+type cancelOnRm struct {
+	*systest.Runner
+	cancel context.CancelFunc
+	nth    int
+}
+
+func (c *cancelOnRm) Run(ctx context.Context, cmd sys.Cmd) (sys.Result, error) {
+	res, err := c.Runner.Run(ctx, cmd)
+	if strings.HasPrefix(cmd.String(), "docker image rm") {
+		if c.nth--; c.nth == 0 {
+			c.cancel()
+		}
+	}
+	return res, err
+}
+
+func TestPruneStopsWhenCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := &systest.Runner{}
+	r.On(lsCmd, listing(row("r1", "<none>", dA, "1MB"), row("r2", "<none>", dA, "1MB"), row("r3", "<none>", dA, "1MB")))
+	r.OnPrefix("docker image rm", sys.Result{})
+
+	items, err := Pruner{Run: &cancelOnRm{Runner: r, cancel: cancel, nth: 1}}.Prune(ctx, plan(), false)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	if got := rmCalls(r); len(got) != 1 {
+		t.Fatalf("calls: %v", got)
+	}
+	if len(items) != 1 || !items[0].Removed {
+		t.Fatalf("items: %+v", items)
+	}
+}
+
+func TestPruneReportsCancelDuringTheLastRemoval(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := &systest.Runner{}
+	r.On(lsCmd, listing(row("r1", "<none>", dA, "1MB")))
+	r.OnError("docker image rm r1@"+dA, errors.New("signal: killed"))
+
+	items, err := Pruner{Run: &cancelOnRm{Runner: r, cancel: cancel, nth: 1}}.Prune(ctx, plan(), false)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(items) != 1 || items[0].Removed {
+		t.Fatalf("items: %+v", items)
+	}
+}

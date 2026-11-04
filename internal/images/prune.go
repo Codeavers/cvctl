@@ -37,7 +37,8 @@ type listed struct {
 // Prune removes only references whose digest is a candidate and not kept.
 // Images of other stacks are never named, so they never reach the output.
 // Removal is by repo@digest without --force: Docker refuses an image in use,
-// which is expected and recorded, not an error.
+// which is expected and recorded, not an error. A cancelled ctx stops the
+// removals and returns its error with the items so far.
 //
 // A digest with a real tag on any row is left out entirely: cvctl pulls by
 // digest, so a tag is somebody else's reference, and on the containerd store
@@ -77,6 +78,9 @@ func (p Pruner) Prune(ctx context.Context, plan Plan, dryRun bool) ([]Item, erro
 		seen[ref] = true
 		it := Item{Ref: ref, Size: parseSize(l.Size)}
 		if !dryRun {
+			if err := ctx.Err(); err != nil {
+				return items, err
+			}
 			r, err := p.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"image", "rm", ref}, Env: dockerEnv})
 			switch {
 			case err != nil:
@@ -90,7 +94,8 @@ func (p Pruner) Prune(ctx context.Context, plan Plan, dryRun bool) ([]Item, erro
 		}
 		items = append(items, it)
 	}
-	return items, nil
+	// A removal killed by the context is recorded as one failed image.
+	return items, ctx.Err()
 }
 
 // parseListing fails on any unreadable row instead of skipping it, because that
