@@ -10,7 +10,7 @@ import (
 const repo = "https://github.com/acme/app"
 
 func okMsg(d *Deploy) Message {
-	return Message{Host: "codeaver-dev", Project: "cute-dev", Level: "info", Status: "OK, deployed in 42s", Deploy: d}
+	return Message{Host: "demo-server", Project: "demo-dev", Level: "info", Status: "OK, deployed in 42s", Deploy: d}
 }
 
 func b(svc, pr string) Build {
@@ -27,7 +27,7 @@ func TestRenderHTML(t *testing.T) {
 		{
 			name: "one image with labels",
 			m:    okMsg(&Deploy{Changed: []string{"api"}, Builds: []Build{b("api", "123")}}),
-			want: "<b>Server:</b> codeaver-dev\n<b>Project:</b> cute-dev\n<b>Status:</b> OK, deployed in 42s\n" +
+			want: "<b>Server:</b> demo-server\n<b>Project:</b> demo-dev\n<b>Status:</b> OK, deployed in 42s\n" +
 				`<b>PR:</b> <a href="https://github.com/acme/app/pull/123">#123 Fix login redirect</a>` + "\n" +
 				`<b>Commit:</b> <a href="https://github.com/acme/app/commit/a1b2c3d4e5f6">a1b2c3d</a> by ana` + "\n" +
 				"<b>Images:</b> api",
@@ -39,7 +39,7 @@ func TestRenderHTML(t *testing.T) {
 		{
 			name: "two services same PR and commit",
 			m:    okMsg(&Deploy{Changed: []string{"api", "web"}, Builds: []Build{b("api", "123"), b("web", "123")}}),
-			want: "<b>Server:</b> codeaver-dev\n<b>Project:</b> cute-dev\n<b>Status:</b> OK, deployed in 42s\n" +
+			want: "<b>Server:</b> demo-server\n<b>Project:</b> demo-dev\n<b>Status:</b> OK, deployed in 42s\n" +
 				`<b>PR:</b> <a href="https://github.com/acme/app/pull/123">#123 Fix login redirect</a>` + "\n" +
 				`<b>Commit:</b> <a href="https://github.com/acme/app/commit/a1b2c3d4e5f6">a1b2c3d</a> by ana` + "\n" +
 				"<b>Images:</b> api, web",
@@ -51,7 +51,7 @@ func TestRenderHTML(t *testing.T) {
 		{
 			name: "different PRs",
 			m:    okMsg(&Deploy{Changed: []string{"api", "web"}, Builds: []Build{b("api", "1")}}),
-			want: "<b>Server:</b> codeaver-dev\n<b>Project:</b> cute-dev\n<b>Status:</b> OK, deployed in 42s\n" +
+			want: "<b>Server:</b> demo-server\n<b>Project:</b> demo-dev\n<b>Status:</b> OK, deployed in 42s\n" +
 				`<b>api:</b> <a href="https://github.com/acme/app/pull/1">#1 Fix login redirect</a> (<a href="https://github.com/acme/app/commit/a1b2c3d4e5f6">a1b2c3d</a>, ana)` + "\n" +
 				"<b>web:</b> no build info\n" +
 				"<b>Images:</b> api, web",
@@ -59,13 +59,13 @@ func TestRenderHTML(t *testing.T) {
 		{
 			name: "no labels",
 			m:    okMsg(&Deploy{Changed: []string{"api"}}),
-			want: "<b>Server:</b> codeaver-dev\n<b>Project:</b> cute-dev\n<b>Status:</b> OK, deployed in 42s\n<b>Images:</b> api",
+			want: "<b>Server:</b> demo-server\n<b>Project:</b> demo-dev\n<b>Status:</b> OK, deployed in 42s\n<b>Images:</b> api",
 		},
 		{
 			name: "no PR label",
 			m: okMsg(&Deploy{Changed: []string{"api"}, Builds: []Build{
 				{Service: "api", Repo: repo, Commit: "a1b2c3d4e5f6", Author: "ana"}}}),
-			want: "<b>Server:</b> codeaver-dev\n<b>Project:</b> cute-dev\n<b>Status:</b> OK, deployed in 42s\n" +
+			want: "<b>Server:</b> demo-server\n<b>Project:</b> demo-dev\n<b>Status:</b> OK, deployed in 42s\n" +
 				`<b>Commit:</b> <a href="https://github.com/acme/app/commit/a1b2c3d4e5f6">a1b2c3d</a> by ana` + "\n" +
 				"<b>Images:</b> api",
 			buttons: []Button{{"Commit", "https://github.com/acme/app/commit/a1b2c3d4e5f6"}},
@@ -74,26 +74,26 @@ func TestRenderHTML(t *testing.T) {
 			name: "no repo: values without link",
 			m: okMsg(&Deploy{Changed: []string{"api"}, Builds: []Build{
 				{Service: "api", Commit: "a1b2c3d4e5f6", PR: "7", Title: "T", Author: "ana"}}}),
-			want: "<b>Server:</b> codeaver-dev\n<b>Project:</b> cute-dev\n<b>Status:</b> OK, deployed in 42s\n" +
+			want: "<b>Server:</b> demo-server\n<b>Project:</b> demo-dev\n<b>Status:</b> OK, deployed in 42s\n" +
 				"<b>PR:</b> #7 T\n<b>Commit:</b> a1b2c3d by ana\n<b>Images:</b> api",
 		},
 		{
 			name:    "unchanged and app button",
 			m:       okMsg(&Deploy{AppURL: "https://app.example.com"}),
-			want:    "<b>Server:</b> codeaver-dev\n<b>Project:</b> cute-dev\n<b>Status:</b> OK, deployed in 42s\n<b>Images:</b> unchanged",
+			want:    "<b>Server:</b> demo-server\n<b>Project:</b> demo-dev\n<b>Status:</b> OK, deployed in 42s\n<b>Images:</b> unchanged",
 			buttons: []Button{{"Open app", "https://app.example.com"}},
 		},
 		{
 			name: "failure",
-			m: Message{Host: "codeaver-dev", Project: "cute-dev", Level: "error", Status: "FAILED, will retry",
+			m: Message{Host: "demo-server", Project: "demo-dev", Level: "error", Status: "FAILED, will retry",
 				Text:   "E_COMPOSE_FAILED: pull failed\nImage x Pulling\nnot found: will retry next cycle",
-				Deploy: &Deploy{Changed: []string{"api"}, Builds: []Build{b("api", "123")}, Logs: "sudo cvctl history cute-dev"}},
-			want: "<b>Server:</b> codeaver-dev\n<b>Project:</b> cute-dev\n<b>Status:</b> FAILED, will retry\n" +
+				Deploy: &Deploy{Changed: []string{"api"}, Builds: []Build{b("api", "123")}, Logs: "sudo cvctl history demo-dev"}},
+			want: "<b>Server:</b> demo-server\n<b>Project:</b> demo-dev\n<b>Status:</b> FAILED, will retry\n" +
 				`<b>PR:</b> <a href="https://github.com/acme/app/pull/123">#123 Fix login redirect</a>` + "\n" +
 				`<b>Commit:</b> <a href="https://github.com/acme/app/commit/a1b2c3d4e5f6">a1b2c3d</a> by ana` + "\n" +
 				"<b>Images:</b> api\n" +
 				"<b>Error:</b> <code>E_COMPOSE_FAILED: not found</code>\n" +
-				"<b>Logs:</b> sudo cvctl history cute-dev",
+				"<b>Logs:</b> sudo cvctl history demo-dev",
 			buttons: []Button{
 				{"PR", "https://github.com/acme/app/pull/123"},
 				{"Commit", "https://github.com/acme/app/commit/a1b2c3d4e5f6"},
@@ -194,22 +194,22 @@ func TestRenderPlain(t *testing.T) {
 		{
 			name: "one image",
 			m:    okMsg(&Deploy{Changed: []string{"api"}, Builds: []Build{b("api", "123")}, AppURL: "https://app.example.com"}),
-			want: "Server: codeaver-dev\nProject: cute-dev\nStatus: OK, deployed in 42s\n" +
+			want: "Server: demo-server\nProject: demo-dev\nStatus: OK, deployed in 42s\n" +
 				"PR: #123 Fix login redirect\nCommit: a1b2c3d by ana\nImages: api",
 		},
 		{
 			name: "different PRs",
 			m:    okMsg(&Deploy{Changed: []string{"api", "web"}, Builds: []Build{b("api", "1")}}),
-			want: "Server: codeaver-dev\nProject: cute-dev\nStatus: OK, deployed in 42s\n" +
+			want: "Server: demo-server\nProject: demo-dev\nStatus: OK, deployed in 42s\n" +
 				"api: #1 Fix login redirect (a1b2c3d, ana)\nweb: no build info\nImages: api, web",
 		},
 		{
 			name: "failure",
-			m: Message{Host: "codeaver-dev", Project: "cute-dev", Level: "error", Status: "FAILED",
+			m: Message{Host: "demo-server", Project: "demo-dev", Level: "error", Status: "FAILED",
 				Text:   "E_COMPOSE_FAILED: x\nnot found",
-				Deploy: &Deploy{Logs: "sudo cvctl history cute-dev"}},
-			want: "Server: codeaver-dev\nProject: cute-dev\nStatus: FAILED\nImages: unchanged\n" +
-				"Error: E_COMPOSE_FAILED: not found\nLogs: sudo cvctl history cute-dev",
+				Deploy: &Deploy{Logs: "sudo cvctl history demo-dev"}},
+			want: "Server: demo-server\nProject: demo-dev\nStatus: FAILED\nImages: unchanged\n" +
+				"Error: E_COMPOSE_FAILED: not found\nLogs: sudo cvctl history demo-dev",
 		},
 		{
 			name: "no deploy",
@@ -246,7 +246,7 @@ func TestRenderPlainTotalLimit(t *testing.T) {
 }
 
 func TestSummary(t *testing.T) {
-	failure := "E_COMPOSE_FAILED: docker compose -p cute-dev --env-file /x/.env pull api dashboard landing failed (exit 1): Image ghcr.io/x/api Pulling\n" +
+	failure := "E_COMPOSE_FAILED: docker compose -p demo-dev --env-file /x/.env pull api dashboard landing failed (exit 1): Image ghcr.io/x/api Pulling\n" +
 		" Image ghcr.io/x/landing Pulling\n\n" +
 		`Error response from daemon: failed to resolve reference "ghcr.io/x/landing@sha256:e754": ghcr.io/x/landing@sha256:e754: not found: will retry next cycle` + "\n"
 	tests := []struct{ name, in, want string }{
