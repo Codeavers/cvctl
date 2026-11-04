@@ -1,6 +1,6 @@
 # Copy to .github/workflows/ in a project, or copy the "Commit info" step and the
-# `labels:` block into the existing image build workflow. Adjust the branches and
-# the build context.
+# `labels:` block into the existing image build workflow. Adjust the branches, the
+# build context and the image name, which defaults to the repository name.
 #
 # cvctl reads these labels from the deployed image to fill the Telegram deploy
 # notice (PR link, commit, title, author). Without them the notice still goes
@@ -26,6 +26,12 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image name
+        id: image
+        # GHCR rejects uppercase names; the owner in github.repository may have it.
+        env:
+          REPO: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPO,,}" >> "$GITHUB_OUTPUT"
       - name: Commit info
         id: info
         # The commit message and author are attacker-influenced: they reach the
@@ -62,7 +68,7 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          tags: ${{ steps.image.outputs.name }}:${{ github.ref_name }}
           labels: |
             cvctl.repo=${{ github.server_url }}/${{ github.repository }}
             cvctl.commit=${{ github.sha }}
