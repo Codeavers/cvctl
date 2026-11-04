@@ -357,3 +357,31 @@ func TestRenderErrorField(t *testing.T) {
 		t.Errorf("Error limited to %d runes, want %d", n, maxSummary-1)
 	}
 }
+
+func TestRenderNext(t *testing.T) {
+	const cmd = "sudo cvctl resume demo-dev"
+	tests := []struct {
+		name, want string
+		m          Message
+	}{
+		{"after Logs", "<b>Logs:</b> sudo cvctl history demo-dev\n<b>Next:</b> <code>sudo cvctl resume demo-dev</code>",
+			Message{Level: "error", Deploy: &Deploy{Logs: "sudo cvctl history demo-dev", Next: cmd}}},
+		{"shown at info", "<b>Images:</b> unchanged\n<b>Next:</b> <code>sudo cvctl resume demo-dev</code>",
+			Message{Level: "info", Deploy: &Deploy{Next: cmd}}},
+		{"escaped", "<code>a &lt;b&gt;</code>",
+			Message{Level: "info", Deploy: &Deploy{Next: "a <b>"}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, _ := renderHTML(tc.m, "h"); !strings.HasSuffix(got, tc.want) {
+				t.Errorf("want suffix %q in:\n%s", tc.want, got)
+			}
+		})
+	}
+	if got := renderPlain(Message{Level: "info", Deploy: &Deploy{Next: cmd}}, "h"); !strings.HasSuffix(got, "\nNext: "+cmd) {
+		t.Errorf("plain:\n%s", got)
+	}
+	if got, _ := renderHTML(Message{Level: "info", Deploy: &Deploy{}}, "h"); strings.Contains(got, "Next") {
+		t.Errorf("unset Next rendered:\n%s", got)
+	}
+}

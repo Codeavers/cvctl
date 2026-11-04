@@ -1347,6 +1347,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	st.RollbackFailed = false
 
 	errText := redactedLogs
+	next := ""
 	if preHooksRan && dec.Env == "prod" {
 		dataSvc := ""
 		for _, ds := range p.Data {
@@ -1361,7 +1362,8 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		if dataSvc == "" && len(p.X.Hooks.PreDeploy) > 0 {
 			dataSvc = p.X.Hooks.PreDeploy[0].Service
 		}
-		errText += fmt.Sprintf("\nmigrations ran; restore point %s: cvctl db restore %s %s --to %s", deployID, inst, dataSvc, deployID)
+		next = fmt.Sprintf("cvctl db restore %s %s --to %s", inst, dataSvc, deployID)
+		errText += fmt.Sprintf("\nmigrations ran; restore point %s: %s", deployID, next)
 	}
 
 	res = Result{
@@ -1370,6 +1372,8 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		Detail: errText,
 	}
 
+	info := d.deployInfo(ctx, inst, st, want, "error")
+	info.Next = next
 	_ = d.notifier().Send(ctx, notify.Message{
 		Host:    d.hostName(),
 		Level:   "error",
@@ -1378,7 +1382,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		Error:   causeLine,
 		Project: inst,
 		Status:  "ROLLED BACK",
-		Deploy:  d.deployInfo(ctx, inst, st, want, "error"),
+		Deploy:  info,
 	})
 
 	var errs []error

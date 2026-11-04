@@ -280,6 +280,8 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 	}); err != nil {
 		return Result{}, err
 	}
+	info := d.deployInfo(ctx, inst, &state.State{Current: st.Previous}, *st.Current, "info")
+	info.Next = "sudo cvctl resume " + inst
 	_ = d.notifier().Send(ctx, notify.Message{
 		Host:    d.hostName(),
 		Level:   "info",
@@ -287,7 +289,7 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 		Text:    pausedReason,
 		Project: inst,
 		Status:  "PAUSED",
-		Deploy:  d.deployInfo(ctx, inst, &state.State{Current: st.Previous}, *st.Current, "info"),
+		Deploy:  info,
 	})
 
 	return Result{

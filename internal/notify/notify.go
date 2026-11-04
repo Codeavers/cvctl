@@ -40,6 +40,7 @@ type Deploy struct {
 	Builds  []Build  // only images that carry labels
 	AppURL  string
 	Logs    string
+	Next    string // command to run next, shown at any level
 }
 
 // Notifier sends formatted notifications to external endpoints.

@@ -3345,7 +3345,48 @@ func TestDeployNoticeStatus(t *testing.T) {
 		if !reflect.DeepEqual(m.Deploy.Changed, []string{"api"}) {
 			t.Fatalf("Changed = %v, want the service the rollback swapped", m.Deploy.Changed)
 		}
+		if m.Deploy.Next != "sudo cvctl resume demo-dev" {
+			t.Fatalf("Next = %q", m.Deploy.Next)
+		}
 	})
+}
+
+func TestDeployNoticeNextRestoreAfterMigrations(t *testing.T) {
+	rollBack := func(t *testing.T, env string) (notify.Message, string) {
+		t.Helper()
+		inst := "demo-" + env
+		rig := setupTestRig(t, env, inst)
+		cur := state.Desired{InfraCommit: strings.Repeat("0", 40), Digests: map[string]string{"api": "sha256:" + strings.Repeat("0", 64)}}
+		if err := rig.store.Save(&state.State{Instance: inst, Status: state.StatusOK, Current: &cur}); err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		rig.deployer.Health = func(context.Context, string, string) error {
+			n++
+			if n == 1 {
+				return errors.New("health timeout")
+			}
+			return nil
+		}
+		res, err := rig.deployer.Deploy(context.Background(), inst, defaultDesired(), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := lastMessage(t, rig.notifier)
+		if m.Status != "ROLLED BACK" {
+			t.Fatalf("Status = %q, Text = %q", m.Status, m.Text)
+		}
+		return m, res.ID
+	}
+
+	m, id := rollBack(t, "prod")
+	want := "cvctl db restore demo-prod main-db --to " + id
+	if m.Deploy.Next != want || !strings.Contains(m.Text, want) {
+		t.Fatalf("Next = %q, Text = %q, want %q in both", m.Deploy.Next, m.Text, want)
+	}
+	if m, _ := rollBack(t, "dev"); m.Deploy.Next != "" {
+		t.Fatalf("dev Next = %q", m.Deploy.Next)
+	}
 }
 
 func TestDeployNoticeError(t *testing.T) {
