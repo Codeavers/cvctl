@@ -151,7 +151,7 @@ sudo cvctl init --reconfigure notify
 timer: if the new session cannot be confirmed, the previous sshd config comes back on its own.
 
 init only asks for values `host.env` and `secrets/` lack. `--reconfigure notify` asks the
-notification questions again (current values as defaults; an empty token keeps the stored one).
+notification questions again (current values as defaults; an empty token keeps the stored one, an empty thread ID removes it).
 When the settings change, init sends a test message and restarts `cvctl-agent` so it uses them;
 disabling notifications only restarts the agent. The agent and the backup timers log notifier
 errors (bad configuration, failed sends) to the journal.
