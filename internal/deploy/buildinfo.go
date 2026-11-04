@@ -43,7 +43,11 @@ func (d *Deployer) deployInfo(ctx context.Context, inst string, st *state.State,
 	if p == nil || dec == nil {
 		return info
 	}
-	info.AppURL = appURL(dec.Domains, info.Changed)
+	domains := make(map[string]string, len(p.Apps))
+	for _, a := range p.Apps {
+		domains[a.Name] = dec.Domains[a.Name]
+	}
+	info.AppURL = appURL(domains, info.Changed)
 	if d.Labels == nil || len(info.Changed) == 0 {
 		return info
 	}

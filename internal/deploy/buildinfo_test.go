@@ -360,3 +360,46 @@ func TestPostDeployHookFailureReadsLabelsOnce(t *testing.T) {
 		t.Fatalf("Builds = %+v", ok.Deploy.Builds)
 	}
 }
+
+func TestDeployInfoAppURLIgnoresExposedDataServices(t *testing.T) {
+	const compose = `services:
+  api:
+    image: ghcr.io/org/project-api
+    labels: { cvctl.role: worker }
+  assets:
+    labels: { cvctl.kind: s3, cvctl.expose: "9000" }
+`
+	const env = `CVCTL_INSTANCE=demo-dev
+CVCTL_ENV=dev
+CVCTL_INFRA_PATH=.
+CVCTL_DOMAIN_ASSETS=assets.example.com
+`
+	rig, _ := twoAppsRig(t)
+	want := state.Desired{InfraCommit: "c1", Digests: map[string]string{"api": "sha256:a1"}}
+
+	write := func(compose, env string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(rig.infraDir, "compose.yml"), []byte(compose), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(rig.instDir, "cvctl.env"), []byte(env), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write(compose, env)
+	if p, dec := rig.deployer.loadForNotice("demo-dev"); p == nil || dec.Domains["assets"] == "" {
+		t.Fatalf("fixture must give the data service a domain: %+v", dec)
+	}
+	if info := rig.deployer.deployInfo(context.Background(), "demo-dev", nil, want, "info"); info.AppURL != "" {
+		t.Fatalf("only a data service has a domain: AppURL = %q", info.AppURL)
+	}
+
+	// The data service sorts first, so a list of all domains would pick it.
+	write(strings.Replace(compose, "cvctl.role: worker", `cvctl.role: app, cvctl.expose: "3000"`, 1),
+		env+"CVCTL_DOMAIN_API=zzz.example.com\n")
+	same := state.State{Current: &want}
+	if info := rig.deployer.deployInfo(context.Background(), "demo-dev", &same, want, "info"); info.AppURL != "https://zzz.example.com" {
+		t.Fatalf("AppURL = %q", info.AppURL)
+	}
+}
