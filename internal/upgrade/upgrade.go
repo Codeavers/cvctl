@@ -229,49 +229,86 @@ func (u *Upgrader) plan(ctx context.Context, bin string) ([]byte, bool) {
 	return doc.Data, true
 }
 
-// Apply swaps in the prepared binary and restarts the agent. If the agent does
-// not hold, it puts the previous binary back and returns E_UPGRADE_FAILED.
-func (u *Upgrader) Apply(ctx context.Context, p *Prepared) error {
-	if p.tmp == "" {
-		return installErr("no hay ningún binario preparado", nil)
-	}
-	before, err := u.swap(ctx, p)
-	if err != nil {
-		p.Cleanup()
-		return err
-	}
-	p.tmp = ""
-	if _, err := u.systemctl(ctx, "restart", agentUnit); err != nil {
-		return u.rollback(ctx, p, err)
-	}
-	if err := u.watch(ctx, before); err != nil {
-		return u.rollback(ctx, p, err)
-	}
-	return nil
+// Applied is what Apply did with the agent once the binary was in place.
+type Applied struct {
+	// AgentStopped means the agent was not active, so it was left that way:
+	// not started, and the new binary not watched.
+	AgentStopped bool
 }
 
-// swap returns NRestarts as read before touching anything: an agent whose
-// counter cannot be read could not be watched, so it must not be replaced.
-func (u *Upgrader) swap(ctx context.Context, p *Prepared) (int, error) {
+// Apply swaps in the prepared binary and restarts the agent, unless the agent
+// was not active. If it does not hold, Apply puts the previous binary back and
+// returns E_UPGRADE_FAILED.
+func (u *Upgrader) Apply(ctx context.Context, p *Prepared) (Applied, error) {
+	if p.tmp == "" {
+		return Applied{}, installErr("no hay ningún binario preparado", nil)
+	}
+	active, before, err := u.swap(ctx, p)
+	if err != nil {
+		p.Cleanup()
+		return Applied{}, err
+	}
+	p.tmp = ""
+	if !active {
+		return Applied{AgentStopped: true}, nil
+	}
+	if _, err := u.systemctl(ctx, "restart", agentUnit); err != nil {
+		return Applied{}, u.rollback(ctx, p, err)
+	}
+	if err := u.watch(ctx, before); err != nil {
+		return Applied{}, u.rollback(ctx, p, err)
+	}
+	return Applied{}, nil
+}
+
+// swap reports whether the agent was active and, if so, its NRestarts, both read
+// before touching anything: an agent that could not be watched must not be
+// replaced. A stopped one is not watched, so its counter does not matter.
+func (u *Upgrader) swap(ctx context.Context, p *Prepared) (active bool, before int, err error) {
 	// A deploy may have started while a person read the confirmation prompt.
 	if err := u.refuseBusy(); err != nil {
-		return 0, err
+		return false, 0, err
 	}
-	before, err := u.nRestarts(ctx)
+	active, err = u.agentActive(ctx)
 	if err != nil {
-		return 0, installErr("no se pudo leer NRestarts", err)
+		return false, 0, installErr("no se pudo saber si el agente está parado", err)
+	}
+	if active {
+		if before, err = u.nRestarts(ctx); err != nil {
+			return false, 0, installErr("no se pudo leer NRestarts", err)
+		}
 	}
 	current, err := u.FS.ReadFile(host.AgentBinaryPath)
 	if err != nil {
-		return 0, installErr("no se pudo leer el binario actual", err)
+		return false, 0, installErr("no se pudo leer el binario actual", err)
 	}
 	if err := u.FS.WriteFile(previousPath, current, 0o755, rootOwner); err != nil {
-		return 0, installErr("no se pudo guardar "+previousPath, err)
+		return false, 0, installErr("no se pudo guardar "+previousPath, err)
 	}
 	if err := u.FS.Rename(p.tmp, host.AgentBinaryPath); err != nil {
-		return 0, installErr("no se pudo sustituir el binario", err)
+		return false, 0, installErr("no se pudo sustituir el binario", err)
 	}
-	return before, nil
+	return active, before, nil
+}
+
+// agentActive reads the state printed by is-active because its exit code is
+// non-zero both for a stopped agent and for one systemctl could not read. Any
+// other state is an error: an agent on its way up, as in a Restart=always
+// loop, would run the new binary with nobody watching it.
+func (u *Upgrader) agentActive(ctx context.Context) (bool, error) {
+	c := sys.Cmd{Name: "systemctl", Args: []string{"is-active", agentUnit}}
+	res, err := u.Run.Run(ctx, c)
+	if err != nil {
+		return false, errors.New(sys.CmdErr("", c, res, err, "").Message)
+	}
+	state := strings.TrimSpace(string(res.Stdout))
+	switch {
+	case res.ExitCode == 0:
+		return true, nil
+	case state == "inactive", state == "failed":
+		return false, nil
+	}
+	return false, fmt.Errorf("systemctl is-active devolvió %q (exit %d)", state, res.ExitCode)
 }
 
 // watch needs the whole window because Restart=always hides a crashing binary

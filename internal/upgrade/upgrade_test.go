@@ -167,6 +167,17 @@ func (f *fixture) count(cmd string) int {
 	return n
 }
 
+// agentDiesOnRestart makes is-active answer res from the first watch step on;
+// the read before the swap still sees an active agent.
+func (f *fixture) agentDiesOnRestart(res sys.Result) {
+	f.onSleep = func(int) { f.run.On(isActiveCmd, res) }
+}
+
+func (f *fixture) applyErr(p *Prepared) error {
+	_, err := f.u.Apply(context.Background(), p)
+	return err
+}
+
 func (f *fixture) prepare(t *testing.T) *Prepared {
 	t.Helper()
 	p, err := f.u.Prepare(context.Background(), "")
@@ -537,7 +548,7 @@ func TestPrepareRejectsTagMismatch(t *testing.T) {
 func TestApplySucceeds(t *testing.T) {
 	f := newFixture(t, "v0.8.2")
 	p := f.prepare(t)
-	if err := f.u.Apply(context.Background(), p); err != nil {
+	if _, err := f.u.Apply(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
 	if f.binary(t) != newBinary {
@@ -554,8 +565,8 @@ func TestApplySucceeds(t *testing.T) {
 	if total != 30*time.Second {
 		t.Errorf("vigilancia = %v", total)
 	}
-	if n := f.count(isActiveCmd); n != 6 {
-		t.Errorf("is-active = %d", n)
+	if n := f.count(isActiveCmd); n != 7 {
+		t.Errorf("is-active = %d: una antes de sustituir y seis en la vigilancia", n)
 	}
 	if n := f.count(restartCmd); n != 1 {
 		t.Errorf("restart = %d", n)
@@ -568,7 +579,7 @@ func TestApplySucceeds(t *testing.T) {
 
 func TestApplyKeepsPrevious(t *testing.T) {
 	f := newFixture(t, "v0.8.2")
-	if err := f.u.Apply(context.Background(), f.prepare(t)); err != nil {
+	if _, err := f.u.Apply(context.Background(), f.prepare(t)); err != nil {
 		t.Fatal(err)
 	}
 	b, err := f.fs.ReadFile("/usr/local/bin/cvctl.previous")
@@ -585,11 +596,102 @@ func TestApplyReadsNRestartsBeforeRestarting(t *testing.T) {
 	f := newFixture(t, "v0.8.2")
 	p := f.prepare(t)
 	f.run.Calls = nil
-	if err := f.u.Apply(context.Background(), p); err != nil {
+	if _, err := f.u.Apply(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.run.Calls[0].String(); got != nRestartsCmd {
+	if got := f.run.Calls[0].String(); got != isActiveCmd {
 		t.Fatalf("primera llamada = %q", got)
+	}
+	if got := f.run.Calls[1].String(); got != nRestartsCmd {
+		t.Fatalf("segunda llamada = %q", got)
+	}
+}
+
+func TestApplyLeavesStoppedAgentStopped(t *testing.T) {
+	for _, state := range []string{"inactive", "failed"} {
+		t.Run(state, func(t *testing.T) {
+			f := newFixture(t, "v0.8.2")
+			p := f.prepare(t)
+			f.run.On(isActiveCmd, sys.Result{ExitCode: 3, Stdout: []byte(state + "\n")})
+			res, err := f.u.Apply(context.Background(), p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !res.AgentStopped {
+				t.Error("AgentStopped = false")
+			}
+			if f.binary(t) != newBinary {
+				t.Errorf("binario = %q", f.binary(t))
+			}
+			prev, err := f.fs.ReadFile(previousPath)
+			if err != nil || string(prev) != oldBinary {
+				t.Errorf("previous = %q, %v", prev, err)
+			}
+			if n := f.count(restartCmd); n != 0 {
+				t.Errorf("restart = %d: no se arranca un agente parado", n)
+			}
+			if n := f.count(isActiveCmd); n != 1 {
+				t.Errorf("is-active = %d: sin reinicio no hay vigilancia", n)
+			}
+			if len(f.slept) != 0 {
+				t.Errorf("vigilancia = %v", f.slept)
+			}
+			f.noTemp(t)
+		})
+	}
+}
+
+func TestApplyStoppedAgentNeedsNoCounter(t *testing.T) {
+	f := newFixture(t, "v0.8.2")
+	p := f.prepare(t)
+	f.run.On(isActiveCmd, sys.Result{ExitCode: 3, Stdout: []byte("inactive\n")})
+	f.run.On(nRestartsCmd, sys.Result{ExitCode: 1})
+	res, err := f.u.Apply(context.Background(), p)
+	if err != nil || !res.AgentStopped {
+		t.Fatalf("res = %+v, err = %v", res, err)
+	}
+}
+
+func TestApplyActiveAgentIsNotReportedStopped(t *testing.T) {
+	f := newFixture(t, "v0.8.2")
+	res, err := f.u.Apply(context.Background(), f.prepare(t))
+	if err != nil || res.AgentStopped {
+		t.Fatalf("res = %+v, err = %v", res, err)
+	}
+}
+
+// systemctl exits non-zero for a stopped agent and for one it could not read,
+// and a starting agent would come up on the new binary with nobody watching.
+func TestApplyUnclearAgentStateChangesNothing(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(f *fixture)
+	}{
+		{"systemctl no responde", func(f *fixture) { f.run.On(isActiveCmd, sys.Result{ExitCode: 1}) }},
+		{"systemctl no arranca", func(f *fixture) { f.run.OnError(isActiveCmd, errors.New("exec failed")) }},
+		{"arrancando", func(f *fixture) { f.run.On(isActiveCmd, sys.Result{ExitCode: 3, Stdout: []byte("activating\n")}) }},
+		{"parando", func(f *fixture) { f.run.On(isActiveCmd, sys.Result{ExitCode: 3, Stdout: []byte("deactivating\n")}) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t, "v0.8.2")
+			p := f.prepare(t)
+			tt.setup(f)
+			_, err := f.u.Apply(context.Background(), p)
+			if code(err) != "E_UPGRADE_INSTALL" {
+				t.Fatalf("err = %v", err)
+			}
+			if f.binary(t) != oldBinary {
+				t.Errorf("binario = %q", f.binary(t))
+			}
+			if _, err := f.fs.ReadFile(previousPath); err == nil {
+				t.Error("previous escrito")
+			}
+			if n := f.count(restartCmd); n != 0 {
+				t.Errorf("restart = %d", n)
+			}
+			f.noTemp(t)
+		})
 	}
 }
 
@@ -610,7 +712,7 @@ func TestApplyFailureBeforeSwapChangesNothing(t *testing.T) {
 			f := newFixture(t, "v0.8.2")
 			p := f.prepare(t)
 			tt.setup(f)
-			err := f.u.Apply(context.Background(), p)
+			_, err := f.u.Apply(context.Background(), p)
 			if code(err) != "E_UPGRADE_INSTALL" {
 				t.Fatalf("err = %v", err)
 			}
@@ -630,7 +732,7 @@ func TestApplyRefusesWhileDeploying(t *testing.T) {
 	p := f.prepare(t)
 	f.u.Deploying = func() ([]string, error) { return []string{"cute-prod"}, nil }
 	f.run.Calls = nil
-	err := f.u.Apply(context.Background(), p)
+	_, err := f.u.Apply(context.Background(), p)
 	if code(err) != "E_UPGRADE_BUSY" || !strings.Contains(err.Error(), "cute-prod") {
 		t.Fatalf("err = %v", err)
 	}
@@ -650,7 +752,7 @@ func TestApplyStopsWhenDeployingFails(t *testing.T) {
 	f := newFixture(t, "v0.8.2")
 	p := f.prepare(t)
 	f.u.Deploying = func() ([]string, error) { return nil, errors.New("estado ilegible") }
-	if err := f.u.Apply(context.Background(), p); err == nil {
+	if _, err := f.u.Apply(context.Background(), p); err == nil {
 		t.Fatal("se esperaba error")
 	}
 	if f.binary(t) != oldBinary {
@@ -661,7 +763,7 @@ func TestApplyStopsWhenDeployingFails(t *testing.T) {
 
 func TestApplyWithoutPreparedBinary(t *testing.T) {
 	f := newFixture(t, "v0.9.0")
-	err := f.u.Apply(context.Background(), f.prepare(t))
+	_, err := f.u.Apply(context.Background(), f.prepare(t))
 	if code(err) != "E_UPGRADE_INSTALL" {
 		t.Fatalf("err = %v", err)
 	}
@@ -690,31 +792,33 @@ func assertRestored(t *testing.T, f *fixture, err error) {
 func TestApplyRestoresWhenAgentFails(t *testing.T) {
 	f := newFixture(t, "v0.8.2")
 	p := f.prepare(t)
-	f.run.On(isActiveCmd, sys.Result{ExitCode: 3, Stdout: []byte("failed\n")})
-	err := f.u.Apply(context.Background(), p)
+	f.agentDiesOnRestart(sys.Result{ExitCode: 3, Stdout: []byte("failed\n")})
+	_, err := f.u.Apply(context.Background(), p)
 	assertRestored(t, f, err)
 	if !strings.Contains(err.Error(), "el agente no está activo") {
 		t.Errorf("mensaje = %v", err)
 	}
-	if n := f.count(isActiveCmd); n != 2 {
-		t.Errorf("is-active = %d: una en la vigilancia y otra tras restaurar", n)
+	if n := f.count(isActiveCmd); n != 3 {
+		t.Errorf("is-active = %d: antes de sustituir, en la vigilancia y tras restaurar", n)
 	}
 }
 
 func TestApplyRollbackReportsActiveAgent(t *testing.T) {
 	f := newFixture(t, "v0.8.2")
 	p := f.prepare(t)
-	f.run.On(isActiveCmd, sys.Result{ExitCode: 3})
 	restarts := 0
 	f.u.Run = runnerFunc(func(ctx context.Context, c sys.Cmd) (sys.Result, error) {
 		if c.String() == restartCmd {
-			if restarts++; restarts == 2 {
+			switch restarts++; restarts {
+			case 1:
+				f.run.On(isActiveCmd, sys.Result{ExitCode: 3})
+			case 2:
 				f.run.On(isActiveCmd, sys.Result{Stdout: []byte("active\n")})
 			}
 		}
 		return f.run.Run(ctx, c)
 	})
-	err := f.u.Apply(context.Background(), p)
+	_, err := f.u.Apply(context.Background(), p)
 	assertRestored(t, f, err)
 	if !strings.Contains(err.Error(), "el agente está activo") {
 		t.Errorf("mensaje = %v", err)
@@ -729,7 +833,7 @@ func TestApplyRestoresWhenAgentDiesLate(t *testing.T) {
 			f.run.On(isActiveCmd, sys.Result{ExitCode: 3})
 		}
 	}
-	assertRestored(t, f, f.u.Apply(context.Background(), p))
+	assertRestored(t, f, f.applyErr(p))
 }
 
 func TestApplyRestoresWhenRestartFails(t *testing.T) {
@@ -746,7 +850,7 @@ func TestApplyRestoresWhenRestartFails(t *testing.T) {
 		}
 		return res, err
 	})
-	assertRestored(t, f, f.u.Apply(context.Background(), p))
+	assertRestored(t, f, f.applyErr(p))
 	if len(f.slept) != 0 {
 		t.Errorf("no debe vigilar tras un reinicio fallido: %v", f.slept)
 	}
@@ -760,7 +864,7 @@ func TestApplyRestoresOnRestartLoop(t *testing.T) {
 			f.run.On(nRestartsCmd, sys.Result{Stdout: []byte("3\n")})
 		}
 	}
-	assertRestored(t, f, f.u.Apply(context.Background(), p))
+	assertRestored(t, f, f.applyErr(p))
 }
 
 // A manual restart zeroes NRestarts in systemd, so a loop can stay below the
@@ -776,7 +880,7 @@ func TestApplyRestoresOnRestartLoopAfterCounterReset(t *testing.T) {
 		}
 		f.run.On(nRestartsCmd, sys.Result{Stdout: []byte(n)})
 	}
-	assertRestored(t, f, f.u.Apply(context.Background(), p))
+	assertRestored(t, f, f.applyErr(p))
 }
 
 func TestApplyCounterResetAloneIsFine(t *testing.T) {
@@ -784,7 +888,7 @@ func TestApplyCounterResetAloneIsFine(t *testing.T) {
 	f.run.On(nRestartsCmd, sys.Result{Stdout: []byte("7\n")})
 	p := f.prepare(t)
 	f.onSleep = func(int) { f.run.On(nRestartsCmd, sys.Result{Stdout: []byte("0\n")}) }
-	if err := f.u.Apply(context.Background(), p); err != nil {
+	if _, err := f.u.Apply(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
 	if f.binary(t) != newBinary {
@@ -796,7 +900,7 @@ func TestApplyRestoresWhenWatchCannotReadCounter(t *testing.T) {
 	f := newFixture(t, "v0.8.2")
 	p := f.prepare(t)
 	f.onSleep = func(int) { f.run.On(nRestartsCmd, sys.Result{ExitCode: 1}) }
-	assertRestored(t, f, f.u.Apply(context.Background(), p))
+	assertRestored(t, f, f.applyErr(p))
 }
 
 func TestApplyRestoresEvenIfInterrupted(t *testing.T) {
@@ -806,7 +910,7 @@ func TestApplyRestoresEvenIfInterrupted(t *testing.T) {
 	defer cancel()
 	f.u.Run = ctxRunner{f.run}
 	f.onSleep = func(int) { cancel() }
-	err := f.u.Apply(ctx, p)
+	_, err := f.u.Apply(ctx, p)
 	assertRestored(t, f, err)
 	if !strings.Contains(err.Error(), "el agente está activo") {
 		t.Errorf("mensaje = %v", err)
@@ -816,9 +920,9 @@ func TestApplyRestoresEvenIfInterrupted(t *testing.T) {
 func TestApplyReportsFailedRestoreOfBinary(t *testing.T) {
 	f := newFixture(t, "v0.8.2")
 	p := f.prepare(t)
-	f.run.On(isActiveCmd, sys.Result{ExitCode: 3})
+	f.agentDiesOnRestart(sys.Result{ExitCode: 3})
 	f.fs.renameErr["/usr/local/bin/cvctl.previous"] = errors.New("EIO")
-	err := f.u.Apply(context.Background(), p)
+	_, err := f.u.Apply(context.Background(), p)
 	if code(err) != "E_UPGRADE_FAILED" {
 		t.Fatalf("err = %v", err)
 	}
@@ -837,14 +941,14 @@ func TestApplyReportsFailedRestartAfterRestore(t *testing.T) {
 	f := newFixture(t, "v0.8.2")
 	p := f.prepare(t)
 	f.run.On(restartCmd, sys.Result{ExitCode: 1, Stderr: []byte("unit failed")})
-	err := f.u.Apply(context.Background(), p)
+	_, err := f.u.Apply(context.Background(), p)
 	if code(err) != "E_UPGRADE_FAILED" {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(err.Error(), "el agente no se pudo reiniciar") {
 		t.Errorf("mensaje = %v", err)
 	}
-	if n := f.count(isActiveCmd); n != 1 {
+	if n := f.count(isActiveCmd); n != 2 {
 		t.Errorf("is-active = %d: debe comprobarse aunque falle el reinicio", n)
 	}
 	if f.binary(t) != oldBinary {

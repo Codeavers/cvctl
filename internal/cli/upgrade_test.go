@@ -273,6 +273,47 @@ func TestUpgradeNotifyFailureIsNotFatal(t *testing.T) {
 	}
 }
 
+func TestUpgradeSaysAgentWasNotStarted(t *testing.T) {
+	f := newUpFixture(t, upPlanA)
+	f.run.On("systemctl is-active cvctl-agent", sys.Result{ExitCode: 3, Stdout: []byte("inactive\n")})
+	code, out, errb := runUpgrade(t, "", "--yes")
+	if code != 0 || f.installed(t) != "new binary" {
+		t.Fatalf("code %d installed %q: %s", code, f.installed(t), errb)
+	}
+	if !strings.Contains(out, "no se ha arrancado") {
+		t.Fatalf("output lacks the agent state:\n%s", out)
+	}
+	for _, c := range f.run.Calls {
+		if c.String() == "systemctl restart cvctl-agent" {
+			t.Fatal("restarted a stopped agent")
+		}
+	}
+	if len(f.notif.msgs) != 1 {
+		t.Fatalf("notices: %+v", f.notif.msgs)
+	}
+	if m := f.notif.msgs[0]; !strings.Contains(m.Status, "upgraded v0.8.2 -> v0.8.3") || !strings.Contains(m.Status, "not started") {
+		t.Fatalf("notice: %+v", m)
+	}
+}
+
+func TestUpgradeJSONReportsStoppedAgent(t *testing.T) {
+	f := newUpFixture(t, upPlanA)
+	f.run.On("systemctl is-active cvctl-agent", sys.Result{ExitCode: 3, Stdout: []byte("inactive\n")})
+	code, out, errb := runUpgrade(t, "", "--yes", "--json")
+	if code != 0 {
+		t.Fatalf("code %d: %s", code, errb)
+	}
+	var doc struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("not json: %q", out)
+	}
+	if doc.Data["installed"] != true || doc.Data["agent_stopped"] != true {
+		t.Fatalf("report: %s", out)
+	}
+}
+
 func TestUpgradeFailureNotifiesError(t *testing.T) {
 	f := newUpFixture(t, upPlanA)
 	f.run.On("systemctl restart cvctl-agent", sys.Result{ExitCode: 1})

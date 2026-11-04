@@ -108,13 +108,14 @@ type upgradeChange struct {
 }
 
 type upgradeReport struct {
-	From       string          `json:"from"`
-	To         string          `json:"to"`
-	Notes      string          `json:"notes"`
-	Changes    []upgradeChange `json:"changes"`
-	PlanFailed bool            `json:"plan_failed"`
-	UpToDate   bool            `json:"up_to_date"`
-	Installed  bool            `json:"installed"`
+	From         string          `json:"from"`
+	To           string          `json:"to"`
+	Notes        string          `json:"notes"`
+	Changes      []upgradeChange `json:"changes"`
+	PlanFailed   bool            `json:"plan_failed"`
+	UpToDate     bool            `json:"up_to_date"`
+	Installed    bool            `json:"installed"`
+	AgentStopped bool            `json:"agent_stopped"`
 }
 
 func newUpgradeCmd(current string) *cobra.Command {
@@ -180,14 +181,24 @@ func doUpgrade(cmd *cobra.Command, e *upgradeEnv, o upgradeOpts) error {
 	if err := confirmUpgrade(cmd, e, o, p); err != nil {
 		return err
 	}
-	if err := e.Upgrader.Apply(ctx, p); err != nil {
+	res, err := e.Upgrader.Apply(ctx, p)
+	if err != nil {
 		noticeFailure(ctx, e, p, err)
 		return err
 	}
 	rep.Installed = true
-	sendNotice(ctx, e, notify.Message{Level: "info", Title: "upgrade",
-		Status: fmt.Sprintf("upgraded %s -> %s", p.From, p.To)})
-	pr.Result(rep, func(w io.Writer) { fmt.Fprintf(w, "cvctl actualizado: %s -> %s\n", p.From, p.To) })
+	rep.AgentStopped = res.AgentStopped
+	status := fmt.Sprintf("upgraded %s -> %s", p.From, p.To)
+	if res.AgentStopped {
+		status += "; agent was stopped and not started"
+	}
+	sendNotice(ctx, e, notify.Message{Level: "info", Title: "upgrade", Status: status})
+	pr.Result(rep, func(w io.Writer) {
+		fmt.Fprintf(w, "cvctl actualizado: %s -> %s\n", p.From, p.To)
+		if res.AgentStopped {
+			fmt.Fprintln(w, "El agente estaba parado y no se ha arrancado, así que el binario nuevo no se ha vigilado. Para arrancarlo: sudo systemctl start cvctl-agent")
+		}
+	})
 	return nil
 }
 
