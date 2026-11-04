@@ -29,6 +29,7 @@ var dockerEnv = []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"}
 
 type listed struct {
 	Repository string
+	Tag        string
 	Digest     string
 	Size       string
 }
@@ -37,6 +38,10 @@ type listed struct {
 // Images of other stacks are never named, so they never reach the output.
 // Removal is by repo@digest without --force: Docker refuses an image in use,
 // which is expected and recorded, not an error.
+//
+// A digest with a real tag on any row is left out entirely: cvctl pulls by
+// digest, so a tag is somebody else's reference, and on the containerd store
+// rm repo@digest also removes every tag of that repo pointing at the digest.
 func (p Pruner) Prune(ctx context.Context, plan Plan, dryRun bool) ([]Item, error) {
 	res, err := p.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"image", "ls", "--digests", "--format", "{{json .}}"}, Env: dockerEnv})
 	if err != nil {
@@ -45,24 +50,24 @@ func (p Pruner) Prune(ctx context.Context, plan Plan, dryRun bool) ([]Item, erro
 	if res.ExitCode != 0 {
 		return nil, fmt.Errorf("listing images: docker exited %d: %s", res.ExitCode, strings.TrimSpace(string(res.Stderr)))
 	}
+	rows, err := parseListing(res.Stdout)
+	if err != nil {
+		return nil, err
+	}
+	tagged := map[string]bool{}
+	for _, l := range rows {
+		if l.Tag != "" && l.Tag != "<none>" {
+			tagged[l.Digest] = true
+		}
+	}
 
 	var items []Item
 	seen := map[string]bool{}
-	sc := bufio.NewScanner(bytes.NewReader(res.Stdout))
-	sc.Buffer(nil, 1<<20)
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var l listed
-		if json.Unmarshal(line, &l) != nil {
-			continue
-		}
+	for _, l := range rows {
 		if l.Digest == "" || l.Digest == "<none>" || l.Repository == "" || l.Repository == "<none>" {
 			continue
 		}
-		if !plan.Candidates[l.Digest] || plan.Keep[l.Digest] {
+		if !plan.Candidates[l.Digest] || plan.Keep[l.Digest] || tagged[l.Digest] {
 			continue
 		}
 		ref := l.Repository + "@" + l.Digest
@@ -85,10 +90,30 @@ func (p Pruner) Prune(ctx context.Context, plan Plan, dryRun bool) ([]Item, erro
 		}
 		items = append(items, it)
 	}
-	if err := sc.Err(); err != nil {
-		return items, fmt.Errorf("reading image list: %w", err)
-	}
 	return items, nil
+}
+
+// parseListing fails on any unreadable row instead of skipping it, because that
+// row may be the one holding the tag of a digest about to be removed.
+func parseListing(out []byte) ([]listed, error) {
+	var rows []listed
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	sc.Buffer(nil, 1<<20)
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var l listed
+		if err := json.Unmarshal(line, &l); err != nil {
+			return nil, fmt.Errorf("reading image list: %w", err)
+		}
+		rows = append(rows, l)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("reading image list: %w", err)
+	}
+	return rows, nil
 }
 
 // usedByContainer matches the daemon's wording, which has no stable error code

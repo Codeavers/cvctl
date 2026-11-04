@@ -42,7 +42,7 @@ func plan() Plan {
 
 func TestPruneRemovesByRepoDigest(t *testing.T) {
 	r := &systest.Runner{}
-	r.On(lsCmd, listing(row("reg/app", "v1", dA, "12.5MB")))
+	r.On(lsCmd, listing(row("reg/app", "<none>", dA, "12.5MB")))
 	r.On("docker image rm reg/app@"+dA, sys.Result{})
 	items, err := Pruner{Run: r}.Prune(context.Background(), plan(), false)
 	if err != nil {
@@ -58,7 +58,7 @@ func TestPruneRemovesByRepoDigest(t *testing.T) {
 
 func TestPruneDryRunRemovesNothing(t *testing.T) {
 	r := &systest.Runner{}
-	r.On(lsCmd, listing(row("reg/app", "v1", dA, "1.5GB")))
+	r.On(lsCmd, listing(row("reg/app", "<none>", dA, "1.5GB")))
 	items, err := Pruner{Run: r}.Prune(context.Background(), plan(), true)
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +82,7 @@ func TestPruneSkipsMissingDigest(t *testing.T) {
 
 func TestPruneIgnoresRejection(t *testing.T) {
 	r := &systest.Runner{}
-	r.On(lsCmd, listing(row("reg/app", "v1", dA, "1MB"), row("reg/web", "v1", dA, "1MB")))
+	r.On(lsCmd, listing(row("reg/app", "<none>", dA, "1MB"), row("reg/web", "<none>", dA, "1MB")))
 	r.On("docker image rm reg/app@"+dA, sys.Result{ExitCode: 1, Stderr: []byte("image is being used by container x")})
 	r.On("docker image rm reg/web@"+dA, sys.Result{})
 	items, err := Pruner{Run: r}.Prune(context.Background(), plan(), false)
@@ -128,7 +128,7 @@ func TestPruneMarksOnlyContainerConflictsAsInUse(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &systest.Runner{}
-			r.On(lsCmd, listing(row("repo", "1", dA, "1MB")))
+			r.On(lsCmd, listing(row("repo", "<none>", dA, "1MB")))
 			r.On("docker image rm repo@"+dA, sys.Result{ExitCode: 1, Stderr: []byte(tc.stderr)})
 
 			items, err := Pruner{Run: r}.Prune(context.Background(), Plan{Candidates: map[string]bool{dA: true}}, false)
@@ -144,7 +144,7 @@ func TestPruneMarksOnlyContainerConflictsAsInUse(t *testing.T) {
 
 func TestPruneExecFailureIsNotInUse(t *testing.T) {
 	r := &systest.Runner{}
-	r.On(lsCmd, listing(row("repo", "1", dA, "1MB")))
+	r.On(lsCmd, listing(row("repo", "<none>", dA, "1MB")))
 	r.OnError("docker image rm repo@"+dA, errors.New("conflict with container runtime"))
 
 	items, err := Pruner{Run: r}.Prune(context.Background(), Plan{Candidates: map[string]bool{dA: true}}, false)
@@ -153,5 +153,64 @@ func TestPruneExecFailureIsNotInUse(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].InUse || items[0].Reason == "" {
 		t.Fatalf("items = %+v", items)
+	}
+}
+
+func TestPruneSkipsDigestWithRealTag(t *testing.T) {
+	cases := []struct {
+		name string
+		rows []string
+	}{
+		{"tag on the same repo", []string{row("repo", "<none>", dA, "1MB"), row("repo", "develop", dA, "1MB")}},
+		{"tag listed first", []string{row("repo", "develop", dA, "1MB"), row("repo", "<none>", dA, "1MB")}},
+		{"tag on another repo", []string{row("repo", "<none>", dA, "1MB"), row("other", "stable", dA, "1MB")}},
+		{"tag on a row without repo", []string{row("repo", "<none>", dA, "1MB"), row("<none>", "stable", dA, "1MB")}},
+	}
+	for _, dryRun := range []bool{false, true} {
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				r := &systest.Runner{}
+				r.On(lsCmd, listing(tc.rows...))
+				r.OnPrefix("docker image rm", sys.Result{})
+				items, err := Pruner{Run: r}.Prune(context.Background(), plan(), dryRun)
+				if err != nil || len(items) != 0 || len(rmCalls(r)) != 0 {
+					t.Fatalf("items=%+v calls=%v err=%v", items, rmCalls(r), err)
+				}
+			})
+		}
+	}
+}
+
+func TestPruneTreatsMissingTagAsUntagged(t *testing.T) {
+	r := &systest.Runner{}
+	r.On(lsCmd, listing(row("repo", "", dA, "1MB"), row("other", "<none>", dA, "1MB")))
+	r.OnPrefix("docker image rm", sys.Result{})
+	items, err := Pruner{Run: r}.Prune(context.Background(), plan(), false)
+	if err != nil || len(items) != 2 || len(rmCalls(r)) != 2 {
+		t.Fatalf("items=%+v calls=%v err=%v", items, rmCalls(r), err)
+	}
+}
+
+// A row that cannot be read may be the one holding the tag of a digest.
+func TestPruneRemovesNothingWhenTheListingIsUnreadable(t *testing.T) {
+	cases := []struct {
+		name string
+		bad  string
+	}{
+		{"not json", "not json"},
+		{"longer than the scanner buffer", strings.Repeat("x", 2<<20)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &systest.Runner{}
+			r.On(lsCmd, listing(row("repo", "<none>", dA, "1MB"), tc.bad))
+			r.OnPrefix("docker image rm", sys.Result{})
+			if _, err := (Pruner{Run: r}).Prune(context.Background(), plan(), false); err == nil {
+				t.Fatal("want error")
+			}
+			if got := rmCalls(r); len(got) != 0 {
+				t.Fatalf("removed %v", got)
+			}
+		})
 	}
 }
