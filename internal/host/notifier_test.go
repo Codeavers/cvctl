@@ -144,6 +144,18 @@ func TestNotifierStepTokenChanged(t *testing.T) {
 	if callCount != 1 {
 		t.Fatalf("callCount = %d, want 1", callCount)
 	}
+	if err := env.NotifierCommit(); err != nil {
+		t.Fatal(err)
+	}
+	env.NotifierCommit = nil
+
+	p, err = step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Changes) != 0 {
+		t.Fatalf("expected no changes with the same token, got %v", p.Changes)
+	}
 
 	// Now token changes:
 	sec.Set("telegram_token", "token-updated")
