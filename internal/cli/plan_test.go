@@ -58,6 +58,9 @@ func setupPlanRig(t *testing.T, inst string) (string, *OpsEnv) {
 	if err := os.WriteFile(filepath.Join(tmp, inst, "cvctl.env"), instance.FormatEnv(d.Entries()), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(tmp, inst, "app.env"), []byte("API_TOKEN=s3cr3t-value\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
 	return tmp, env
 }
 
