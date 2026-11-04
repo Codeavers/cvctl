@@ -30,6 +30,9 @@ const (
 	// Covers the binary download, which the Upgrader bounds again per fetch.
 	upgradeHTTPTimeout = 5 * time.Minute
 	noticeTimeout      = 30 * time.Second
+	// Not under /run/lock: any user can write there, and root opens this path
+	// following symlinks and repairs its mode.
+	upgradeLockPath = "/run/cvctl-upgrade.lock"
 )
 
 type upgradeEnv struct {
@@ -154,6 +157,12 @@ type upgradeOpts struct {
 }
 
 func doUpgrade(cmd *cobra.Command, e *upgradeEnv, o upgradeOpts) error {
+	unlock, err := lockUpgrade()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	ctx := cmd.Context()
 	p, err := e.Upgrader.Prepare(ctx, o.target)
 	if err != nil {
@@ -200,6 +209,22 @@ func doUpgrade(cmd *cobra.Command, e *upgradeEnv, o upgradeOpts) error {
 		}
 	})
 	return nil
+}
+
+// lockUpgrade covers --check too: every run stages the same temporary path, and
+// its Cleanup would delete the binary of a run about to install it.
+func lockUpgrade() (func(), error) {
+	unlock, err := sys.Lock(upgradeLockPath)
+	if errors.Is(err, sys.ErrLocked) {
+		return nil, &output.Error{Code: "E_UPGRADE_BUSY", Message: "ya hay otro cvctl upgrade en marcha",
+			Hint: "reintenta cuando termine"}
+	}
+	if err != nil {
+		return nil, &output.Error{Code: "E_UPGRADE_LOCK_FAILED",
+			Message: fmt.Sprintf("no se pudo bloquear %s: %v", upgradeLockPath, err),
+			Hint:    "comprueba que root puede escribir en " + filepath.Dir(upgradeLockPath)}
+	}
+	return unlock, nil
 }
 
 func writeUpgradeReview(w io.Writer, p *upgrade.Prepared) {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -23,17 +24,22 @@ import (
 const (
 	upNew   = "v0.8.3"
 	upTmp   = "/usr/local/bin/.cvctl-upgrade-v0.8.3"
+	upLock  = "/run/cvctl-upgrade.lock"
 	upPlanA = `{"ok":true,"data":{"schema":1,"instances":{"cute":{"data":{"media":{"backup":"volume"}}}}}}`
 	upPlanB = `{"ok":true,"data":{"schema":1,"instances":{"cute":{"data":{"media":{"backup":"none"}}}}}}`
 )
 
 type recNotifier struct {
-	msgs []notify.Message
-	err  error
+	msgs   []notify.Message
+	err    error
+	onSend func()
 }
 
 func (r *recNotifier) Send(_ context.Context, m notify.Message) error {
 	r.msgs = append(r.msgs, m)
+	if r.onSend != nil {
+		r.onSend()
+	}
 	return r.err
 }
 
@@ -45,6 +51,9 @@ type upFixture struct {
 	tty    bool
 	busy   []string
 	logBuf *bytes.Buffer
+	lock   *systest.FakeLocker
+	// onDeploying runs each time the upgrade asks for deploys in progress.
+	onDeploying func()
 }
 
 func newUpFixture(t *testing.T, planNew string) *upFixture {
@@ -65,7 +74,7 @@ func newUpFixture(t *testing.T, planNew string) *upFixture {
 	}))
 	t.Cleanup(srv.Close)
 
-	f := &upFixture{run: &systest.Runner{}, fs: systest.NewFS(), notif: &recNotifier{}, logBuf: &bytes.Buffer{}}
+	f := &upFixture{run: &systest.Runner{}, fs: systest.NewFS(), notif: &recNotifier{}, logBuf: &bytes.Buffer{}, lock: systest.NewFakeLocker()}
 	if err := f.fs.WriteFile(host.AgentBinaryPath, []byte("old binary"), 0o755, sys.Owner{}); err != nil {
 		t.Fatal(err)
 	}
@@ -76,25 +85,31 @@ func newUpFixture(t *testing.T, planNew string) *upFixture {
 	f.run.On("systemctl is-active cvctl-agent", sys.Result{Stdout: []byte("active\n")})
 	f.run.On("systemctl restart cvctl-agent", sys.Result{})
 
-	oldEnv, oldLog := newUpgradeEnv, notifyLog
+	oldEnv, oldLog, oldLock := newUpgradeEnv, notifyLog, sys.Lock
 	notifyLog = f.logBuf
+	sys.Lock = f.lock.Lock
 	newUpgradeEnv = func(current string) (*upgradeEnv, error) {
 		return &upgradeEnv{
 			Upgrader: &upgrade.Upgrader{
 				Run: f.run, FS: f.fs,
-				Client:    upgrade.Client{BaseURL: srv.URL, Repo: "o/r"},
-				Arch:      "amd64",
-				Current:   current,
-				Exe:       host.AgentBinaryPath,
-				Deploying: func() ([]string, error) { return f.busy, nil },
-				Sleep:     func(_ time.Duration) {},
+				Client:  upgrade.Client{BaseURL: srv.URL, Repo: "o/r"},
+				Arch:    "amd64",
+				Current: current,
+				Exe:     host.AgentBinaryPath,
+				Deploying: func() ([]string, error) {
+					if f.onDeploying != nil {
+						f.onDeploying()
+					}
+					return f.busy, nil
+				},
+				Sleep: func(_ time.Duration) {},
 			},
 			EUID:        f.euid,
 			Interactive: f.tty,
 			Notifier:    func() notify.Notifier { return f.notif },
 		}, nil
 	}
-	t.Cleanup(func() { newUpgradeEnv, notifyLog = oldEnv, oldLog })
+	t.Cleanup(func() { newUpgradeEnv, notifyLog, sys.Lock = oldEnv, oldLog, oldLock })
 	return f
 }
 
@@ -135,8 +150,102 @@ func TestUpgradeNeedsRoot(t *testing.T) {
 	if code == 0 || c != "E_UPGRADE_ROOT" || h != "sudo cvctl upgrade" {
 		t.Fatalf("code %d %s %q", code, c, h)
 	}
-	if f.installed(t) != "old binary" || len(f.run.Calls) != 0 {
+	if f.installed(t) != "old binary" || len(f.run.Calls) != 0 || len(f.lock.Calls) != 0 {
 		t.Fatal("must not touch anything without root")
+	}
+}
+
+func TestUpgradeBusyWhenAnotherRunHoldsTheLock(t *testing.T) {
+	for _, args := range [][]string{{"--yes", "--json"}, {"--check", "--json"}} {
+		f := newUpFixture(t, upPlanA)
+		unlock, err := f.lock.Lock(upLock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code, out, _ := runUpgrade(t, "", args...)
+		unlock()
+		c, h := errCode(t, out)
+		if code == 0 || c != "E_UPGRADE_BUSY" || h == "" {
+			t.Fatalf("%v: code %d %s %q", args, code, c, h)
+		}
+		if f.installed(t) != "old binary" || len(f.run.Calls) != 0 {
+			t.Fatalf("%v: must not touch anything while locked: %v", args, f.run.Calls)
+		}
+	}
+}
+
+func TestUpgradeLockFailureIsNotBusy(t *testing.T) {
+	f := newUpFixture(t, upPlanA)
+	sys.Lock = func(string) (func(), error) { return nil, os.ErrPermission }
+	code, out, _ := runUpgrade(t, "", "--yes", "--json")
+	c, _ := errCode(t, out)
+	if code == 0 || c != "E_UPGRADE_LOCK_FAILED" || f.installed(t) != "old binary" {
+		t.Fatalf("code %d %s", code, c)
+	}
+}
+
+func (f *upFixture) assertLocked(t *testing.T, when string) {
+	t.Helper()
+	unlock, err := f.lock.Lock(upLock)
+	if err == nil {
+		unlock()
+		t.Errorf("lock free %s", when)
+	} else if !errors.Is(err, sys.ErrLocked) {
+		t.Error(err)
+	}
+}
+
+func (f *upFixture) assertUnlocked(t *testing.T) {
+	t.Helper()
+	unlock, err := f.lock.Lock(upLock)
+	if err != nil {
+		t.Fatalf("lock not released: %v", err)
+	}
+	unlock()
+}
+
+// Deploying runs in Prepare and in Apply, and the notice goes out after Apply.
+func TestUpgradeHoldsLockFromPrepareUntilAfterApply(t *testing.T) {
+	f := newUpFixture(t, upPlanA)
+	deploying := 0
+	f.onDeploying = func() {
+		deploying++
+		f.assertLocked(t, "during Prepare or Apply")
+	}
+	noticed := 0
+	f.notif.onSend = func() {
+		noticed++
+		f.assertLocked(t, "after Apply")
+	}
+	if code, _, errb := runUpgrade(t, "", "--yes"); code != 0 {
+		t.Fatalf("code %d: %s", code, errb)
+	}
+	if deploying != 2 || noticed != 1 {
+		t.Fatalf("deploying %d noticed %d", deploying, noticed)
+	}
+	f.assertUnlocked(t)
+}
+
+func TestUpgradeReleasesLockOnEveryExit(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(f *upFixture)
+		args  []string
+	}{
+		{"check", func(*upFixture) {}, []string{"--check"}},
+		{"refused", func(*upFixture) {}, []string{"--json"}},
+		{"failed", func(f *upFixture) { f.run.On("systemctl restart cvctl-agent", sys.Result{ExitCode: 1}) }, []string{"--yes"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newUpFixture(t, upPlanA)
+			tt.setup(f)
+			runUpgrade(t, "", tt.args...)
+			if len(f.lock.Calls) != 1 || f.lock.Calls[0].Path != upLock {
+				t.Fatalf("locks: %+v", f.lock.Calls)
+			}
+			f.assertUnlocked(t)
+		})
 	}
 }
 
