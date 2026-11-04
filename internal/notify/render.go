@@ -230,7 +230,11 @@ func build(m Message, host string) (lines []line, buttons []Button, body string)
 		add("Images", strings.Join(names, ", "))
 	}
 	if m.Level != "info" {
-		if e := Summary(m.Text); e != "" {
+		e := field(m.Error, maxSummary)
+		if e == "" {
+			e = Summary(m.Text)
+		}
+		if e != "" {
 			lines = append(lines, line{"Error", "<code>" + html.EscapeString(e) + "</code>", e})
 		}
 		if d.Logs != "" {

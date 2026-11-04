@@ -3348,6 +3348,142 @@ func TestDeployNoticeStatus(t *testing.T) {
 	})
 }
 
+func TestDeployNoticeError(t *testing.T) {
+	const secret = "supersecretpassword123456789012"
+	oldDesired := func() *state.Desired {
+		return &state.Desired{
+			InfraCommit: "0000000000000000000000000000000000000000",
+			Digests:     map[string]string{"api": "sha256:" + strings.Repeat("0", 64)},
+		}
+	}
+	healthFails := func(context.Context, string, string) error {
+		return errors.New("health failed for " + secret + "\nsecond line")
+	}
+	const healthLine = "health failed for ***"
+	seed := func(t *testing.T, rig *testRig) {
+		t.Helper()
+		if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusOK, Current: oldDesired()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deploy := func(t *testing.T, rig *testRig) notify.Message {
+		t.Helper()
+		if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{}); err != nil {
+			t.Fatal(err)
+		}
+		return lastMessage(t, rig.notifier)
+	}
+
+	t.Run("Blocked", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		spec := "vars:\n  DATABASE_URL: { source: service, service: main-db }\n  API_SECRET: { source: prompt, secret: true }\n  OTHER_KEY: { source: prompt, secret: true }\n"
+		if err := os.WriteFile(filepath.Join(rig.infraDir, "env.spec.yml"), []byte(spec), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		m := deploy(t, rig)
+		if m.Status != "BLOCKED" || m.Error != "missing: API_SECRET, OTHER_KEY" {
+			t.Fatalf("Status %q, Error %q", m.Status, m.Error)
+		}
+		if !strings.Contains(m.Text, "cvctl set-env demo-dev API_SECRET") {
+			t.Fatalf("Text changed: %q", m.Text)
+		}
+	})
+
+	t.Run("FailedHealth", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		rig.deployer.Health = healthFails
+		m := deploy(t, rig)
+		if m.Status != "FAILED" || m.Error != healthLine {
+			t.Fatalf("Status %q, Error %q", m.Status, m.Error)
+		}
+		if !strings.Contains(m.Text, "service container logs here") {
+			t.Fatalf("Text changed: %q", m.Text)
+		}
+	})
+
+	t.Run("FailedBringUp", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		rig.compose.failUp = errors.New("\nup failed\nmore")
+		m := deploy(t, rig)
+		if m.Status != "FAILED" || m.Error != "up failed" {
+			t.Fatalf("Status %q, Error %q", m.Status, m.Error)
+		}
+	})
+
+	t.Run("FailedKeepsTimeoutPrefix", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		if err := rig.deployer.Host.Set("TIMEOUT_DEPLOY", "100ms"); err != nil {
+			t.Fatal(err)
+		}
+		rig.deployer.Health = func(ctx context.Context, _, _ string) error {
+			<-ctx.Done()
+			return errors.New("health gave up\nsecond line")
+		}
+		m := deploy(t, rig)
+		if want := "E_TIMEOUT: deploy timed out after 100ms: health gave up"; m.Error != want {
+			t.Fatalf("Error = %q, want %q", m.Error, want)
+		}
+	})
+
+	t.Run("RolledBack", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		seed(t, rig)
+		n := 0
+		rig.deployer.Health = func(ctx context.Context, inst, override string) error {
+			n++
+			if n == 1 {
+				return healthFails(ctx, inst, override)
+			}
+			return nil
+		}
+		m := deploy(t, rig)
+		if m.Status != "ROLLED BACK" || m.Error != healthLine {
+			t.Fatalf("Status %q, Error %q", m.Status, m.Error)
+		}
+	})
+
+	t.Run("RollbackFailed", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		seed(t, rig)
+		n := 0
+		rig.deployer.Health = func(context.Context, string, string) error {
+			n++
+			if n == 1 {
+				return errors.New("new release unhealthy")
+			}
+			return errors.New("old release gone for " + secret + "\nsecond line")
+		}
+		m := deploy(t, rig)
+		if want := "old release gone for ***"; m.Status != "ROLLBACK FAILED" || m.Error != want {
+			t.Fatalf("Status %q, Error %q", m.Status, m.Error)
+		}
+	})
+
+	t.Run("ManualRollbackFailed", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		cur := defaultDesired()
+		if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusOK, Current: &cur, Previous: oldDesired()}); err != nil {
+			t.Fatal(err)
+		}
+		rig.deployer.Health = healthFails
+		if _, err := rig.deployer.Rollback(context.Background(), "demo-dev", nil, "cli:admin"); err != nil {
+			t.Fatal(err)
+		}
+		m := lastMessage(t, rig.notifier)
+		if m.Status != "ROLLBACK FAILED" || m.Error != healthLine {
+			t.Fatalf("Status %q, Error %q", m.Status, m.Error)
+		}
+	})
+
+	t.Run("OtherSitesKeepFallback", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		rig.compose.failPull = errors.New("network timeout")
+		if m := deploy(t, rig); m.Error != "" {
+			t.Fatalf("Error = %q", m.Error)
+		}
+	})
+}
+
 func TestDeployNoticeGitInstanceWithoutDigests(t *testing.T) {
 	rig := setupTestRig(t, "dev", "demo-dev")
 	fl := &fakeLabels{}

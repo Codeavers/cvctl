@@ -383,6 +383,17 @@ func (d *Deployer) cvctlSecrets(path string) map[string]string {
 	return out
 }
 
+// firstLine is the first non-empty line of text. Redact before calling it: a
+// secret that spans lines is only recognized whole.
+func firstLine(text string) string {
+	for _, l := range strings.Split(text, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			return l
+		}
+	}
+	return ""
+}
+
 func lastLines(text string, n int) string {
 	lines := strings.Split(text, "\n")
 	if len(lines) <= n {
@@ -822,6 +833,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			Level:   "warn",
 			Title:   fmt.Sprintf("%s deploy BLOCKED", inst),
 			Text:    warnText,
+			Error:   "missing: " + strings.Join(resEnv.Missing, ", "),
 			Project: inst,
 			Status:  "BLOCKED",
 			Deploy:  d.deployInfo(ctx, inst, st, want, "warn"),
@@ -1226,6 +1238,16 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		}
 	}
 	redactedLogs := lastLines(redact(timeoutPrefix+logs, secrets), 20)
+	// The logs end in whatever the containers printed last; the cause is the
+	// step's own error.
+	cause := upErr
+	if cause == nil {
+		cause = healthErr
+	}
+	causeLine := firstLine(redact(cause.Error(), secrets))
+	if timeoutPrefix != "" {
+		causeLine = strings.TrimSpace(timeoutPrefix) + ": " + causeLine
+	}
 
 	if !hasInfra(st.Current) {
 		st.Status = state.StatusFailed
@@ -1257,6 +1279,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			Level:   "error",
 			Title:   fmt.Sprintf("%s deploy FAILED", inst),
 			Text:    redactedLogs,
+			Error:   causeLine,
 			Project: inst,
 			Status:  "FAILED",
 			Deploy:  d.deployInfo(ctx, inst, st, want, "error"),
@@ -1293,6 +1316,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			Level:   "error",
 			Title:   fmt.Sprintf("%s ROLLBACK FAILED", inst),
 			Text:    rbRedacted,
+			Error:   firstLine(redact(rollbackErr.Error(), secrets)),
 			Project: inst,
 			Status:  "ROLLBACK FAILED",
 			Deploy:  d.deployInfo(ctx, inst, st, want, "error"),
@@ -1351,6 +1375,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		Level:   "error",
 		Title:   fmt.Sprintf("%s deploy FAILED", inst),
 		Text:    errText,
+		Error:   causeLine,
 		Project: inst,
 		Status:  "ROLLED BACK",
 		Deploy:  d.deployInfo(ctx, inst, st, want, "error"),

@@ -320,3 +320,40 @@ func TestRenderHTMLJavascriptRepo(t *testing.T) {
 		t.Errorf("buttons = %v, want none", btns)
 	}
 }
+
+func TestRenderErrorField(t *testing.T) {
+	logs := "E_X: real cause\ncontainer log line"
+	tests := []struct {
+		name  string
+		m     Message
+		want  string
+		drops string
+	}{
+		{"set wins over Text", Message{Level: "error", Text: logs, Error: "the cause", Deploy: &Deploy{}},
+			"<b>Error:</b> <code>the cause</code>", "container log line"},
+		{"unset falls back to Summary", Message{Level: "error", Text: logs, Deploy: &Deploy{}},
+			"<b>Error:</b> <code>E_X: container log line</code>", "real cause"},
+		{"blank falls back to Summary", Message{Level: "error", Text: logs, Error: " \n", Deploy: &Deploy{}},
+			"<b>Error:</b> <code>E_X: container log line</code>", "real cause"},
+		{"one line", Message{Level: "warn", Error: "a\nb", Deploy: &Deploy{}},
+			"<b>Error:</b> <code>a b</code>", "a\nb"},
+		{"escaped", Message{Level: "error", Error: "<b>x</b>", Deploy: &Deploy{}},
+			"<code>&lt;b&gt;x&lt;/b&gt;</code>", "<b>x</b>"},
+		{"info stays silent", Message{Level: "info", Error: "the cause", Deploy: &Deploy{}},
+			"<b>Images:</b> unchanged", "Error"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := renderHTML(tc.m, "h")
+			if !strings.Contains(got, tc.want) || strings.Contains(got, tc.drops) {
+				t.Errorf("want %q without %q in:\n%s", tc.want, tc.drops, got)
+			}
+		})
+	}
+
+	long := Message{Level: "error", Error: strings.Repeat("é", 500), Deploy: &Deploy{}}
+	got := renderPlain(long, "h")
+	if n := strings.Count(got, "é"); n != maxSummary-1 {
+		t.Errorf("Error limited to %d runes, want %d", n, maxSummary-1)
+	}
+}
