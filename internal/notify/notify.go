@@ -108,7 +108,11 @@ func Logged(n Notifier, w io.Writer) Notifier {
 func (l loggedNotifier) Send(ctx context.Context, m Message) error {
 	err := l.n.Send(ctx, m)
 	if err != nil {
-		fmt.Fprintf(l.w, "notify: %q not sent: %v\n", m.Title, err)
+		name := m.Title
+		if name == "" {
+			name = m.Status
+		}
+		fmt.Fprintf(l.w, "notify: %q not sent: %v\n", name, err)
 	}
 	return err
 }

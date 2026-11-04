@@ -58,11 +58,11 @@ func TestTelegramPayloadWithThread(t *testing.T) {
 		t.Fatalf("got message_thread_id %v, want 42", gotBody["message_thread_id"])
 	}
 
-	if preview, ok := gotBody["disable_web_page_preview"].(bool); !ok || !preview {
-		t.Fatalf("got disable_web_page_preview %v, want true", gotBody["disable_web_page_preview"])
+	if _, exists := gotBody["disable_web_page_preview"]; exists {
+		t.Fatalf("deprecated disable_web_page_preview still sent")
 	}
 
-	wantText := "[web-01] INFO Deployment\ndeployed successfully"
+	wantText := "<b>Server:</b> web-01\n<b>Status:</b> Deployment\n\ndeployed successfully"
 	if text, ok := gotBody["text"].(string); !ok || text != wantText {
 		t.Fatalf("got text %q, want %q", gotBody["text"], wantText)
 	}
@@ -227,15 +227,7 @@ func TestTelegramMessageTruncation(t *testing.T) {
 	defer srv.Close()
 
 	n := notify.NewTelegram("test-token", "12345", "", srv.URL)
-
-	longText := strings.Repeat("世", 5000)
-	msg := notify.Message{
-		Host:  "srv-01",
-		Level: "info",
-		Title: "LongMsg",
-		Text:  longText,
-	}
-
+	msg := notify.Message{Host: "srv-01", Level: "info", Title: "LongMsg", Text: strings.Repeat("世", 5000)}
 	if err := n.Send(context.Background(), msg); err != nil {
 		t.Fatalf("unexpected Send error: %v", err)
 	}
@@ -244,13 +236,164 @@ func TestTelegramMessageTruncation(t *testing.T) {
 	if !ok {
 		t.Fatalf("text not found in payload or not a string: %v", gotBody["text"])
 	}
-
-	sentRunes := []rune(sentText)
-	if len(sentRunes) > 4013 {
-		t.Fatalf("sent text has %d runes, want <= 4013", len(sentRunes))
+	if len([]rune(sentText)) > 4096 {
+		t.Fatalf("sent text has %d runes, want <= 4096", len([]rune(sentText)))
 	}
-	if !strings.HasSuffix(sentText, "…[truncated]") {
-		t.Fatalf("sent text does not end with '…[truncated]'")
+	if !strings.HasSuffix(sentText, "…") {
+		t.Fatalf("sent text is not clipped")
+	}
+}
+
+// tgServer records every POST body and answers with the given statuses in
+// order; the last status repeats.
+func tgServer(t *testing.T, statuses ...int) (*httptest.Server, *[]map[string]any) {
+	t.Helper()
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var b map[string]any
+		_ = json.Unmarshal(raw, &b)
+		bodies = append(bodies, b)
+		st := statuses[len(statuses)-1]
+		if len(bodies) <= len(statuses) {
+			st = statuses[len(bodies)-1]
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(st)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": st == 200, "description": "Bad Request: can't parse entities"})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &bodies
+}
+
+func deployMsg() notify.Message {
+	return notify.Message{
+		Host: "web-01", Project: "app", Level: "info", Title: "Deployed",
+		Deploy: &notify.Deploy{
+			Changed: []string{"web"},
+			Builds:  []notify.Build{{Service: "web", Repo: "https://github.com/o/r", Commit: "abcdef1234", PR: "7", Title: "Fix"}},
+			AppURL:  "https://app.example.com",
+		},
+	}
+}
+
+func TestSendHTML(t *testing.T) {
+	srv, bodies := tgServer(t, 200)
+	if err := notify.NewTelegram("tok", "1", "", srv.URL).Send(context.Background(), deployMsg()); err != nil {
+		t.Fatal(err)
+	}
+	b := (*bodies)[0]
+	if b["parse_mode"] != "HTML" {
+		t.Fatalf("parse_mode = %v", b["parse_mode"])
+	}
+	lp, _ := b["link_preview_options"].(map[string]any)
+	if lp["is_disabled"] != true {
+		t.Fatalf("link_preview_options = %v", b["link_preview_options"])
+	}
+	rm, _ := b["reply_markup"].(map[string]any)
+	rows, _ := rm["inline_keyboard"].([]any)
+	if len(rows) != 3 {
+		t.Fatalf("inline_keyboard = %v", rm)
+	}
+	var urls []string
+	for _, r := range rows {
+		row := r.([]any)
+		if len(row) != 1 {
+			t.Fatalf("row = %v, want one button", row)
+		}
+		urls = append(urls, row[0].(map[string]any)["url"].(string))
+	}
+	want := []string{"https://github.com/o/r/pull/7", "https://github.com/o/r/commit/abcdef1234", "https://app.example.com"}
+	if strings.Join(urls, " ") != strings.Join(want, " ") {
+		t.Fatalf("urls = %v, want %v", urls, want)
+	}
+}
+
+func TestSendNoButtonsOmitsReplyMarkup(t *testing.T) {
+	srv, bodies := tgServer(t, 200)
+	if err := notify.NewTelegram("tok", "1", "", srv.URL).Send(context.Background(), notify.Message{Host: "h", Title: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := (*bodies)[0]["reply_markup"]; ok {
+		t.Fatalf("reply_markup present without buttons")
+	}
+}
+
+func TestSendInfoIsSilent(t *testing.T) {
+	for _, tc := range []struct {
+		level string
+		want  bool
+	}{{"info", true}, {"", true}, {"warn", false}, {"error", false}} {
+		srv, bodies := tgServer(t, 200)
+		if err := notify.NewTelegram("tok", "1", "", srv.URL).Send(context.Background(), notify.Message{Host: "h", Level: tc.level, Title: "x"}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := (*bodies)[0]["disable_notification"].(bool); got != tc.want {
+			t.Errorf("level %q: disable_notification = %v, want %v", tc.level, got, tc.want)
+		}
+	}
+}
+
+func TestSendFallsBackToPlainOn400(t *testing.T) {
+	srv, bodies := tgServer(t, 400, 200)
+	m := deployMsg()
+	m.Level = "warn"
+	if err := notify.NewTelegram("tok", "1", "5", srv.URL).Send(context.Background(), m); err != nil {
+		t.Fatalf("fallback should succeed: %v", err)
+	}
+	if len(*bodies) != 2 {
+		t.Fatalf("posts = %d, want 2", len(*bodies))
+	}
+	b := (*bodies)[1]
+	for _, k := range []string{"parse_mode", "reply_markup"} {
+		if _, ok := b[k]; ok {
+			t.Errorf("fallback still has %s", k)
+		}
+	}
+	if b["message_thread_id"] != float64(5) {
+		t.Errorf("thread = %v", b["message_thread_id"])
+	}
+	if got, _ := b["disable_notification"].(bool); got {
+		t.Errorf("warn fallback should notify")
+	}
+	if strings.Contains(b["text"].(string), "<b>") {
+		t.Errorf("fallback text has HTML: %v", b["text"])
+	}
+}
+
+func TestSendNoFallbackOn401(t *testing.T) {
+	srv, bodies := tgServer(t, 401)
+	if err := notify.NewTelegram("tok", "1", "", srv.URL).Send(context.Background(), deployMsg()); err == nil {
+		t.Fatal("expected error")
+	}
+	if len(*bodies) != 1 {
+		t.Fatalf("posts = %d, want 1", len(*bodies))
+	}
+}
+
+func TestSendFallbackFailureRedactsToken(t *testing.T) {
+	token := "123:secret-token"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "description": "bad " + token})
+	}))
+	defer srv.Close()
+	err := notify.NewTelegram(token, "1", "", srv.URL).Send(context.Background(), deployMsg())
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != "E_NOTIFY_SEND" {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.Contains(oe.Message, token) || strings.Contains(oe.Hint, token) || !strings.Contains(oe.Message, "<redacted>") {
+		t.Fatalf("message = %q", oe.Message)
+	}
+}
+
+func TestLoggedFallsBackToStatus(t *testing.T) {
+	var buf strings.Builder
+	n := notify.Logged(failingNotifier{err: errors.New("boom")}, &buf)
+	_ = n.Send(context.Background(), notify.Message{Status: "Deploy failed"})
+	if !strings.Contains(buf.String(), `"Deploy failed" not sent`) {
+		t.Fatalf("log = %q", buf.String())
 	}
 }
 
