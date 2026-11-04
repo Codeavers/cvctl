@@ -84,20 +84,41 @@ binary are byte-equal and two versions can be diffed. An unreadable instance app
 ## upgrade
 
 `sudo cvctl upgrade [--version vX.Y.Z] [--check] [--yes] [--accept-changes]` replaces the installed
-`/usr/local/bin/cvctl` with the latest stable release (or `--version`), verifies its checksum, restarts
-`cvctl-agent` and watches it for 30 s; if it does not hold, the previous binary is put back
-(`E_UPGRADE_FAILED`). It refuses while any instance is `DEPLOYING`. Releases come from
-`Codeavers/cvctl`; set `CVCTL_UPGRADE_REPO` for a fork.
+`/usr/local/bin/cvctl` with the latest stable release, verifies its checksum, restarts `cvctl-agent`
+and watches it for 30 s; if it does not hold, the previous binary is put back (`E_UPGRADE_FAILED`).
+The previous binary stays in `/usr/local/bin/cvctl.previous`.
+
+It needs root, `--check` included (`E_UPGRADE_ROOT`). It refuses while any instance is `DEPLOYING` and
+while another `cvctl upgrade` runs (`E_UPGRADE_BUSY`). It replaces only the binary: it does not run
+`cvctl init` or `cvctl project update`, so systemd units and host config are not refreshed; run them
+yourself if the release notes ask for it.
+
+If `cvctl-agent` is not active (`inactive` or `failed`), the binary is installed and the agent is left
+as it was: no restart and no watch, so nothing has tested the new binary. The output and the notice say
+so, and `--json` reports `agent_stopped`. While the agent is starting or stopping, or if its state
+cannot be read, nothing is installed (`E_UPGRADE_INSTALL`).
 
 Before installing it shows both versions, the release notes and the differences between what the
-current and the new binary would do per instance (`cvctl plan`). Without differences it asks `y/N`
-(`--yes` answers it). With differences, or when the comparison failed, you must type the target version;
-`--yes` alone is not enough, it also needs `--accept-changes`. Without a terminal and those options it
-fails with `E_UPGRADE_CONFIRM` and installs nothing. `--check` shows everything and exits. With `--json`
-there are no questions.
+current and the new binary would do per instance (`cvctl plan`). To get them, the downloaded binary,
+once its checksum matches, runs as root before any confirmation, even with `--check`. The checksum
+catches a corrupt download, not a compromised release.
 
-The host notifier gets `upgraded vA -> vB` (`info`), or an `error` notice if the install failed. A
-notifier failure is logged and does not fail the upgrade.
+- `--version vX.Y.Z` installs that release instead of the latest; it is the only way to go back to an
+  older version, and to upgrade a development build.
+- `--check` shows everything and exits without installing.
+- `--yes` answers the `y/N` question asked when there are no differences.
+- `--accept-changes`, together with `--yes`, also accepts differences. With differences, or when the
+  comparison failed, you must otherwise type the target version; `--yes` alone is not enough.
+
+Without a terminal and those options it fails with `E_UPGRADE_CONFIRM` and installs nothing. With
+`--json` there are no questions.
+
+Releases come from `Codeavers/cvctl`; set `CVCTL_UPGRADE_REPO` for a fork. `sudo` may drop that variable
+from the environment, and then the default repository is used without warning: pass it with
+`sudo env CVCTL_UPGRADE_REPO=owner/repo cvctl upgrade`, or allow it with `env_keep` in sudoers.
+
+The host notifier gets `upgraded vA -> vB` (`info`), with a note if the agent was not started, or an
+`error` notice if the install failed. A notifier failure is logged and does not fail the upgrade.
 
 ## Deploy strategy
 

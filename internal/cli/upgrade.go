@@ -128,7 +128,7 @@ func newUpgradeCmd(current string) *cobra.Command {
 		Use:   "upgrade",
 		Short: "Upgrade cvctl to the latest release (or --version)",
 		Example: `  sudo cvctl upgrade
-  cvctl upgrade --check
+  sudo cvctl upgrade --check
   sudo cvctl upgrade --version v0.8.2 --yes --accept-changes`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {

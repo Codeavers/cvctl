@@ -285,6 +285,50 @@ func TestUpgradePlanFailedStillShowsChanges(t *testing.T) {
 	}
 }
 
+func TestUpgradeCheckJSONInstallsNothing(t *testing.T) {
+	f := newUpFixture(t, upPlanB)
+	code, out, errb := runUpgrade(t, "", "--check", "--json")
+	if code != 0 {
+		t.Fatalf("code %d: %s", code, errb)
+	}
+	var doc struct {
+		OK   bool          `json:"ok"`
+		Data upgradeReport `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("not json: %q", out)
+	}
+	rep := doc.Data
+	if !doc.OK || rep.From != "v0.8.2" || rep.To != upNew || rep.Installed || rep.PlanFailed || rep.UpToDate {
+		t.Fatalf("report: %+v", doc)
+	}
+	want := upgradeChange{Path: "instances.cute.data.media.backup", From: "volume", To: "none"}
+	if len(rep.Changes) != 1 || rep.Changes[0] != want {
+		t.Fatalf("changes: %+v", rep.Changes)
+	}
+	if f.installed(t) != "old binary" || len(f.notif.msgs) != 0 {
+		t.Fatalf("installed %q notices %d", f.installed(t), len(f.notif.msgs))
+	}
+	for _, c := range f.run.Calls {
+		if strings.HasPrefix(c.String(), "systemctl") {
+			t.Fatalf("--check touched the agent: %s", c)
+		}
+	}
+	for _, p := range []string{upTmp, host.AgentBinaryPath + ".previous"} {
+		if _, err := f.fs.Stat(p); err == nil {
+			t.Fatalf("%s left behind", p)
+		}
+	}
+}
+
+func TestUpgradeExamplesUseSudo(t *testing.T) {
+	for _, l := range strings.Split(newUpgradeCmd("v0.8.2").Example, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(l), "sudo ") {
+			t.Errorf("example without sudo: %q", l)
+		}
+	}
+}
+
 func TestUpgradeYesWithoutChanges(t *testing.T) {
 	f := newUpFixture(t, upPlanA)
 	code, _, errb := runUpgrade(t, "", "--yes")
@@ -331,6 +375,22 @@ func TestUpgradeTypedVersionConfirms(t *testing.T) {
 		t.Fatalf("y must not confirm a change: code %d", code)
 	}
 	code, _, errb := runUpgrade(t, upNew+"\n")
+	if code != 0 || f.installed(t) != "new binary" {
+		t.Fatalf("typed version must confirm: code %d: %s", code, errb)
+	}
+}
+
+func TestUpgradeTerminalYesWithChangesStillNeedsTypedVersion(t *testing.T) {
+	f := newUpFixture(t, upPlanB)
+	f.tty = true
+	code, _, errb := runUpgrade(t, "y\n", "--yes")
+	if code == 0 || f.installed(t) != "old binary" {
+		t.Fatalf("--yes must not confirm a change: code %d installed %q", code, f.installed(t))
+	}
+	if !strings.Contains(errb, "Escribe "+upNew) {
+		t.Fatalf("prompt lacks the version: %q", errb)
+	}
+	code, _, errb = runUpgrade(t, upNew+"\n", "--yes")
 	if code != 0 || f.installed(t) != "new binary" {
 		t.Fatalf("typed version must confirm: code %d: %s", code, errb)
 	}
