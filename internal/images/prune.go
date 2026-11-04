@@ -23,6 +23,8 @@ type Item struct {
 
 type Pruner struct{ Run sys.Runner }
 
+var dockerEnv = []string{"DOCKER_CONFIG=/var/lib/cvctl/docker"}
+
 type listed struct {
 	Repository string
 	Digest     string
@@ -34,7 +36,7 @@ type listed struct {
 // Removal is by repo@digest without --force: Docker refuses an image in use,
 // which is expected and recorded, not an error.
 func (p Pruner) Prune(ctx context.Context, plan Plan, dryRun bool) ([]Item, error) {
-	res, err := p.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"image", "ls", "--digests", "--format", "{{json .}}"}})
+	res, err := p.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"image", "ls", "--digests", "--format", "{{json .}}"}, Env: dockerEnv})
 	if err != nil {
 		return nil, fmt.Errorf("listing images: %w", err)
 	}
@@ -68,7 +70,7 @@ func (p Pruner) Prune(ctx context.Context, plan Plan, dryRun bool) ([]Item, erro
 		seen[ref] = true
 		it := Item{Ref: ref, Size: parseSize(l.Size)}
 		if !dryRun {
-			r, err := p.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"image", "rm", ref}})
+			r, err := p.Run.Run(ctx, sys.Cmd{Name: "docker", Args: []string{"image", "rm", ref}, Env: dockerEnv})
 			switch {
 			case err != nil:
 				it.Reason = err.Error()

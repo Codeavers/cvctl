@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/envspec"
 	"github.com/codeavers/cvctl/internal/hostcfg"
+	"github.com/codeavers/cvctl/internal/images"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/objstore"
@@ -107,6 +109,11 @@ type Deployer struct {
 	// Sleep waits for the pinned route to settle in a blue-green swap; nil
 	// sleeps for real.
 	Sleep func(ctx context.Context, d time.Duration) error
+	// Images removes surplus images after a deploy; nil means no cleanup.
+	Images *images.Pruner
+	// Log receives failures that must not change a result; nil is stderr,
+	// which unattended runs send to the journal.
+	Log io.Writer
 }
 
 // traefikContainer is the host proxy container; it joins each instance's edge
@@ -1210,6 +1217,10 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			BlueGreen: swapped,
 		}); err != nil {
 			okErrs = append(okErrs, err)
+		}
+		// The cleanup trusts what is on disk, which a failed write left stale.
+		if len(okErrs) == 0 {
+			d.pruneImages(ctx, inst)
 		}
 
 		return Result{
