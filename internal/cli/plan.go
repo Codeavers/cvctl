@@ -2,14 +2,19 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/codeavers/cvctl/internal/contract"
+	"github.com/codeavers/cvctl/internal/envspec"
 	"github.com/codeavers/cvctl/internal/instance"
+	"github.com/codeavers/cvctl/internal/output"
+	"github.com/codeavers/cvctl/kinds"
 )
 
 const planSchema = 1
@@ -52,6 +57,9 @@ type planInstance struct {
 	Hooks    map[string]int      `json:"hooks,omitempty"`
 	Apps     map[string]planApp  `json:"apps,omitempty"`
 	Data     map[string]planData `json:"data,omitempty"`
+	// Issues lists the codes a deploy would reject the instance with. Messages
+	// quote decision values, so they never appear here.
+	Issues []string `json:"issues,omitempty"`
 	// Error is set when the instance cannot be read; the other fields are then partial.
 	Error string `json:"error,omitempty"`
 }
@@ -107,7 +115,8 @@ func (e *OpsEnv) planInstance(inst string) planInstance {
 	if infraPath == "" {
 		infraPath = "."
 	}
-	p, err := contract.Load(filepath.Join(dir, "infra", infraPath), cat)
+	infraDir := filepath.Join(dir, "infra", infraPath)
+	p, err := contract.Load(infraDir, cat)
 	if err != nil {
 		pi.Error = errText(err)
 		return pi
@@ -146,7 +155,30 @@ func (e *OpsEnv) planInstance(inst string) planInstance {
 		}
 		pi.Data[ds.Name] = pd
 	}
+	pi.Issues = planIssues(infraDir, p, d, cat)
 	return pi
+}
+
+// planIssues runs the checks of a deploy. Repeated codes are kept: a version
+// that adds a finding under a code already listed must still differ. Digests
+// come from the desired state at deploy time, not from cvctl.env.
+func planIssues(infraDir string, p *contract.Project, d *instance.Decisions, cat kinds.Catalog) []string {
+	var codes []string
+	spec, err := envspec.Load(filepath.Join(infraDir, "env.spec.yml"))
+	if err != nil {
+		code := "E_ENVSPEC_INVALID"
+		var oe *output.Error
+		if errors.As(err, &oe) {
+			code = oe.Code
+		}
+		codes = append(codes, code)
+	}
+	issues := append(contract.Validate(p, cat, spec), instance.Check(instance.WithPlaceholderDigests(d, p), p, cat)...)
+	for _, iss := range issues {
+		codes = append(codes, iss.Code)
+	}
+	slices.Sort(codes)
+	return codes
 }
 
 func stripDigest(image string) string {

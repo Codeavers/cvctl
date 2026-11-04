@@ -75,7 +75,9 @@ whether it is paused. An instance whose contract cannot be read is listed with t
 `cvctl plan [--json]` describes what this binary would do for each instance, from its `cvctl.env`,
 installed contract and embedded `kinds` catalog (read-only, no network, no docker). Per instance:
 `env`, `strategy`, `apps` (image without digest, exposed port, domain), `data` (`kind`, `version`,
-`mode`, `backup`, buckets), `health` and hook counts. The document has a `schema` number, sorted
+`mode`, `backup`, buckets), `health`, hook counts and `issues`, the sorted codes of the contract and
+decision checks a deploy would fail on (codes only, omitted when empty; app digests are not required,
+because a deploy gets them from the desired state). The document has a `schema` number, sorted
 keys and no secrets (no `app.env` values or `cvctl.env` credentials), so two runs of the same
 binary are byte-equal and two versions can be diffed. An unreadable instance appears with `error`.
 
