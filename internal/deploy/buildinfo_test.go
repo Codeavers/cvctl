@@ -46,13 +46,18 @@ func (f *fakeLabels) callCount() int {
 	return len(f.calls)
 }
 
-const twoAppsCompose = `services:
+const twoAppsCompose = `x-cvctl:
+  health: { service: api, http: /health, timeout: 30s }
+
+services:
   api:
     image: ghcr.io/org/project-api
     labels: { cvctl.role: app, cvctl.expose: "3000" }
+    deploy: { resources: { limits: { memory: 512m } } }
   web:
     image: ghcr.io/org/project-web
     labels: { cvctl.role: app, cvctl.expose: "3001" }
+    deploy: { resources: { limits: { memory: 512m } } }
 `
 
 const twoAppsEnv = `CVCTL_INSTANCE=demo-dev
@@ -277,5 +282,41 @@ func TestDeployInfoNilLabelsReader(t *testing.T) {
 	info := rig.deployer.deployInfo(context.Background(), "demo-dev", &state.State{}, desiredOf("sha256:a1", "sha256:b1"), "info")
 	if len(info.Builds) != 0 || len(info.Changed) != 2 || !strings.HasPrefix(info.AppURL, "https://") {
 		t.Fatalf("info = %+v", info)
+	}
+}
+
+func TestDefaultLabelTimeout(t *testing.T) {
+	if labelTimeout != 5*time.Second {
+		t.Fatalf("labelTimeout = %s, want 5s", labelTimeout)
+	}
+}
+
+func TestDeployOKNoticeCarriesChangedBuilds(t *testing.T) {
+	rig, fl := twoAppsRig(t)
+	fl.labels["ghcr.io/org/project-web"] = map[string]string{"cvctl.commit": "abc1234", "cvctl.pr": "7"}
+	digest := func(c string) string { return "sha256:" + strings.Repeat(c, 64) }
+	cur := desiredOf(digest("a"), digest("b"))
+	cur.InfraCommit = strings.Repeat("0", 40)
+	if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusOK, Current: &cur}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := desiredOf(digest("a"), digest("c"))
+	want.InfraCommit = strings.Repeat("1", 40)
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != state.StatusOK {
+		t.Fatalf("result = %+v", res)
+	}
+
+	m := lastMessage(t, rig.notifier)
+	if !reflect.DeepEqual(m.Deploy.Changed, []string{"web"}) {
+		t.Fatalf("Changed = %v", m.Deploy.Changed)
+	}
+	wantBuilds := []notify.Build{{Service: "web", Commit: "abc1234", PR: "7"}}
+	if !reflect.DeepEqual(m.Deploy.Builds, wantBuilds) {
+		t.Fatalf("Builds = %+v", m.Deploy.Builds)
 	}
 }
