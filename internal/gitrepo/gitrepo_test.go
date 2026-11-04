@@ -622,6 +622,9 @@ func TestEUIDZeroRunsSetprivAndAddsHomeEnv(t *testing.T) {
 	if cloneCall.Name != "setpriv" {
 		t.Fatalf("expected command name setpriv, got %s", cloneCall.Name)
 	}
+	if cloneCall.Dir != "/" {
+		t.Fatalf("clone runs in %q; deployer may not be able to enter the caller's cwd", cloneCall.Dir)
+	}
 	expectedPrefix := []string{"--reuid=deployer", "--regid=deploy", "--init-groups", "--", "git", "clone"}
 	if !slices.Equal(cloneCall.Args[:len(expectedPrefix)], expectedPrefix) {
 		t.Fatalf("expected args to start with %v, got %v", expectedPrefix, cloneCall.Args)

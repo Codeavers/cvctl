@@ -15,6 +15,8 @@ type Cmd struct {
 	Args  []string
 	Stdin []byte
 	Env   []string
+	// Dir is the working directory; empty means the caller's.
+	Dir string
 	// Stdout, when set, receives the process output instead of Result.Stdout.
 	Stdout io.Writer
 	// Inherit attaches the process to the caller's terminal (stdin and stderr);
