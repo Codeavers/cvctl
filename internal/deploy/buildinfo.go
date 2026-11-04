@@ -23,12 +23,14 @@ type labelResult struct {
 	labels map[string]string
 }
 
+func historyCmd(inst string) string { return "sudo cvctl history " + inst }
+
 // deployInfo gathers what a deploy notice shows besides the result. It never
 // fails: whatever cannot be read is left out.
 func (d *Deployer) deployInfo(ctx context.Context, inst string, st *state.State, want state.Desired, level string) *notify.Deploy {
 	info := &notify.Deploy{}
 	if level != "info" {
-		info.Logs = "sudo cvctl history " + inst
+		info.Logs = historyCmd(inst)
 	}
 	for svc, dig := range want.Digests {
 		if st == nil || st.Current == nil || st.Current.Digests[svc] != dig {

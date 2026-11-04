@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/state"
+	"github.com/codeavers/cvctl/internal/sys"
 )
 
 type labelCall struct{ image, digest string }
@@ -318,5 +320,43 @@ func TestDeployOKNoticeCarriesChangedBuilds(t *testing.T) {
 	wantBuilds := []notify.Build{{Service: "web", Commit: "abc1234", PR: "7"}}
 	if !reflect.DeepEqual(m.Deploy.Builds, wantBuilds) {
 		t.Fatalf("Builds = %+v", m.Deploy.Builds)
+	}
+}
+
+func TestPostDeployHookFailureReadsLabelsOnce(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	fl := &fakeLabels{labels: map[string]map[string]string{"ghcr.io/org/project-api": {"cvctl.pr": "7"}}}
+	rig.deployer.Labels = fl
+	rig.compose.failHook["api:node dist/warmup.js"] = struct {
+		res sys.Result
+		err error
+	}{res: sys.Result{ExitCode: 1, Stderr: []byte("boom")}, err: errors.New("exit 1")}
+
+	if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := fl.callCount(); n != 1 {
+		t.Fatalf("label reads = %d, want 1", n)
+	}
+	rig.notifier.mu.Lock()
+	defer rig.notifier.mu.Unlock()
+	if len(rig.notifier.messages) != 2 {
+		t.Fatalf("messages = %+v", rig.notifier.messages)
+	}
+	warn, ok := rig.notifier.messages[0], rig.notifier.messages[1]
+	if warn.Level != "warn" || warn.Deploy.Logs != "sudo cvctl history demo-dev" {
+		t.Fatalf("warn notice = %+v, %+v", warn, warn.Deploy)
+	}
+	if ok.Level != "info" || ok.Deploy.Logs != "" {
+		t.Fatalf("OK notice = %+v, %+v", ok, ok.Deploy)
+	}
+	same := *warn.Deploy
+	same.Logs = ""
+	if !reflect.DeepEqual(same, *ok.Deploy) {
+		t.Fatalf("notices differ beyond Logs: %+v vs %+v", warn.Deploy, ok.Deploy)
+	}
+	if len(ok.Deploy.Builds) != 1 {
+		t.Fatalf("Builds = %+v", ok.Deploy.Builds)
 	}
 }

@@ -1136,6 +1136,10 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 
 	if upErr == nil && healthErr == nil {
+		// One read serves the hook and OK notices: a slow registry must not
+		// delay the deploy once per notice.
+		okInfo := d.deployInfo(ctx, inst, st, want, "info")
+
 		// Post-deploy hooks
 		for _, hook := range p.X.Hooks.PostDeploy {
 			hookCtx, hookCancel := withStepTimeout(ctx, d.hookTimeout(hook), "post-deploy hook "+hook.Service)
@@ -1153,6 +1157,8 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 					rawHook = hErr.Error()
 				}
 				redactedHook := lastLines(redact(rawHook, secrets), 20)
+				hookInfo := *okInfo
+				hookInfo.Logs = historyCmd(inst)
 				_ = d.notifier().Send(ctx, notify.Message{
 					Host:    d.hostName(),
 					Level:   "warn",
@@ -1160,7 +1166,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 					Text:    fmt.Sprintf("post-deploy hook failed: %s", redactedHook),
 					Project: inst,
 					Status:  "OK, post-deploy hook failed",
-					Deploy:  d.deployInfo(ctx, inst, st, want, "warn"),
+					Deploy:  &hookInfo,
 				})
 			}
 		}
@@ -1173,7 +1179,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			Text:    fmt.Sprintf("%s %s deployed successfully", revWord(want), RevShort(want)),
 			Project: inst,
 			Status:  "OK, deployed in " + d.clock().Sub(now).Round(time.Second).String(),
-			Deploy:  d.deployInfo(ctx, inst, st, want, "info"),
+			Deploy:  okInfo,
 		})
 
 		st.Previous = st.Current
