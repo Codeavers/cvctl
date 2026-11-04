@@ -101,6 +101,11 @@ each hook 15m (`CVCTL_TIMEOUT_HOOK`; `x-cvctl.hooks[].timeout` can only lower it
 Exceeding one fails with `E_TIMEOUT`. Fetch, pull and deploy timeouts are retried on the next
 cycle; a hook timeout fails that desired state until it changes.
 
+Traefik's `readTimeout` (how long a request body may take to arrive) is Traefik's default, 60s,
+unless `CVCTL_TRAEFIK_READ_TIMEOUT` sets it (e.g. `15m` for large uploads). It applies to the
+`web` and `websecure` entrypoints; re-run `cvctl init` to apply it. Traefik's access log is JSON
+without `RequestPath`, since paths can carry tokens.
+
 ## Upgrading a host to v0.7
 
 Requires Docker Engine 28 or later (`E_DOCKER_TOO_OLD`). Instance names containing `--` must be
@@ -273,6 +278,11 @@ restore them manually with `wal-g` using that prefix; they are never pruned. The
 source of truth: every new generation is numbered above the highest one in the bucket, and
 `cvctl project restore` on a new host restores the newest generation holding a base backup even
 when the secrets bundle names an older one (it warns). Re-run `cvctl secrets export` after a restore.
+
+## Development
+
+Checks run locally before a push, not on pull requests. Enable the pre-push hook once per clone:
+`git config core.hooksPath .githooks`. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
