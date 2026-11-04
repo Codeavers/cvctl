@@ -447,3 +447,22 @@ func TestFromHostLoggedReportsConfigError(t *testing.T) {
 		t.Fatalf("disabled notifications logged %q", buf.String())
 	}
 }
+
+func TestSendSurvivesCancelledContext(t *testing.T) {
+	posts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts++
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	n := notify.NewTelegram("t", "1", "", srv.URL)
+	if err := n.Send(ctx, notify.Message{Level: "error", Title: "x"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if posts != 1 {
+		t.Fatalf("posts = %d, want 1", posts)
+	}
+}

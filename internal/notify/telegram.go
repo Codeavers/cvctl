@@ -81,6 +81,10 @@ func NewTelegram(token, chatID, threadID, baseURL string) Notifier {
 }
 
 func (t *telegramNotifier) Send(ctx context.Context, m Message) error {
+	// A failure notice is most needed after a deploy timeout or shutdown, when
+	// ctx is already dead; the client timeout bounds each POST instead.
+	ctx = context.WithoutCancel(ctx)
+
 	var threadIDInt *int
 	if t.threadID != "" {
 		parsed, err := strconv.Atoi(t.threadID)
