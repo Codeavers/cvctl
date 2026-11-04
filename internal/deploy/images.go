@@ -30,17 +30,10 @@ func (d *Deployer) pruneImages(ctx context.Context, inst string) {
 }
 
 func (d *Deployer) removeSurplusImages(ctx context.Context, inst string) error {
-	all, err := d.readImageInstances()
+	plan, err := d.ImagePlan(inst)
 	if err != nil {
 		return err
 	}
-	plan := images.Decide(all, images.KeepPrevious)
-	i := slices.IndexFunc(all, func(in images.Instance) bool { return in.Name == inst })
-	if i < 0 {
-		return fmt.Errorf("instance %s not found", inst)
-	}
-	// Every instance feeds Keep, but only inst's own digests may go.
-	plan.Candidates = images.Decide(all[i:i+1], images.KeepPrevious).Candidates
 	items, err := d.Images.Prune(ctx, plan, false)
 	d.logPruned(inst, items)
 	if err != nil {
@@ -48,6 +41,26 @@ func (d *Deployer) removeSurplusImages(ctx context.Context, inst string) error {
 	}
 	// Prune records a failed removal per image, which hides an expired context.
 	return ctx.Err()
+}
+
+// ImagePlan applies the cleanup rules to every instance. Keep is host-wide;
+// a non-empty only narrows Candidates to that instance's own digests.
+func (d *Deployer) ImagePlan(only string) (images.Plan, error) {
+	all, err := d.readImageInstances()
+	if err != nil {
+		return images.Plan{}, err
+	}
+	plan := images.Decide(all, images.KeepPrevious)
+	if only == "" {
+		return plan, nil
+	}
+	i := slices.IndexFunc(all, func(in images.Instance) bool { return in.Name == only })
+	if i < 0 {
+		return images.Plan{}, fmt.Errorf("instance %s not found", only)
+	}
+	// Every instance feeds Keep, but only the named one's digests may go.
+	plan.Candidates = images.Decide(all[i:i+1], images.KeepPrevious).Candidates
+	return plan, nil
 }
 
 // logPruned leaves a trace of every irreversible removal. Images in use stay

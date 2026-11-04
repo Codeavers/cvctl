@@ -301,6 +301,14 @@ source of truth: every new generation is numbered above the highest one in the b
 `cvctl project restore` on a new host restores the newest generation holding a base backup even
 when the secrets bundle names an older one (it warns). Re-run `cvctl secrets export` after a restore.
 
+## images prune
+
+`sudo cvctl images prune [--dry-run] [--instance <inst>]` removes the images that deploys left behind. Per service it keeps the current digest, the previous one and the last two earlier versions that really ran, plus every digest of an instance that is deploying or has no state yet. After each successful deploy the same cleanup runs on its own, so the command is mostly for hosts that already hold many images.
+
+Only images whose digest cvctl recorded in an instance's history are touched; other images on the host are never listed or removed. Images in use by a container are skipped (Docker refuses them). `--instance` limits what is removed to that instance's images, but the keep list still covers every instance. If any instance's state cannot be read, nothing is removed.
+
+On a host with many images run `--dry-run` first: it lists each image with its size and the reason, plus the total, without removing anything.
+
 ## Development
 
 Checks run locally before a push, not on pull requests. Enable the pre-push hook once per clone:
