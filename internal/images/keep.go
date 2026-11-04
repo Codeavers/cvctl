@@ -3,6 +3,9 @@ package images
 
 import "github.com/codeavers/cvctl/internal/state"
 
+// KeepPrevious is how many earlier digests each service keeps.
+const KeepPrevious = 2
+
 // Instance is one deployed instance: its state and its history.
 // Events must be newest first, the order state.Store.History returns.
 type Instance struct {

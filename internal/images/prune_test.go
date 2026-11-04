@@ -2,6 +2,7 @@ package images
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -110,5 +111,47 @@ func TestPruneListFailure(t *testing.T) {
 	r.On(lsCmd, sys.Result{ExitCode: 1, Stderr: []byte("daemon down")})
 	if _, err := (Pruner{Run: r}).Prune(context.Background(), plan(), false); err == nil {
 		t.Fatal("want error")
+	}
+}
+
+func TestPruneMarksOnlyContainerConflictsAsInUse(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+		inUse  bool
+	}{
+		{"stopped container", `Error response from daemon: conflict: unable to remove repository reference "r" (must force) - container 12 is using its referenced image 34`, true},
+		{"running container", `Error response from daemon: conflict: unable to delete 34 (cannot be forced) - image is being used by running container 12`, true},
+		{"child images", `Error response from daemon: conflict: unable to delete 34 (cannot be forced) - image has dependent child images`, false},
+		{"daemon down", `Cannot connect to the Docker daemon at unix:///var/run/docker.sock`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &systest.Runner{}
+			r.On(lsCmd, listing(row("repo", "1", dA, "1MB")))
+			r.On("docker image rm repo@"+dA, sys.Result{ExitCode: 1, Stderr: []byte(tc.stderr)})
+
+			items, err := Pruner{Run: r}.Prune(context.Background(), Plan{Candidates: map[string]bool{dA: true}}, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(items) != 1 || items[0].Removed || items[0].InUse != tc.inUse || items[0].Reason != tc.stderr {
+				t.Fatalf("items = %+v, want InUse %v", items, tc.inUse)
+			}
+		})
+	}
+}
+
+func TestPruneExecFailureIsNotInUse(t *testing.T) {
+	r := &systest.Runner{}
+	r.On(lsCmd, listing(row("repo", "1", dA, "1MB")))
+	r.OnError("docker image rm repo@"+dA, errors.New("conflict with container runtime"))
+
+	items, err := Pruner{Run: r}.Prune(context.Background(), Plan{Candidates: map[string]bool{dA: true}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].InUse || items[0].Reason == "" {
+		t.Fatalf("items = %+v", items)
 	}
 }

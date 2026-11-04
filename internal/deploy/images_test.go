@@ -160,8 +160,38 @@ func TestDeployPrunesAfterSuccess(t *testing.T) {
 			t.Fatalf("%s runs without the host docker config: %v", c, c.Env)
 		}
 	}
-	if log.Len() != 0 {
-		t.Fatalf("unexpected log: %s", log)
+	for _, ref := range imageRefs("a", "c") {
+		if !strings.Contains(log.String(), "removed "+ref) {
+			t.Fatalf("removal of %s not logged: %q", ref, log)
+		}
+	}
+}
+
+func TestPruneLogsRejectionsExceptImagesInUse(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	seedInstance(t, rig.store, "demo-dev", "9", "a", "b", "c", "d", "e")
+	run, log := usePruner(rig, "9", "a", "b", "c")
+	rm := "docker image rm "
+	run.On(rm+imageRefs("a")[0], sys.Result{})
+	run.On(rm+imageRefs("b")[0], sys.Result{ExitCode: 1, Stderr: []byte(
+		`Error response from daemon: conflict: unable to remove repository reference "x" (must force) - container 1234 is using its referenced image 5678`)})
+	run.On(rm+imageRefs("c")[0], sys.Result{ExitCode: 1, Stderr: []byte("Cannot connect to the Docker daemon")})
+	run.OnError(rm+imageRefs("9")[0], errors.New("exec: docker not found"))
+
+	deployOK(t, rig)
+
+	out := log.String()
+	for _, want := range []string{
+		"removed " + imageRefs("a")[0],
+		imageRefs("c")[0] + ": Cannot connect to the Docker daemon",
+		imageRefs("9")[0] + ": exec: docker not found",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log lacks %q: %q", want, out)
+		}
+	}
+	if strings.Contains(out, imageRefs("b")[0]) {
+		t.Fatalf("an image in use must stay quiet: %q", out)
 	}
 }
 

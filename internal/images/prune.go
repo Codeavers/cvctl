@@ -13,11 +13,13 @@ import (
 )
 
 // Item is one repo@digest reference considered for removal. In a dry run
-// Removed is false and Reason is empty.
+// Removed is false and Reason is empty. InUse marks a rejection because a
+// container uses the image, the one failure that is routine.
 type Item struct {
 	Ref     string
 	Size    int64
 	Removed bool
+	InUse   bool
 	Reason  string
 }
 
@@ -76,6 +78,7 @@ func (p Pruner) Prune(ctx context.Context, plan Plan, dryRun bool) ([]Item, erro
 				it.Reason = err.Error()
 			case r.ExitCode != 0:
 				it.Reason = strings.TrimSpace(string(r.Stderr))
+				it.InUse = usedByContainer(it.Reason)
 			default:
 				it.Removed = true
 			}
@@ -86,6 +89,21 @@ func (p Pruner) Prune(ctx context.Context, plan Plan, dryRun bool) ([]Item, erro
 		return items, fmt.Errorf("reading image list: %w", err)
 	}
 	return items, nil
+}
+
+// usedByContainer matches the daemon's wording, which has no stable error code
+// in the CLI output. Other conflicts, such as child images, are not routine.
+func usedByContainer(stderr string) bool {
+	for _, s := range []string{
+		"is using its referenced image",
+		"is being used by running container",
+		"is being used by stopped container",
+	} {
+		if strings.Contains(stderr, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseSize reads Docker's decimal units ("12.5MB"); 0 when unparseable.

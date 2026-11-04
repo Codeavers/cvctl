@@ -14,11 +14,7 @@ import (
 	"github.com/codeavers/cvctl/internal/images"
 )
 
-const (
-	// keepPreviousImages is how many earlier digests a service keeps.
-	keepPreviousImages = 2
-	imagePruneTimeout  = 2 * time.Minute
-)
+const imagePruneTimeout = 2 * time.Minute
 
 // pruneImages runs after the deploy is recorded, so it never changes the
 // deploy's result: disk space is not worth failing a good deploy over.
@@ -38,18 +34,33 @@ func (d *Deployer) removeSurplusImages(ctx context.Context, inst string) error {
 	if err != nil {
 		return err
 	}
-	plan := images.Decide(all, keepPreviousImages)
+	plan := images.Decide(all, images.KeepPrevious)
 	i := slices.IndexFunc(all, func(in images.Instance) bool { return in.Name == inst })
 	if i < 0 {
 		return fmt.Errorf("instance %s not found", inst)
 	}
 	// Every instance feeds Keep, but only inst's own digests may go.
-	plan.Candidates = images.Decide(all[i:i+1], keepPreviousImages).Candidates
-	if _, err := d.Images.Prune(ctx, plan, false); err != nil {
+	plan.Candidates = images.Decide(all[i:i+1], images.KeepPrevious).Candidates
+	items, err := d.Images.Prune(ctx, plan, false)
+	d.logPruned(inst, items)
+	if err != nil {
 		return err
 	}
 	// Prune records a failed removal per image, which hides an expired context.
 	return ctx.Err()
+}
+
+// logPruned leaves a trace of every irreversible removal. Images in use stay
+// quiet: stopped containers make them a normal result of most deploys.
+func (d *Deployer) logPruned(inst string, items []images.Item) {
+	for _, it := range items {
+		switch {
+		case it.Removed:
+			fmt.Fprintf(d.log(), "images: %s: removed %s\n", inst, it.Ref)
+		case !it.InUse:
+			fmt.Fprintf(d.log(), "images: %s: not removed: %s: %s\n", inst, it.Ref, firstLine(it.Reason))
+		}
+	}
 }
 
 // readImageInstances reads without the other instances' locks: taking them
