@@ -44,6 +44,7 @@ type fakeCompose struct {
 	invocations []composeCall
 	failConfig  error
 	failPull    error
+	failEnsure  map[string]error
 	failUpData  error
 	failHook    map[string]struct {
 		res sys.Result
@@ -78,6 +79,13 @@ func (b *boundCompose) Pull(_ context.Context, services ...string) error {
 	b.fake.calls = append(b.fake.calls, "pull:"+strings.Join(services, ","))
 	b.fake.invocations = append(b.fake.invocations, composeCall{op: "pull", override: b.override, envFile: b.envFile, services: services})
 	return b.fake.failPull
+}
+
+func (b *boundCompose) EnsureImage(_ context.Context, ref string) error {
+	b.fake.mu.Lock()
+	defer b.fake.mu.Unlock()
+	b.fake.calls = append(b.fake.calls, "ensure:"+ref)
+	return b.fake.failEnsure[ref]
 }
 
 func (b *boundCompose) UpData(_ context.Context, services []string, _ time.Duration) error {
@@ -2082,7 +2090,7 @@ func TestExecuteSwapEmptyEnvAppEnvUntouched(t *testing.T) {
 		t.Fatalf("write app.env: %v", err)
 	}
 
-	err := rig.deployer.executeSwap(context.Background(), "demo-dev", target, map[string]string{}, false)
+	err := rig.deployer.executeSwap(context.Background(), "demo-dev", target, map[string]string{}, false, false)
 	if err != nil {
 		t.Fatalf("executeSwap: %v", err)
 	}

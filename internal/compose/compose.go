@@ -119,6 +119,23 @@ func (p Project) Pull(ctx context.Context, services ...string) error {
 	return nil
 }
 
+// EnsureImage pulls ref unless the host already has it, so an image on disk
+// does not depend on the registry. It takes a full image reference because the
+// generated override of that version may not be on disk yet.
+func (p Project) EnsureImage(ctx context.Context, ref string) error {
+	env := p.Cmd().Env
+	inspect := sys.Cmd{Name: "docker", Args: []string{"image", "inspect", "--format", "{{.Id}}", ref}, Env: env}
+	if res, err := p.Run.Run(ctx, inspect); err == nil && res.ExitCode == 0 {
+		return nil
+	}
+	cmd := sys.Cmd{Name: "docker", Args: []string{"pull", ref}, Env: env}
+	res, err := p.Run.Run(ctx, cmd)
+	if err != nil || res.ExitCode != 0 {
+		return p.composeErr(cmd, res, err)
+	}
+	return nil
+}
+
 // DefaultWaitTimeout is the --wait-timeout when the caller gives none: the
 // default health timeout (30s) plus 2 minutes.
 const DefaultWaitTimeout = 150 * time.Second

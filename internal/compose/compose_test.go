@@ -447,3 +447,56 @@ func TestBlueGreenPrimitivesArgv(t *testing.T) {
 		t.Fatalf("expected E_COMPOSE_FAILED, got %v", err)
 	}
 }
+
+const testImageRef = "ghcr.io/acme/api@sha256:aaaa"
+
+func ensureCmds() (inspect, pull string) {
+	return "docker image inspect --format {{.Id}} " + testImageRef, "docker pull " + testImageRef
+}
+
+func TestEnsureImageSkipsTheRegistryWhenOnHost(t *testing.T) {
+	inspect, _ := ensureCmds()
+	runner := &systest.Runner{}
+	runner.On(inspect, sys.Result{Stdout: []byte("sha256:1\n")})
+	p := Project{Run: runner, Instance: "demo-dev", Dir: "/srv/deploy/demo-dev"}
+
+	if err := p.EnsureImage(context.Background(), testImageRef); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.Calls) != 1 || runner.Calls[0].String() != inspect {
+		t.Fatalf("calls: %+v", runner.Calls)
+	}
+}
+
+func TestEnsureImagePullsWithTheDeployCredentials(t *testing.T) {
+	inspect, pull := ensureCmds()
+	runner := &systest.Runner{}
+	runner.On(inspect, sys.Result{ExitCode: 1, Stderr: []byte("No such image")})
+	runner.On(pull, sys.Result{})
+	p := Project{Run: runner, Instance: "demo-dev", Dir: "/srv/deploy/demo-dev"}
+
+	if err := p.EnsureImage(context.Background(), testImageRef); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.Calls) != 2 || runner.Calls[1].String() != pull {
+		t.Fatalf("calls: %+v", runner.Calls)
+	}
+	for _, c := range runner.Calls {
+		if !reflect.DeepEqual(c.Env, p.Cmd("pull").Env) {
+			t.Fatalf("%s env = %v", c.String(), c.Env)
+		}
+	}
+}
+
+func TestEnsureImagePullFailure(t *testing.T) {
+	inspect, pull := ensureCmds()
+	runner := &systest.Runner{}
+	runner.On(inspect, sys.Result{ExitCode: 1})
+	runner.On(pull, sys.Result{ExitCode: 1, Stderr: []byte("manifest unknown")})
+	p := Project{Run: runner, Instance: "demo-dev", Dir: "/srv/deploy/demo-dev"}
+
+	err := p.EnsureImage(context.Background(), testImageRef)
+	if err == nil || !strings.Contains(err.Error(), "manifest unknown") {
+		t.Fatalf("err = %v", err)
+	}
+}
