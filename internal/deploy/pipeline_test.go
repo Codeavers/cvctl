@@ -8,6 +8,7 @@ import (
 	"github.com/codeavers/cvctl/internal/backup"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -3134,5 +3135,232 @@ func TestWriteRoutePinThenUnpin(t *testing.T) {
 	}
 	if m, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".*.tmp-*")); len(m) != 0 {
 		t.Fatalf("leftover temp files: %v", m)
+	}
+}
+
+func lastMessage(t *testing.T, n *fakeNotifier) notify.Message {
+	t.Helper()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if len(n.messages) == 0 {
+		t.Fatal("no notification was sent")
+	}
+	return n.messages[len(n.messages)-1]
+}
+
+func TestDeployNoticeStatus(t *testing.T) {
+	oldDesired := func() *state.Desired {
+		return &state.Desired{
+			InfraCommit: "0000000000000000000000000000000000000000",
+			Digests:     map[string]string{"api": "sha256:0000000000000000000000000000000000000000000000000000000000000000"},
+		}
+	}
+	healthFails := func(context.Context, string, string) error { return errors.New("health timeout") }
+
+	t.Run("OK", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		step := 0
+		rig.deployer.Clock = func() time.Time {
+			step++
+			return rig.fixedNow.Add(time.Duration(step-1) * 41700 * time.Millisecond)
+		}
+		if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{}); err != nil {
+			t.Fatal(err)
+		}
+		m := lastMessage(t, rig.notifier)
+		if m.Project != "demo-dev" || m.Deploy == nil {
+			t.Fatalf("project/deploy missing: %+v", m)
+		}
+		if !strings.HasPrefix(m.Status, "OK, deployed in ") || !strings.HasSuffix(m.Status, "s") {
+			t.Fatalf("Status = %q", m.Status)
+		}
+		if m.Title != "demo-dev deploy OK" {
+			t.Fatalf("Title changed: %q", m.Title)
+		}
+	})
+
+	t.Run("OKDurationRoundedToSeconds", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		calls := 0
+		rig.deployer.Clock = func() time.Time {
+			calls++
+			if calls == 1 {
+				return rig.fixedNow
+			}
+			return rig.fixedNow.Add(42400 * time.Millisecond)
+		}
+		if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{}); err != nil {
+			t.Fatal(err)
+		}
+		if got := lastMessage(t, rig.notifier).Status; got != "OK, deployed in 42s" {
+			t.Fatalf("Status = %q", got)
+		}
+	})
+
+	t.Run("HookFailed", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		rig.compose.failHook["api:node dist/warmup.js"] = struct {
+			res sys.Result
+			err error
+		}{res: sys.Result{ExitCode: 1, Stderr: []byte("boom")}, err: errors.New("exit 1")}
+		if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{}); err != nil {
+			t.Fatal(err)
+		}
+		rig.notifier.mu.Lock()
+		defer rig.notifier.mu.Unlock()
+		var found bool
+		for _, m := range rig.notifier.messages {
+			if m.Level == "warn" {
+				found = true
+				if m.Status != "OK, post-deploy hook failed" || m.Project != "demo-dev" || m.Deploy == nil {
+					t.Fatalf("hook message = %+v", m)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("no hook warning")
+		}
+	})
+
+	t.Run("FailedPermanent", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		rig.compose.failHook["api:node dist/migrate.js"] = struct {
+			res sys.Result
+			err error
+		}{res: sys.Result{ExitCode: 1, Stderr: []byte("bad")}, err: errors.New("exit 1")}
+		if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{}); err != nil {
+			t.Fatal(err)
+		}
+		m := lastMessage(t, rig.notifier)
+		if m.Status != "FAILED" || m.Project != "demo-dev" || m.Deploy == nil || m.Deploy.Logs != "sudo cvctl history demo-dev" {
+			t.Fatalf("message = %+v", m)
+		}
+	})
+
+	t.Run("FailedWillRetry", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		rig.compose.failPull = errors.New("network timeout")
+		if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{}); err != nil {
+			t.Fatal(err)
+		}
+		m := lastMessage(t, rig.notifier)
+		if m.Status != "FAILED, will retry" || m.Project != "demo-dev" || m.Deploy == nil {
+			t.Fatalf("message = %+v", m)
+		}
+	})
+
+	t.Run("Blocked", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		spec := "vars:\n  DATABASE_URL: { source: service, service: main-db }\n  API_SECRET:   { source: prompt, secret: true }\n"
+		if err := os.WriteFile(filepath.Join(rig.infraDir, "env.spec.yml"), []byte(spec), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{}); err != nil {
+			t.Fatal(err)
+		}
+		m := lastMessage(t, rig.notifier)
+		if m.Status != "BLOCKED" || m.Project != "demo-dev" || m.Deploy == nil {
+			t.Fatalf("message = %+v", m)
+		}
+	})
+
+	t.Run("RolledBack", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusOK, Current: oldDesired()}); err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		rig.deployer.Health = func(ctx context.Context, inst, override string) error {
+			n++
+			if n == 1 {
+				return errors.New("health timeout")
+			}
+			return nil
+		}
+		if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{}); err != nil {
+			t.Fatal(err)
+		}
+		m := lastMessage(t, rig.notifier)
+		if m.Status != "ROLLED BACK" || m.Title != "demo-dev deploy FAILED" || m.Deploy == nil {
+			t.Fatalf("message = %+v", m)
+		}
+	})
+
+	t.Run("FailedWithoutPreviousRelease", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		rig.deployer.Health = healthFails
+		if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{}); err != nil {
+			t.Fatal(err)
+		}
+		m := lastMessage(t, rig.notifier)
+		if m.Status != "FAILED" || m.Project != "demo-dev" || m.Deploy == nil {
+			t.Fatalf("message = %+v", m)
+		}
+	})
+
+	t.Run("RollbackFailed", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusOK, Current: oldDesired()}); err != nil {
+			t.Fatal(err)
+		}
+		rig.deployer.Health = healthFails
+		if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{}); err != nil {
+			t.Fatal(err)
+		}
+		m := lastMessage(t, rig.notifier)
+		if m.Status != "ROLLBACK FAILED" || m.Project != "demo-dev" || m.Deploy == nil {
+			t.Fatalf("message = %+v", m)
+		}
+	})
+
+	t.Run("ManualRollbackFailed", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		cur := defaultDesired()
+		if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusOK, Current: &cur, Previous: oldDesired()}); err != nil {
+			t.Fatal(err)
+		}
+		rig.deployer.Health = healthFails
+		if _, err := rig.deployer.Rollback(context.Background(), "demo-dev", nil, "cli:admin"); err != nil {
+			t.Fatal(err)
+		}
+		m := lastMessage(t, rig.notifier)
+		if m.Status != "ROLLBACK FAILED" || m.Project != "demo-dev" || m.Deploy == nil {
+			t.Fatalf("message = %+v", m)
+		}
+	})
+
+	t.Run("Paused", func(t *testing.T) {
+		rig := setupTestRig(t, "dev", "demo-dev")
+		cur := defaultDesired()
+		if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusOK, Current: &cur, Previous: oldDesired()}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rig.deployer.Rollback(context.Background(), "demo-dev", nil, "cli:admin"); err != nil {
+			t.Fatal(err)
+		}
+		m := lastMessage(t, rig.notifier)
+		if m.Status != "PAUSED" || m.Project != "demo-dev" || m.Deploy == nil {
+			t.Fatalf("message = %+v", m)
+		}
+		if !reflect.DeepEqual(m.Deploy.Changed, []string{"api"}) {
+			t.Fatalf("Changed = %v, want the service the rollback swapped", m.Deploy.Changed)
+		}
+	})
+}
+
+func TestDeployNoticeGitInstanceWithoutDigests(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	fl := &fakeLabels{}
+	rig.deployer.Labels = fl
+	want := state.Desired{InfraCommit: "1111111111111111111111111111111111111111"}
+	if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", want, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	m := lastMessage(t, rig.notifier)
+	if m.Deploy == nil || len(m.Deploy.Changed) != 0 || len(m.Deploy.Builds) != 0 {
+		t.Fatalf("Deploy = %+v", m.Deploy)
+	}
+	if fl.callCount() != 0 {
+		t.Fatalf("registry reads = %d, want 0", fl.callCount())
 	}
 }

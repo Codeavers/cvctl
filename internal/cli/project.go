@@ -77,6 +77,10 @@ var newProjectEnv = func(o projectOpts) (*project.Env, error) {
 		Notify:     notifierFor(cfg, secrets),
 	}
 	deploy.Wire(deployer, run)
+	if cfg != nil {
+		token, _ := secrets.Get("registry_token")
+		deployer.Labels = registry.NewLabels(cfg.RegistryUser, token, cfg.TokenHost(), registry.InsecureHostsFromEnv())
+	}
 
 	data := &backup.Runner{
 		Run:        run,

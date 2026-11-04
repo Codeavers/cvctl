@@ -84,11 +84,13 @@ type Deployer struct {
 	Compose    func(inst, override, envFile string) ComposeAPI
 	Repo       func(inst string) CheckoutAPI
 	Notify     notify.Notifier
-	Restore    RestorePointer
-	Host       *hostcfg.Config
-	Catalog    kinds.Catalog
-	Clock      func() time.Time
-	Health     func(ctx context.Context, inst, override string) error
+	// Labels reads image labels for deploy notices; nil means no labels.
+	Labels  registry.LabelReader
+	Restore RestorePointer
+	Host    *hostcfg.Config
+	Catalog kinds.Catalog
+	Clock   func() time.Time
+	Health  func(ctx context.Context, inst, override string) error
 	// Run executes the docker network commands; Wire sets it.
 	Run sys.Runner
 	// Contracts pulls the contract artifact of OCI-sourced instances.
@@ -469,10 +471,13 @@ func (d *Deployer) failPermanent(ctx context.Context, inst string, st *state.Sta
 		Detail: redacted,
 	}
 	_ = d.notifier().Send(ctx, notify.Message{
-		Host:  d.hostName(),
-		Level: "error",
-		Title: fmt.Sprintf("%s deploy FAILED", inst),
-		Text:  redacted,
+		Host:    d.hostName(),
+		Level:   "error",
+		Title:   fmt.Sprintf("%s deploy FAILED", inst),
+		Text:    redacted,
+		Project: inst,
+		Status:  "FAILED",
+		Deploy:  d.deployInfo(ctx, inst, st, want, "error"),
 	})
 	var errs []error
 	if err := d.Store.Save(st); err != nil {
@@ -515,10 +520,13 @@ func (d *Deployer) failTransient(ctx context.Context, inst string, st *state.Sta
 	}
 	if !repeated {
 		_ = d.notifier().Send(ctx, notify.Message{
-			Host:  d.hostName(),
-			Level: "error",
-			Title: fmt.Sprintf("%s deploy FAILED", inst),
-			Text:  detail,
+			Host:    d.hostName(),
+			Level:   "error",
+			Title:   fmt.Sprintf("%s deploy FAILED", inst),
+			Text:    detail,
+			Project: inst,
+			Status:  "FAILED, will retry",
+			Deploy:  d.deployInfo(ctx, inst, st, want, "error"),
 		})
 	}
 	var errs []error
@@ -810,10 +818,13 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			Detail:  warnText,
 		}
 		_ = d.notifier().Send(ctx, notify.Message{
-			Host:  d.hostName(),
-			Level: "warn",
-			Title: fmt.Sprintf("%s deploy BLOCKED", inst),
-			Text:  warnText,
+			Host:    d.hostName(),
+			Level:   "warn",
+			Title:   fmt.Sprintf("%s deploy BLOCKED", inst),
+			Text:    warnText,
+			Project: inst,
+			Status:  "BLOCKED",
+			Deploy:  d.deployInfo(ctx, inst, st, want, "warn"),
 		})
 
 		var errs []error
@@ -1131,20 +1142,26 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 				}
 				redactedHook := lastLines(redact(rawHook, secrets), 20)
 				_ = d.notifier().Send(ctx, notify.Message{
-					Host:  d.hostName(),
-					Level: "warn",
-					Title: fmt.Sprintf("%s deploy OK", inst),
-					Text:  fmt.Sprintf("post-deploy hook failed: %s", redactedHook),
+					Host:    d.hostName(),
+					Level:   "warn",
+					Title:   fmt.Sprintf("%s deploy OK", inst),
+					Text:    fmt.Sprintf("post-deploy hook failed: %s", redactedHook),
+					Project: inst,
+					Status:  "OK, post-deploy hook failed",
+					Deploy:  d.deployInfo(ctx, inst, st, want, "warn"),
 				})
 			}
 		}
 
 		okDetail := fmt.Sprintf("%s %s deployed", revWord(want), RevShort(want))
 		_ = d.notifier().Send(ctx, notify.Message{
-			Host:  d.hostName(),
-			Level: "info",
-			Title: fmt.Sprintf("%s deploy OK", inst),
-			Text:  fmt.Sprintf("%s %s deployed successfully", revWord(want), RevShort(want)),
+			Host:    d.hostName(),
+			Level:   "info",
+			Title:   fmt.Sprintf("%s deploy OK", inst),
+			Text:    fmt.Sprintf("%s %s deployed successfully", revWord(want), RevShort(want)),
+			Project: inst,
+			Status:  "OK, deployed in " + d.clock().Sub(now).Round(time.Second).String(),
+			Deploy:  d.deployInfo(ctx, inst, st, want, "info"),
 		})
 
 		st.Previous = st.Current
@@ -1236,10 +1253,13 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			return Result{}, err
 		}
 		_ = d.notifier().Send(ctx, notify.Message{
-			Host:  d.hostName(),
-			Level: "error",
-			Title: fmt.Sprintf("%s deploy FAILED", inst),
-			Text:  redactedLogs,
+			Host:    d.hostName(),
+			Level:   "error",
+			Title:   fmt.Sprintf("%s deploy FAILED", inst),
+			Text:    redactedLogs,
+			Project: inst,
+			Status:  "FAILED",
+			Deploy:  d.deployInfo(ctx, inst, st, want, "error"),
 		})
 
 		return Result{
@@ -1269,10 +1289,13 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 			Detail: rbRedacted,
 		}
 		_ = d.notifier().Send(ctx, notify.Message{
-			Host:  d.hostName(),
-			Level: "error",
-			Title: fmt.Sprintf("%s ROLLBACK FAILED", inst),
-			Text:  rbRedacted,
+			Host:    d.hostName(),
+			Level:   "error",
+			Title:   fmt.Sprintf("%s ROLLBACK FAILED", inst),
+			Text:    rbRedacted,
+			Project: inst,
+			Status:  "ROLLBACK FAILED",
+			Deploy:  d.deployInfo(ctx, inst, st, want, "error"),
 		})
 
 		var errs []error
@@ -1324,10 +1347,13 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 
 	_ = d.notifier().Send(ctx, notify.Message{
-		Host:  d.hostName(),
-		Level: "error",
-		Title: fmt.Sprintf("%s deploy FAILED", inst),
-		Text:  errText,
+		Host:    d.hostName(),
+		Level:   "error",
+		Title:   fmt.Sprintf("%s deploy FAILED", inst),
+		Text:    errText,
+		Project: inst,
+		Status:  "ROLLED BACK",
+		Deploy:  d.deployInfo(ctx, inst, st, want, "error"),
 	})
 
 	var errs []error

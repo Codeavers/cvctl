@@ -110,6 +110,10 @@ func newAgentCmd() *cobra.Command {
 				Catalog:    cat,
 			}
 			deploy.Wire(deployer, run)
+			if hcfg != nil {
+				token, _ := secrets.Get("registry_token")
+				deployer.Labels = registry.NewLabels(hcfg.RegistryUser, token, hcfg.TokenHost(), registry.InsecureHostsFromEnv())
+			}
 
 			notif := notify.FromHostLogged(hcfg, secrets, cmd.ErrOrStderr())
 			deployer.Notify = notif

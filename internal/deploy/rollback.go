@@ -220,10 +220,13 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 			Detail: redactedSwapErr,
 		}
 		_ = d.notifier().Send(ctx, notify.Message{
-			Host:  d.hostName(),
-			Level: "error",
-			Title: fmt.Sprintf("%s ROLLBACK FAILED", inst),
-			Text:  fmt.Sprintf("manual rollback failed: %s", redactedSwapErr),
+			Host:    d.hostName(),
+			Level:   "error",
+			Title:   fmt.Sprintf("%s ROLLBACK FAILED", inst),
+			Text:    fmt.Sprintf("manual rollback failed: %s", redactedSwapErr),
+			Project: inst,
+			Status:  "ROLLBACK FAILED",
+			Deploy:  d.deployInfo(ctx, inst, st, *target, "error"),
 		})
 
 		var errs []error
@@ -277,10 +280,13 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 		return Result{}, err
 	}
 	_ = d.notifier().Send(ctx, notify.Message{
-		Host:  d.hostName(),
-		Level: "info",
-		Title: fmt.Sprintf("%s deploy PAUSED", inst),
-		Text:  pausedReason,
+		Host:    d.hostName(),
+		Level:   "info",
+		Title:   fmt.Sprintf("%s deploy PAUSED", inst),
+		Text:    pausedReason,
+		Project: inst,
+		Status:  "PAUSED",
+		Deploy:  d.deployInfo(ctx, inst, &state.State{Current: st.Previous}, *st.Current, "info"),
 	})
 
 	return Result{
