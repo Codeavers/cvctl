@@ -111,10 +111,7 @@ func newAgentCmd() *cobra.Command {
 			}
 			deploy.Wire(deployer, run)
 
-			notif, _ := notify.FromHost(hcfg, secrets)
-			if notif == nil {
-				notif = notify.NoopNotifier{}
-			}
+			notif := notify.FromHostLogged(hcfg, secrets, cmd.ErrOrStderr())
 			deployer.Notify = notif
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)

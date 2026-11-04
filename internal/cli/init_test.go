@@ -266,3 +266,33 @@ func TestInitLockPermissionNotLocked(t *testing.T) {
 		t.Fatalf("expected errOut to contain hint 'run with sudo', got: %s", errOut)
 	}
 }
+
+func TestInitReconfigureNotify(t *testing.T) {
+	fs := systest.NewFS()
+	stubInit(t, fs, hostcfgtest.NewPrompter(t, initAnswers), true, stubStep{name: "a"})
+	if code, _, _ := run(t, "init"); code != 0 {
+		t.Fatalf("first init exit %d", code)
+	}
+
+	answers := map[string]string{"NOTIFY": "telegram", "telegram_token": "123:tok", "TELEGRAM_CHAT_ID": "-1001", "TELEGRAM_THREAD_ID": ""}
+	p := hostcfgtest.NewPrompter(t, answers)
+	stubInit(t, fs, p, true, stubStep{name: "a"})
+	if code, _, errOut := run(t, "init", "--reconfigure", "notify"); code != 0 {
+		t.Fatalf("reconfigure exit %d: %s", code, errOut)
+	}
+	b, _ := fs.ReadFile("/etc/cvctl/host.env")
+	if !strings.Contains(string(b), "CVCTL_NOTIFY=telegram") || !strings.Contains(string(b), "CVCTL_TELEGRAM_CHAT_ID=-1001") {
+		t.Fatalf("host.env: %s", b)
+	}
+	if len(p.Asked) != 4 {
+		t.Fatalf("asked %v", p.Asked)
+	}
+}
+
+func TestInitReconfigureNeedsTerminal(t *testing.T) {
+	stubInit(t, seeded(), failPrompter{t}, false, stubStep{name: "a"})
+	code, out, _ := run(t, "init", "--reconfigure", "notify", "--json")
+	if code != 1 || !strings.Contains(out, `"E_INIT_RECONFIGURE"`) {
+		t.Fatalf("code %d out %s", code, out)
+	}
+}

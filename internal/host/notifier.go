@@ -22,6 +22,16 @@ func (NotifierStep) Name() string { return "notifier" }
 
 func (NotifierStep) Check(_ context.Context, e *Env) (Plan, error) {
 	if e.Cfg == nil || e.Cfg.Notify == "" || e.Cfg.Notify == "none" {
+		// A leftover marker means the notifier was on: drop it so a later
+		// re-enable sends a new test, and restart the agent so it stops sending.
+		if _, err := e.FS.Stat(notifyMarkerPath); err == nil {
+			return Plan{
+				Changes: []string{"disable notifier and remove " + notifyMarkerPath},
+				Actions: []Action{{Kind: "notify-off", Target: notifyMarkerPath}},
+			}, nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return Plan{}, notifyFSErr(notifyMarkerPath, err)
+		}
 		return Plan{Skip: "notifications disabled (CVCTL_NOTIFY=none)"}, nil
 	}
 
@@ -51,6 +61,15 @@ func (NotifierStep) Check(_ context.Context, e *Env) (Plan, error) {
 
 func (NotifierStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 	if len(p.Actions) == 0 {
+		return "", nil
+	}
+	if p.Actions[0].Kind == "notify-off" {
+		e.NotifierCommit = func() error {
+			if err := e.FS.Remove(notifyMarkerPath); err != nil {
+				return notifyFSErr(notifyMarkerPath, err)
+			}
+			return nil
+		}
 		return "", nil
 	}
 
@@ -86,11 +105,14 @@ func (NotifierStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 	}
 	wantHash := fmt.Sprintf("%x", sha256.Sum256([]byte(token+"|"+chatID+"|"+threadID)))
 
-	if err := e.FS.MkdirAll("/var/lib/cvctl", 0o750, deployerOwner); err != nil {
-		return "", notifyFSErr("/var/lib/cvctl", err)
-	}
-	if err := e.FS.WriteFile(notifyMarkerPath, []byte(wantHash+"\n"), 0o640, deployerOwner); err != nil {
-		return "", notifyFSErr(notifyMarkerPath, err)
+	e.NotifierCommit = func() error {
+		if err := e.FS.MkdirAll("/var/lib/cvctl", 0o750, deployerOwner); err != nil {
+			return notifyFSErr("/var/lib/cvctl", err)
+		}
+		if err := e.FS.WriteFile(notifyMarkerPath, []byte(wantHash+"\n"), 0o640, deployerOwner); err != nil {
+			return notifyFSErr(notifyMarkerPath, err)
+		}
+		return nil
 	}
 
 	return "", nil

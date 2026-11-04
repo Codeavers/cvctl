@@ -5,6 +5,7 @@ package notify
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/output"
@@ -72,4 +73,39 @@ func FromHost(cfg *hostcfg.Config, secrets *hostcfg.Secrets) (Notifier, error) {
 		tg.host = cfg.HostName
 	}
 	return tg, nil
+}
+
+type loggedNotifier struct {
+	n Notifier
+	w io.Writer
+}
+
+// Logged reports failed sends to w. Callers discard Send errors so an alert
+// never fails the operation behind it; without this the failure leaves no trace.
+func Logged(n Notifier, w io.Writer) Notifier {
+	if _, ok := n.(NoopNotifier); ok || w == nil {
+		return n
+	}
+	return loggedNotifier{n: n, w: w}
+}
+
+func (l loggedNotifier) Send(ctx context.Context, m Message) error {
+	err := l.n.Send(ctx, m)
+	if err != nil {
+		fmt.Fprintf(l.w, "notify: %q not sent: %v\n", m.Title, err)
+	}
+	return err
+}
+
+// FromHostLogged is FromHost for callers that must keep running without
+// notifications: a configuration error is reported to w and yields a no-op.
+func FromHostLogged(cfg *hostcfg.Config, secrets *hostcfg.Secrets, w io.Writer) Notifier {
+	n, err := FromHost(cfg, secrets)
+	if err != nil || n == nil {
+		if err != nil && w != nil {
+			fmt.Fprintf(w, "notify: notifications disabled: %v\n", err)
+		}
+		return NoopNotifier{}
+	}
+	return Logged(n, w)
 }

@@ -108,8 +108,10 @@ func Questions() []Question {
 		q("s3_secret_key", "S3 secret key", secret, withWhen(s3)),
 		q("NOTIFY", "Notifications", withOpts("telegram", "none"), withDef(lit("none"))),
 		q("telegram_token", "Telegram bot token", secret, withWhen(tg)),
-		q("TELEGRAM_CHAT_ID", "Telegram chat id", withWhen(tg)),
-		q("TELEGRAM_THREAD_ID", "Telegram thread id (optional)", optional, withWhen(tg)),
+		q("TELEGRAM_CHAT_ID", "Telegram chat id", withWhen(tg),
+			withHelp("groups and channels are negative; from a topic link t.me/c/<id>/<thread> it is -100<id>")),
+		q("TELEGRAM_THREAD_ID", "Telegram thread id (optional)", optional, withWhen(tg),
+			withHelp("the <thread> of a topic link t.me/c/<id>/<thread>")),
 		q("REGISTRIES", "Image registries, comma-separated (empty = none)", optional, withHelp("e.g. ghcr.io/codeavers")),
 		q("REGISTRY_USER", "Registry user (empty = public images)", optional),
 		q("registry_token", "Registry token (empty = public images)", secret, optional),
@@ -124,28 +126,71 @@ func missingErr(keys []string) error {
 	}
 }
 
+// Groups are the question sets init can ask again with --reconfigure.
+var Groups = map[string][]string{
+	"notify": {"NOTIFY", "telegram_token", "TELEGRAM_CHAT_ID", "TELEGRAM_THREAD_ID"},
+}
+
 // Resolve fills what cfg and s lack. A key that already has a value is never
 // asked. Non-interactive runs take defaults and report the rest as
 // E_INIT_MISSING; optional keys are left empty.
 func Resolve(cfg *Config, s *Secrets, f Facts, p Prompter, interactive bool) error {
+	return resolve(cfg, s, f, p, interactive, nil)
+}
+
+// Reconfigure asks the questions of the named groups again, even when they
+// already have a value, then fills anything else missing like Resolve. The
+// current value is the default; an empty secret answer keeps the stored one,
+// an empty optional answer clears it.
+func Reconfigure(cfg *Config, s *Secrets, f Facts, p Prompter, groups []string) error {
+	reask := map[string]bool{}
+	for _, g := range groups {
+		keys, ok := Groups[g]
+		if !ok {
+			names := make([]string, 0, len(Groups))
+			for n := range Groups {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			return &output.Error{
+				Code:    "E_INIT_RECONFIGURE",
+				Message: "unknown group " + g,
+				Hint:    "valid groups: " + strings.Join(names, ", "),
+			}
+		}
+		for _, k := range keys {
+			reask[k] = true
+		}
+	}
+	return resolve(cfg, s, f, p, true, reask)
+}
+
+func resolve(cfg *Config, s *Secrets, f Facts, p Prompter, interactive bool, reask map[string]bool) error {
 	var missing []string
 	for _, qu := range Questions() {
 		if qu.When != nil && !qu.When(cfg) {
 			continue
 		}
+		again := reask[qu.Key]
 		if qu.Secret {
-			if _, ok := s.Get(qu.Key); ok {
+			if _, ok := s.Get(qu.Key); ok && !again {
 				continue
 			}
-		} else if cfg.Get(qu.Key) != "" {
+		} else if cfg.Get(qu.Key) != "" && !again {
 			continue
 		}
 		def := ""
-		if qu.Default != nil {
+		if !qu.Secret {
+			def = cfg.Get(qu.Key)
+		}
+		if def == "" && qu.Default != nil {
 			def = qu.Default(cfg, f)
 		}
 		ans := def
 		if interactive {
+			if _, ok := s.Get(qu.Key); again && qu.Secret && ok {
+				qu.Help = "empty keeps the current value"
+			}
 			a, err := p.Ask(qu, def)
 			if err != nil {
 				return err
@@ -158,6 +203,17 @@ func Resolve(cfg *Config, s *Secrets, f Facts, p Prompter, interactive bool) err
 			continue
 		}
 		if ans == "" {
+			if again {
+				if _, ok := s.Get(qu.Key); qu.Secret && ok {
+					continue
+				}
+				if qu.Optional && !qu.Secret {
+					if err := cfg.Set(qu.Key, ""); err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			if interactive && !qu.Optional {
 				return &output.Error{
 					Code:    "E_INIT_MISSING",

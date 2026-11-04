@@ -23,6 +23,10 @@ type Env struct {
 	Adopt       bool
 	EUID        int
 	Out         io.Writer
+	// NotifierCommit is set by NotifierStep and run by AgentStep after the agent
+	// restarts. The agent builds its notifier only at start, so updating the
+	// marker earlier would hide a restart that never happened on the next init.
+	NotifierCommit func() error
 }
 
 type Action struct {

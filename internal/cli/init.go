@@ -61,7 +61,8 @@ func newInitCmd() *cobra.Command {
 		Use:   "init",
 		Short: "Bring this host to the desired state (idempotent)",
 		Example: `  sudo cvctl init
-  sudo cvctl init --dry-run --json`,
+  sudo cvctl init --dry-run --json
+  sudo cvctl init --reconfigure notify`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			unlock, err := sys.Lock("/run/cvctl-init.lock")
@@ -103,7 +104,20 @@ func newInitCmd() *cobra.Command {
 			if e.Cfg, e.Secrets, err = hostcfg.Load(e.FS, hostCfgDir); err != nil {
 				return err
 			}
-			if err := hostcfg.Resolve(e.Cfg, e.Secrets, facts, e.Prompt, e.Interactive); err != nil {
+			reconfigure, _ := cmd.Flags().GetStringSlice("reconfigure")
+			if len(reconfigure) > 0 {
+				if !e.Interactive {
+					return &output.Error{
+						Code:    "E_INIT_RECONFIGURE",
+						Message: "--reconfigure needs an interactive terminal",
+						Hint:    "run sudo cvctl init --reconfigure <group> in a terminal, or edit /etc/cvctl/host.env",
+					}
+				}
+				err = hostcfg.Reconfigure(e.Cfg, e.Secrets, facts, e.Prompt, reconfigure)
+			} else {
+				err = hostcfg.Resolve(e.Cfg, e.Secrets, facts, e.Prompt, e.Interactive)
+			}
+			if err != nil {
 				return err
 			}
 			// Saved before the steps so answers survive a failing step.
@@ -146,6 +160,7 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().Bool("adopt", false, "adopt an already-configured host (conservative defaults)")
 	cmd.Flags().Bool("dry-run", false, "show what would change without changing anything")
 	cmd.Flags().Bool("non-interactive", false, "never prompt; use host.env values and defaults")
+	cmd.Flags().StringSlice("reconfigure", nil, "ask these question groups again even if set (notify)")
 	cmd.AddCommand(newConfirmSSHCmd())
 	return cmd
 }

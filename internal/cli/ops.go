@@ -106,14 +106,14 @@ func instanceNotFound(inst string) *output.Error {
 	}
 }
 
+// notifyLog receives notifier failures; timers run unattended, so stderr ends
+// up in the journal. Replaced in tests.
+var notifyLog io.Writer = os.Stderr
+
 // notifierFor builds the host notifier; a misconfigured one must not block
 // operator commands, so it degrades to a no-op.
 func notifierFor(cfg *hostcfg.Config, secrets *hostcfg.Secrets) notify.Notifier {
-	n, err := notify.FromHost(cfg, secrets)
-	if err != nil || n == nil {
-		return notify.NoopNotifier{}
-	}
-	return n
+	return notify.FromHostLogged(cfg, secrets, notifyLog)
 }
 
 func (e *OpsEnv) checkInstance(inst string) error {

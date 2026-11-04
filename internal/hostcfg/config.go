@@ -60,6 +60,10 @@ type Config struct {
 
 var dnsLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
+// Telegram usernames: 5-32 chars, letters, digits and underscores, starting
+// with a letter.
+var telegramUserRe = regexp.MustCompile(`^@[A-Za-z][A-Za-z0-9_]{4,31}$`)
+
 func oneOf(vals ...string) func(string) error {
 	return func(v string) error {
 		for _, x := range vals {
@@ -87,6 +91,28 @@ func validLabel(v string) error {
 	return nil
 }
 
+func validInt(v string) error {
+	if _, err := strconv.ParseInt(v, 10, 64); err != nil {
+		return errors.New("must be an integer")
+	}
+	return nil
+}
+
+// validChatID accepts a numeric id or a public @channelname, the two forms
+// the Telegram Bot API takes for chat_id.
+func validChatID(v string) error {
+	if strings.HasPrefix(v, "@") {
+		if !telegramUserRe.MatchString(v) {
+			return errors.New("must be @ plus a Telegram username (5-32 letters, digits or _, starting with a letter)")
+		}
+		return nil
+	}
+	if validInt(v) != nil {
+		return errors.New("must be a numeric chat id or @channelname")
+	}
+	return nil
+}
+
 func validPort(v string) error {
 	n, err := strconv.Atoi(v)
 	if err != nil || n < 1 || n > 65535 {
@@ -98,16 +124,18 @@ func validPort(v string) error {
 // validators holds the checks for keys with a constrained format; other keys
 // are free text.
 var validators = map[string]func(string) error{
-	"HOST_NAME":       validLabel,
-	"EDGE_MODE":       oneOf("edge", "behind-proxy"),
-	"PROXY_PORT":      validPort,
-	"SSH_MANAGE":      validBool,
-	"FIREWALL_MANAGE": validBool,
-	"ACME_CHALLENGE":  oneOf("http", "route53", "cloudflare"),
-	"STORAGE":         oneOf("local", "s3"),
-	"NOTIFY":          oneOf("telegram", "none"),
-	"EDGE_SUBNET":     validEdgeSubnet,
-	"REGISTRY_HOST":   validRegistryHost,
+	"HOST_NAME":          validLabel,
+	"EDGE_MODE":          oneOf("edge", "behind-proxy"),
+	"PROXY_PORT":         validPort,
+	"SSH_MANAGE":         validBool,
+	"FIREWALL_MANAGE":    validBool,
+	"ACME_CHALLENGE":     oneOf("http", "route53", "cloudflare"),
+	"STORAGE":            oneOf("local", "s3"),
+	"NOTIFY":             oneOf("telegram", "none"),
+	"TELEGRAM_CHAT_ID":   validChatID,
+	"TELEGRAM_THREAD_ID": validInt,
+	"EDGE_SUBNET":        validEdgeSubnet,
+	"REGISTRY_HOST":      validRegistryHost,
 
 	"TIMEOUT_FETCH":  validTimeout,
 	"TIMEOUT_PULL":   validTimeout,

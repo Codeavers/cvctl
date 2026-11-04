@@ -127,7 +127,7 @@ func (AgentStep) Check(ctx context.Context, e *Env) (Plan, error) {
 	if !enabled || !active {
 		changes = append(changes, "enable cvctl-agent")
 		actions = append(actions, Action{Kind: "enable", Target: "cvctl-agent"})
-	} else if binaryChanged || unitChanged {
+	} else if binaryChanged || unitChanged || e.NotifierCommit != nil {
 		changes = append(changes, "restart cvctl-agent")
 		actions = append(actions, Action{Kind: "restart", Target: "cvctl-agent"})
 	}
@@ -195,6 +195,13 @@ func (AgentStep) Apply(ctx context.Context, e *Env, p Plan) (string, error) {
 		if err != nil || res.ExitCode != 0 {
 			return "", sys.CmdErr("E_AGENT_FAILED", cmd, res, err, "check systemctl status cvctl-agent")
 		}
+	}
+
+	if e.NotifierCommit != nil {
+		if err := e.NotifierCommit(); err != nil {
+			return "", err
+		}
+		e.NotifierCommit = nil
 	}
 
 	return "", nil

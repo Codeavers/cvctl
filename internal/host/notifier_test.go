@@ -70,6 +70,13 @@ func TestNotifierStepMarker(t *testing.T) {
 	if callCount != 1 {
 		t.Fatalf("expected 1 call to telegram, got %d", callCount)
 	}
+	if _, err := fs.ReadFile("/var/lib/cvctl/notify.ok"); err == nil {
+		t.Fatal("marker written before the agent restarted")
+	}
+	if err := env.NotifierCommit(); err != nil {
+		t.Fatal(err)
+	}
+	env.NotifierCommit = nil
 
 	markerData, err := fs.ReadFile("/var/lib/cvctl/notify.ok")
 	if err != nil {
@@ -137,6 +144,18 @@ func TestNotifierStepTokenChanged(t *testing.T) {
 	if callCount != 1 {
 		t.Fatalf("callCount = %d, want 1", callCount)
 	}
+	if err := env.NotifierCommit(); err != nil {
+		t.Fatal(err)
+	}
+	env.NotifierCommit = nil
+
+	p, err = step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Changes) != 0 {
+		t.Fatalf("expected no changes with the same token, got %v", p.Changes)
+	}
 
 	// Now token changes:
 	sec.Set("telegram_token", "token-updated")
@@ -154,6 +173,9 @@ func TestNotifierStepTokenChanged(t *testing.T) {
 	}
 	if callCount != 2 {
 		t.Fatalf("expected second telegram call after token changed, got callCount=%d", callCount)
+	}
+	if err := env.NotifierCommit(); err != nil {
+		t.Fatal(err)
 	}
 
 	markerData, err := fs.ReadFile("/var/lib/cvctl/notify.ok")
@@ -179,5 +201,47 @@ func TestNotifierStepSkipWhenNone(t *testing.T) {
 	}
 	if p.Skip == "" {
 		t.Fatalf("expected step to be skipped when NOTIFY=none")
+	}
+}
+
+func TestNotifierStepDisableRemovesMarker(t *testing.T) {
+	fs := systest.NewFS()
+	cfg, sec, _ := hostcfg.Load(fs, "/etc/cvctl")
+	_ = cfg.Set("NOTIFY", "none")
+	if err := fs.WriteFile(notifyMarkerPath, []byte("old\n"), 0o640, deployerOwner); err != nil {
+		t.Fatal(err)
+	}
+	env := &Env{FS: fs, Cfg: cfg, Secrets: sec, EUID: 0}
+	step := NotifierStep{}
+
+	p, err := step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Skip != "" || len(p.Changes) == 0 {
+		t.Fatalf("expected a change to disable the notifier, got %+v", p)
+	}
+	if _, err := step.Apply(context.Background(), env, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fs.ReadFile(notifyMarkerPath); err != nil {
+		t.Fatal("marker removed before the agent restarted")
+	}
+	if env.NotifierCommit == nil {
+		t.Fatal("NotifierCommit not set; the agent would keep the old notifier")
+	}
+	if err := env.NotifierCommit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fs.ReadFile(notifyMarkerPath); err == nil {
+		t.Fatal("marker still present after disabling")
+	}
+
+	p, err = step.Check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Skip == "" {
+		t.Fatalf("expected skip once the marker is gone, got %+v", p)
 	}
 }
