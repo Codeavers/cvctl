@@ -169,7 +169,13 @@ commit author name. [examples/ci/image-labels.yml](examples/ci/image-labels.yml)
 Without labels the notice still goes out with the result only. Labels are read with a 5 second
 timeout; a failed read never fails the deploy.
 
-`info` notices (successful deploys) are silent; `warn` and `error` notices make a sound.
+A failed deploy adds an `Error` line with the cause and a `Logs` line with the history command.
+When there is something to do, a `Next` line gives the command: `sudo cvctl resume <instance>` after
+a manual rollback, or `cvctl db restore <instance> <service> --to <id>` when a rolled back deploy
+had already run its migrations.
+
+`info` notices are silent: successful deploys, the pause after a manual rollback, finished restores
+and `cvctl notify test`. `warn` and `error` notices make a sound.
 
 ## lint
 
