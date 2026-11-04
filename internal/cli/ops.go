@@ -164,10 +164,6 @@ var newOpsEnv = func(o opsOpts) (*OpsEnv, error) {
 		Notify:     notifierFor(cfg, secrets),
 	}
 	deploy.Wire(deployer, run)
-	if cfg != nil {
-		token, _ := secrets.Get("registry_token")
-		deployer.Labels = registry.NewLabels(cfg.RegistryUser, token, cfg.TokenHost(), registry.InsecureHostsFromEnv())
-	}
 
 	return &OpsEnv{
 		FS:          fsys,
