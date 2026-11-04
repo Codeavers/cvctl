@@ -1,14 +1,18 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/codeavers/cvctl/internal/images"
+	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/internal/sys/systest"
@@ -85,7 +89,7 @@ func TestImagesPruneDryRun(t *testing.T) {
 		t.Fatalf("dry run removed %v", got)
 	}
 	want := imgRepo + "@" + imgDig("a")
-	if !strings.Contains(out, want) || !strings.Contains(out, "10.0MB") || !strings.Contains(out, "would remove") {
+	if !strings.Contains(out, want) || !strings.Contains(out, "10.0MB") || !strings.Contains(out, "would remove unless in use") {
 		t.Fatalf("output lacks image, size and reason:\n%s", out)
 	}
 	if strings.Contains(out, imgDig("d")) {
@@ -124,7 +128,7 @@ func TestImagesPruneDryRunJSONDedupesTotal(t *testing.T) {
 	if len(res.Data.Items) != 2 || res.Data.TotalBytes != 10_000_000 {
 		t.Fatalf("items=%d total=%d", len(res.Data.Items), res.Data.TotalBytes)
 	}
-	if res.Data.Items[0].Reason != "would remove" {
+	if res.Data.Items[0].Reason != "would remove unless in use" {
 		t.Fatalf("reason %q", res.Data.Items[0].Reason)
 	}
 }
@@ -161,4 +165,127 @@ func TestImagesPruneUnreadableInstance(t *testing.T) {
 	if got := rmCalls(fake); len(got) != 0 {
 		t.Fatalf("removed %v with an unreadable instance", got)
 	}
+}
+
+func imgRow(repo, c string) string {
+	return fmt.Sprintf(`{"Repository":%q,"Tag":"<none>","Digest":%q,"Size":"10MB"}`, repo, imgDig(c))
+}
+
+func TestImagesPruneRendersEachOutcome(t *testing.T) {
+	env, fake := imagesRig(t)
+	seedImgInstance(t, env.Store, "app-dev", "a", "b", "c", "d", "e", "f")
+	fake.On(imgListCmd, sys.Result{Stdout: []byte(strings.Join([]string{
+		imgRow("r1", "a"), imgRow("r2", "b"), imgRow("r3", "c"),
+	}, "\n") + "\n")})
+	fake.On("docker image rm r2@"+imgDig("b"), sys.Result{ExitCode: 1, Stderr: []byte("Error response from daemon: conflict: unable to delete 34 (cannot be forced) - image is being used by running container 12")})
+	fake.On("docker image rm r3@"+imgDig("c"), sys.Result{ExitCode: 1, Stderr: []byte("image has dependent child images\nsecond line")})
+
+	code, out, errb := run(t, "images", "prune")
+	if code != 0 {
+		t.Fatalf("code %d err=%s", code, errb)
+	}
+	for _, want := range []string{
+		"r1@" + imgDig("a") + "  10.0MB  removed\n",
+		"r2@" + imgDig("b") + "  10.0MB  in use\n",
+		"r3@" + imgDig("c") + "  10.0MB  image has dependent child images\n",
+		"total: freed 10.0MB\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "second line") {
+		t.Errorf("multi-line reason printed whole:\n%s", out)
+	}
+}
+
+// cancelOnFirstRm stands for Ctrl-C after the first removal.
+type cancelOnFirstRm struct {
+	*systest.Runner
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnFirstRm) Run(ctx context.Context, cmd sys.Cmd) (sys.Result, error) {
+	res, err := c.Runner.Run(ctx, cmd)
+	if strings.HasPrefix(cmd.String(), "docker image rm") {
+		c.cancel()
+	}
+	return res, err
+}
+
+func TestImagesPruneInterrupted(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{"human", nil, []string{"10.0MB  removed\n", "total: freed 10.0MB\n"}},
+		{"json", []string{"--json"}, []string{`"E_IMAGES_INTERRUPTED"`, `"removed":true`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, fake := imagesRig(t, "a", "b", "c", "d", "e")
+			seedImgInstance(t, env.Store, "app-dev", "a", "b", "c", "d", "e")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			env.Deployer.Images = &images.Pruner{Run: &cancelOnFirstRm{Runner: fake, cancel: cancel}}
+
+			var out bytes.Buffer
+			p := &output.Printer{JSON: len(tc.args) > 0, Out: &out, Err: &out}
+			root := NewRoot("1.2.3")
+			root.SetOut(&out)
+			root.SetErr(&out)
+			root.SetArgs(append([]string{"images", "prune"}, tc.args...))
+			err := root.ExecuteContext(ctx)
+			if err == nil {
+				t.Fatalf("want an error:\n%s", out.String())
+			}
+			if code := p.Fail(err); code == output.ExitOK {
+				t.Fatalf("exit %d", code)
+			}
+			if got := rmCalls(fake); len(got) != 1 {
+				t.Fatalf("removed %v", got)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(out.String(), want) {
+					t.Errorf("output lacks %q:\n%s", want, out.String())
+				}
+			}
+		})
+	}
+}
+
+// deniedFS refuses every state.json like a host read without sudo.
+type deniedFS struct{ sys.FS }
+
+func (d deniedFS) ReadFile(path string) ([]byte, error) {
+	if filepath.Base(path) == "state.json" {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
+	}
+	return d.FS.ReadFile(path)
+}
+
+func TestImagesPruneSudoHintOnlyOnPermissionErrors(t *testing.T) {
+	t.Run("permission denied", func(t *testing.T) {
+		env, _ := imagesRig(t, "a", "b", "c", "d")
+		seedImgInstance(t, env.Store, "app-dev", "a", "b", "c", "d")
+		denied := state.NewStore(deniedFS{sys.NewOSFS()}, env.Store.Root())
+		env.Store, env.Deployer.Store = denied, denied
+
+		code, out, _ := run(t, "images", "prune", "--json")
+		if code == 0 || !strings.Contains(out, "run with sudo") {
+			t.Fatalf("code=%d out=%s", code, out)
+		}
+	})
+	t.Run("corrupt state", func(t *testing.T) {
+		env, _ := imagesRig(t, "a", "b", "c", "d")
+		seedImgInstance(t, env.Store, "app-dev", "a", "b", "c", "d")
+		if err := os.WriteFile(filepath.Join(env.Store.Root(), "app-dev", "state.json"), []byte("{"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+
+		code, out, _ := run(t, "images", "prune", "--json")
+		if code == 0 || strings.Contains(out, "sudo") || !strings.Contains(out, "nothing was removed") {
+			t.Fatalf("code=%d out=%s", code, out)
+		}
+	})
 }

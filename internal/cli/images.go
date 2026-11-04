@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -63,18 +65,30 @@ func newImagesPruneCmd() *cobra.Command {
 			}
 			plan, err := e.Deployer.ImagePlan(only)
 			if err != nil {
-				return &output.Error{
-					Code:    "E_IMAGES_STATE",
-					Message: err.Error(),
-					Hint:    "run with sudo; nothing was removed",
+				hint := "nothing was removed"
+				if isPermissionErr(err) {
+					hint = "run with sudo; nothing was removed"
 				}
+				return &output.Error{Code: "E_IMAGES_STATE", Message: err.Error(), Hint: hint}
 			}
 			items, err := e.Deployer.Images.Prune(cmd.Context(), plan, dryRun)
+			rep := buildImagesReport(items, dryRun)
+			if err != nil && cmd.Context().Err() != nil {
+				interrupted := &output.Error{
+					Code:    "E_IMAGES_INTERRUPTED",
+					Message: "image cleanup interrupted",
+					Hint:    "the images listed were handled before the interruption; run the command again to finish",
+				}
+				if asJSON {
+					return &output.DataError{Err: interrupted, Data: rep}
+				}
+				printImagesReport(cmd.OutOrStdout(), rep)
+				return interrupted
+			}
 			if err != nil {
 				return err
 			}
 
-			rep := buildImagesReport(items, dryRun)
 			printerFrom(cmd).Result(rep, func(w io.Writer) { printImagesReport(w, rep) })
 			return nil
 		},
@@ -84,6 +98,12 @@ func newImagesPruneCmd() *cobra.Command {
 	return cmd
 }
 
+// isPermissionErr also reads the text: output.Error keeps only the message of
+// the file error, which is how the state store reports it.
+func isPermissionErr(err error) bool {
+	return errors.Is(err, fs.ErrPermission) || strings.Contains(err.Error(), "permission denied")
+}
+
 func buildImagesReport(items []images.Item, dryRun bool) imagesPruneReport {
 	rep := imagesPruneReport{DryRun: dryRun, Items: []imageRow{}}
 	counted := map[string]bool{}
@@ -91,7 +111,7 @@ func buildImagesReport(items []images.Item, dryRun bool) imagesPruneReport {
 		reason := it.Reason
 		switch {
 		case dryRun:
-			reason = "would remove"
+			reason = "would remove unless in use"
 		case it.Removed:
 			reason = "removed"
 		case it.InUse:
