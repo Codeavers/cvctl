@@ -188,10 +188,6 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	recordError := func(inst, reason string) {
-		// A restart cancels the fetch in progress; that is not a failure to report.
-		if ctx.Err() != nil {
-			return
-		}
 		if lastErrors[inst] != reason {
 			lastErrors[inst] = reason
 			logDecision(inst, "error", reason)
@@ -254,10 +250,16 @@ func Run(ctx context.Context, cfg Config) error {
 				fetchCtx, fetchCancel := deploy.WithStepTimeout(ctx, cfg.Host.TimeoutFetch(), "fetch")
 				want, err := src.Desired(fetchCtx, dec)
 				if err != nil {
-					if te := deploy.TimeoutError(fetchCtx); te != nil {
-						err = te
-					}
+					te := deploy.TimeoutError(fetchCtx)
 					fetchCancel()
+					if te != nil {
+						recordError(inst, te.Error())
+						return
+					}
+					// A restart cancels the fetch in progress; that is not a failure to report.
+					if ctx.Err() != nil {
+						return
+					}
 					recordError(inst, err.Error())
 					return
 				}

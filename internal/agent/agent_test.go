@@ -698,6 +698,29 @@ func TestAgentShutdownDuringFetchSendsNoError(t *testing.T) {
 	}
 }
 
+func TestAgentShutdownKeepsUnrelatedErrors(t *testing.T) {
+	store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
+	seedOK(t, store, "app-a")
+	var out bytes.Buffer
+	notif := &fakeNotifier{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cfg := agent.Config{
+		Store: store, Deployer: &fakeDeployer{}, Notify: notif, Out: &out, Once: true,
+		Host: agentHost(t, "TIMEOUT_FETCH", "1m"),
+		Load: func(inst string) (*instance.Decisions, *contract.Project, error) {
+			cancel()
+			return nil, nil, errors.New("bad contract")
+		},
+		Sources: func(d *instance.Decisions) deploy.Source { return blockingSource{} },
+	}
+	if err := agent.Run(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if len(notif.messages) != 1 || !strings.Contains(notif.messages[0].Text, "bad contract") {
+		t.Fatalf("messages = %+v", notif.messages)
+	}
+}
+
 func TestAgentFetchTimeout(t *testing.T) {
 	store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
 	seedOK(t, store, "app-a")
