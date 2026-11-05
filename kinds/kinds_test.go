@@ -349,3 +349,19 @@ func TestDumpKindKeepsPasswordOutOfCommandAndHealth(t *testing.T) {
 		})
 	}
 }
+
+// sh -c " " exits 0 with no output, which would store an empty dump as a success.
+func TestKindRejectsBlankDumpCommand(t *testing.T) {
+	const base = "image: x:{version}\nversions: [\"1\"]\ndefault_version: \"1\"\nbackup: dump\n"
+	for name, extra := range map[string]string{
+		"blank dump":    "dump_command: [\"  \"]\nrestore_command: [r]\n",
+		"blank restore": "dump_command: [d]\nrestore_command: [\"\\t\", \" \"]\n",
+		"empty string":  "dump_command: [\"\"]\nrestore_command: [r]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadFS(fstest.MapFS{"k.yml": {Data: []byte(base + extra)}}); err == nil {
+				t.Fatal("want error")
+			}
+		})
+	}
+}

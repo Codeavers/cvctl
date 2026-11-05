@@ -48,7 +48,9 @@ type Kind struct {
 	CapAdd []string `yaml:"cap_add"`
 	// DumpCommand and RestoreCommand are joined with spaces into one sh -c
 	// script run inside the service, so $VAR reads its credentials from the
-	// container's own environment and they never reach argv.
+	// container's own environment and they never reach docker's argv. Pass them
+	// to the tool by environment too (MYSQL_PWD="$X" mysqldump), never as
+	// -p"$X": the shell expands that into the tool's argv, visible in ps.
 	DumpCommand    []string `yaml:"dump_command"`
 	RestoreCommand []string `yaml:"restore_command"`
 	// Helper names an auxiliary image that takes the dump instead of the
@@ -97,7 +99,7 @@ func validate(k Kind) error {
 	if !slices.Contains(backups, k.Backup) {
 		return invalid(k.Name, fmt.Sprintf("backup %q must be one of %v", k.Backup, backups))
 	}
-	if k.Backup == "dump" && k.Helper == "" && (len(k.DumpCommand) == 0 || len(k.RestoreCommand) == 0) {
+	if k.Backup == "dump" && k.Helper == "" && (blank(k.DumpCommand) || blank(k.RestoreCommand)) {
 		return invalid(k.Name, "backup dump requires dump_command and restore_command, or helper")
 	}
 	if !slices.Contains(k.Versions, k.DefaultVersion) {
@@ -132,6 +134,8 @@ func validate(k Kind) error {
 	}
 	return nil
 }
+
+func blank(cmd []string) bool { return strings.TrimSpace(strings.Join(cmd, "")) == "" }
 
 func invalid(name, msg string) *output.Error {
 	return &output.Error{

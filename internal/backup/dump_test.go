@@ -21,19 +21,20 @@ import (
 
 const (
 	enginePass  = "engine-pass-SECRET-321"
-	dumpScript  = `fakedump --all-databases -p"$FAKE_ROOT_PASSWORD"`
+	dumpScript  = `FAKE_PWD="$FAKE_ROOT_PASSWORD" fakedump --all-databases`
 	snapID      = "4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e"
 	composePS   = "docker compose -p app-prod --env-file /srv/deploy/app-prod/app.env -f /srv/deploy/app-prod/compose.cvctl.yml ps -a --format json db"
-	retention   = "forget --keep-within 7d --keep-daily 7 --keep-weekly 4 --prune"
-	unmark      = "tag --remove partial " + snapID
+	retention   = "forget --tag complete --keep-within 7d --keep-daily 7 --keep-weekly 4 --prune"
+	unmark      = "tag --json --add complete --remove partial " + snapID
 	resticImage = "restic/restic:0.19.1"
-	purge       = "forget --tag partial --unsafe-allow-remove-all"
+	purge       = "forget --tag partial --keep-within 2d --prune"
+	tagCmd      = "docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 --retry-lock 10m tag"
 	listCmd     = "docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 snapshots --json"
 )
 
 // Newest last, as restic prints them.
 var snapshotsWithPartial = []byte(`[
-{"short_id":"aaaa1111","time":"2026-11-03T03:00:00Z","tags":["app-prod"]},
+{"short_id":"aaaa1111","time":"2026-11-03T03:00:00Z","tags":["app-prod","complete"]},
 {"short_id":"bbbb2222","time":"2026-11-04T03:00:00Z","tags":["app-prod","partial"]}]`)
 
 var dumpContainer = fmt.Sprintf("cvctl-dump-app-prod-db-%d-0a0b0c0d", time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).Unix())
@@ -41,6 +42,12 @@ var dumpContainer = fmt.Sprintf("cvctl-dump-app-prod-db-%d-0a0b0c0d", time.Date(
 var resticSummary = []byte(`{"message_type":"status","percent_done":1}
 {"message_type":"summary","files_new":1,"snapshot_id":"` + snapID + `"}
 `)
+
+func tagSummary(changed int) []byte {
+	return fmt.Appendf(nil, `{"message_type":"changed","old_snapshot_id":"a","new_snapshot_id":"b"}
+{"message_type":"summary","changed_snapshots":%d}
+`, changed)
+}
 
 type dumpRig struct {
 	*rig
@@ -52,6 +59,7 @@ func newDumpRig(t *testing.T) *dumpRig {
 	g := newRig(t)
 	g.okAll()
 	g.run.OnPrefix(composePS, sys.Result{Stdout: []byte(`{"ID":"c0ffee","Service":"db","State":"running"}`)})
+	g.run.OnPrefix(tagCmd, sys.Result{Stdout: tagSummary(1)})
 	pipe := &systest.Piper{Result: sys.PipeResult{To: sys.Result{Stdout: resticSummary}}}
 	g.r.Pipe = pipe
 	g.r.Catalog = kinds.Catalog{"fakedb": {
@@ -127,12 +135,12 @@ func TestDumpPipesServiceIntoRestic(t *testing.T) {
 func TestDumpJoinsCommandIntoOneScript(t *testing.T) {
 	g := newDumpRig(t)
 	k := g.r.Catalog["fakedb"]
-	k.DumpCommand = []string{"fakedump", "--all", `-p"$X"`}
+	k.DumpCommand = []string{`PWD_VAR="$X"`, "fakedump", "--all"}
 	g.r.Catalog["fakedb"] = k
 	if _, err := g.backup(t); err != nil {
 		t.Fatal(err)
 	}
-	if args := g.pipe.Calls[0].From.Args; args[len(args)-1] != `fakedump --all -p"$X"` {
+	if args := g.pipe.Calls[0].From.Args; args[len(args)-1] != `PWD_VAR="$X" fakedump --all` {
 		t.Fatalf("args: %q", args)
 	}
 }
@@ -316,8 +324,7 @@ func TestDumpFailureKeepsPartialMark(t *testing.T) {
 
 func TestDumpUnmarkFailureForgetsSnapshot(t *testing.T) {
 	g := newDumpRig(t)
-	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 --retry-lock 10m tag",
-		sys.Result{ExitCode: 1, Stderr: []byte("repo locked")})
+	g.run.OnPrefix(tagCmd, sys.Result{ExitCode: 1, Stderr: []byte("repo locked")})
 	res, err := g.backup(t)
 	if err == nil || res[0].OK {
 		t.Fatalf("res=%+v err=%v", res, err)
@@ -512,7 +519,7 @@ func TestDumpWithoutCommandFails(t *testing.T) {
 func TestListUsesRestic(t *testing.T) {
 	g := newDumpRig(t)
 	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 snapshots --json",
-		sys.Result{Stdout: []byte(`[{"short_id":"4f1c2d3e","time":"2026-11-05T03:00:00Z"}]`)})
+		sys.Result{Stdout: []byte(`[{"short_id":"4f1c2d3e","time":"2026-11-05T03:00:00Z","tags":["complete"]}]`)})
 	snaps, err := g.r.List(context.Background(), "app-prod", "db")
 	if err != nil {
 		t.Fatal(err)
@@ -586,9 +593,9 @@ var (
 	dumpTemp    = fmt.Sprintf("cvctl-restore-app-prod-db-%d-0a0b0c0d", dumpNow.Unix())
 	dumpReader  = fmt.Sprintf("cvctl-read-app-prod-db-%d-0a0b0c0d", dumpNow.Unix())
 	dumpHistory = []byte(`[
-{"short_id":"aaaa1111","time":"2026-11-02T03:00:00Z","tags":["app-prod"]},
-{"short_id":"cccc3333","time":"2026-11-03T03:00:00.5+01:00","tags":["app-prod","deploy-5"]},
-{"short_id":"dddd4444","time":"2026-11-04T03:00:00Z","tags":["app-prod"]},
+{"short_id":"aaaa1111","time":"2026-11-02T03:00:00Z","tags":["app-prod","complete"]},
+{"short_id":"cccc3333","time":"2026-11-03T03:00:00.5+01:00","tags":["app-prod","complete","deploy-5"]},
+{"short_id":"dddd4444","time":"2026-11-04T03:00:00Z","tags":["app-prod","complete"]},
 {"short_id":"bbbb2222","time":"2026-11-04T09:00:00Z","tags":["app-prod","partial"]},
 {"short_id":"eeee5555","time":"2026-11-04T10:00:00Z","tags":["app-prod","deploy-7","partial"]}]`)
 )
@@ -830,7 +837,7 @@ func TestDumpRestoreTimestampLooksInOlderRepositories(t *testing.T) {
 		lists++
 		out := []byte(`[]`)
 		if lists%2 == 0 {
-			out = []byte(`[{"short_id":"ffff6666","time":"2026-11-04T03:00:00Z"}]`)
+			out = []byte(`[{"short_id":"ffff6666","time":"2026-11-04T03:00:00Z","tags":["complete"]}]`)
 		}
 		g.run.OnPrefix(listCmd, sys.Result{Stdout: out})
 	}}
@@ -1113,7 +1120,94 @@ func TestDumpRetentionKeepsRestorePointsAsLongAsWalg(t *testing.T) {
 	if _, err := g.backup(t); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(g.resticCalls("--retry-lock 10m forget --keep-within 7d --keep-daily 7 --keep-weekly 4 --prune")); n != 2 {
+	if n := len(g.resticCalls("--retry-lock 10m " + retention)); n != 2 {
 		t.Fatalf("restore point and daily runs must both keep a week: %v", g.calls())
+	}
+}
+
+// restic tag logs a per-snapshot failure and exits 0, so only the count proves
+// the mark changed. Trusting the exit left a good dump partial for the purge.
+func TestDumpTagZeroChangesFailsBackup(t *testing.T) {
+	for name, out := range map[string][]byte{"zero": tagSummary(0), "no summary": nil, "two": tagSummary(2)} {
+		t.Run(name, func(t *testing.T) {
+			g := newDumpRig(t)
+			g.run.OnPrefix(tagCmd, sys.Result{Stdout: out})
+			res, err := g.backup(t)
+			if err == nil || res[0].OK || !strings.Contains(res[0].Error, "not marked complete") {
+				t.Fatalf("res=%+v err=%v", res, err)
+			}
+			if len(g.resticCalls(purge)) != 0 || len(g.resticCalls(retention)) != 0 {
+				t.Fatalf("nothing may be purged: %v", g.calls())
+			}
+			if len(g.resticCalls("forget "+snapID+" --prune")) != 1 {
+				t.Fatalf("a failed run forgets its own snapshot: %v", g.calls())
+			}
+		})
+	}
+}
+
+// Another run's snapshot is partial until that run finishes, so the purge is
+// bounded by age and names no id but the run's own.
+func TestDumpOverlapKeepsRecentPartial(t *testing.T) {
+	g := newDumpRig(t)
+	g.run.OnPrefix(listCmd, sys.Result{Stdout: snapshotsWithPartial})
+	if _, err := g.backup(t); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.resticCalls(purge)) != 1 {
+		t.Fatalf("old leftovers must still go: %v", g.calls())
+	}
+	for _, c := range g.calls() {
+		if strings.Contains(c, "--unsafe-allow-remove-all") {
+			t.Fatalf("that removes every partial, recent ones too: %s", c)
+		}
+		if strings.Contains(c, "bbbb2222") {
+			t.Fatalf("touched another run's snapshot: %s", c)
+		}
+	}
+}
+
+func TestRetentionIgnoresPartial(t *testing.T) {
+	g := newDumpRig(t)
+	if _, err := g.backup(t); err != nil {
+		t.Fatal(err)
+	}
+	var forgets int
+	for _, c := range g.calls() {
+		if !strings.Contains(c, " forget ") || strings.Contains(c, "--tag partial") {
+			continue
+		}
+		forgets++
+		if !strings.Contains(c, " forget --tag complete ") {
+			t.Fatalf("retention must see only complete snapshots: %s", c)
+		}
+	}
+	if forgets != 1 {
+		t.Fatalf("calls: %v", g.calls())
+	}
+}
+
+// Absence of partial proves nothing: only the mark says the dump finished.
+func TestDumpReadersRequireComplete(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	g.run.OnPrefix(listCmd, sys.Result{Stdout: []byte(`[
+{"short_id":"aaaa1111","time":"2026-11-03T03:00:00Z","tags":["app-prod","complete"]},
+{"short_id":"bbbb2222","time":"2026-11-04T03:00:00Z","tags":["app-prod"]}]`)})
+	snaps, err := g.r.List(context.Background(), "app-prod", "db")
+	if err != nil || len(snaps) != 1 || snaps[0].ID != "aaaa1111" {
+		t.Fatalf("list: %+v %v", snaps, err)
+	}
+	for _, to := range []string{"latest", "2026-11-05T00:00:00Z"} {
+		res, err := g.restore(to)
+		if err != nil || res.Snapshot != "aaaa1111" {
+			t.Fatalf("%s: res=%+v err=%v", to, res, err)
+		}
+		g.run.Calls, g.pipe.Calls = nil, nil
+		if err := g.fs.WriteFile(envPath, []byte(dumpEnvBefore), 0o640, sys.Owner{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := g.restore("bbbb2222"); err == nil {
+		t.Fatal("a snapshot without the mark must not be restored")
 	}
 }

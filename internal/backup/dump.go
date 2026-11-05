@@ -17,8 +17,16 @@ import (
 	"github.com/codeavers/cvctl/kinds"
 )
 
-// tagPartial marks a dump snapshot not yet known to be complete.
-const tagPartial = "partial"
+// tagPartial marks a dump snapshot not yet known to be complete; tagComplete
+// marks one that is, and is the only mark readers and retention trust.
+const (
+	tagPartial  = "partial"
+	tagComplete = "complete"
+)
+
+// partialMaxAge spares the partial snapshots of runs still going: backupTimeout
+// ends any run long before it.
+const partialMaxAge = "2d"
 
 // repoLockWait lets a dump outlast a prune of its repository. A restore point
 // cannot wait on the data lock instead: it runs under the instance lock, and a
@@ -42,7 +50,7 @@ func (r *Runner) dumpBackup(ctx context.Context, inst string, t Target) error {
 
 // dump streams the service's dump into restic without touching the host disk.
 // restic stores whatever arrived by EOF, so a killed producer looks complete.
-// Every snapshot therefore starts tagged partial and loses the tag only once
+// Every snapshot therefore starts tagged partial and turns complete only once
 // both sides exited 0: a crash at any point leaves one nothing will use.
 func (r *Runner) dump(ctx context.Context, inst string, t Target, tags ...string) error {
 	script, err := r.dumpScript(t)
@@ -89,7 +97,7 @@ func (r *Runner) dump(ctx context.Context, inst string, t Target, tags ...string
 		}
 	}
 	if cause == nil {
-		_, cause = r.exec(ctx, r.dumpRestic(inst, envFile, "tag", "--remove", tagPartial, id))
+		cause = r.markComplete(ctx, inst, envFile, id)
 	}
 	if cause != nil {
 		if id != "" {
@@ -97,16 +105,34 @@ func (r *Runner) dump(ctx context.Context, inst string, t Target, tags ...string
 		}
 		return cause
 	}
-	// Leftovers go first: retention would count one as the day's snapshot and
-	// drop the complete one beside it.
-	if _, err := r.exec(ctx, r.dumpRestic(inst, envFile, "forget", "--tag", tagPartial, "--unsafe-allow-remove-all")); err != nil {
+	// --keep-within counts back from the newest partial, not from now, so a run
+	// in progress is never reached; the newest leftover waits for a newer one.
+	if _, err := r.exec(ctx, r.dumpRestic(inst, envFile, "forget", "--tag", tagPartial, "--keep-within", partialMaxAge, "--prune")); err != nil {
 		return err
 	}
 	// --keep-daily keeps only a day's newest snapshot, so a second deploy would
 	// drop the first one's restore point. --keep-within counts back from the
 	// newest snapshot, which is the one just taken.
-	_, err = r.exec(ctx, r.dumpRestic(inst, envFile, "forget", "--keep-within", strconv.Itoa(walgRetainDays)+"d", "--keep-daily", "7", "--keep-weekly", "4", "--prune"))
+	_, err = r.exec(ctx, r.dumpRestic(inst, envFile, "forget", "--tag", tagComplete, "--keep-within", strconv.Itoa(walgRetainDays)+"d", "--keep-daily", "7", "--keep-weekly", "4", "--prune"))
 	return err
+}
+
+// markComplete swaps the marks in one rewrite. restic tag exits 0 even when it
+// changed nothing, since it only logs a per-snapshot failure, so the count in
+// its summary is the proof.
+func (r *Runner) markComplete(ctx context.Context, inst, envFile, id string) error {
+	res, err := r.exec(ctx, r.dumpRestic(inst, envFile, "tag", "--json", "--add", tagComplete, "--remove", tagPartial, id))
+	if err != nil {
+		return err
+	}
+	if n := resticChangedSnapshots(res.Stdout); n != 1 {
+		return &output.Error{
+			Code:    "E_BACKUP_FAILED",
+			Message: fmt.Sprintf("snapshot %s was not marked complete: restic changed %d snapshots", id, n),
+			Hint:    "run the backup again and check the restic repository",
+		}
+	}
+	return nil
 }
 
 func (r *Runner) dumpRestic(inst, envFile string, args ...string) sys.Cmd {
@@ -415,10 +441,25 @@ func (r *Runner) forgetPartial(ctx context.Context, inst, envFile, id string, ca
 		return &output.Error{
 			Code:    "E_BACKUP_FAILED",
 			Message: r.redact(fmt.Sprintf("partial snapshot %s could not be removed: %v; the backup failed: %v", id, err, cause)),
-			Hint:    "it stays tagged partial, so nothing uses it; the next good backup removes it",
+			Hint:    "it stays tagged partial, so nothing uses it; a later backup removes it once it is old enough",
 		}
 	}
 	return cause
+}
+
+// resticChangedSnapshots reads the count from restic tag's --json output; it is
+// 0 when there is no summary.
+func resticChangedSnapshots(out []byte) int {
+	for line := range strings.Lines(string(out)) {
+		var m struct {
+			Type    string `json:"message_type"`
+			Changed int    `json:"changed_snapshots"`
+		}
+		if json.Unmarshal([]byte(line), &m) == nil && m.Type == "summary" {
+			return m.Changed
+		}
+	}
+	return 0
 }
 
 // resticSnapshotID reads the id from restic's --json output, one object per

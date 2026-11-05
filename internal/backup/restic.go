@@ -170,7 +170,7 @@ func (r *Runner) resticRepoList(ctx context.Context, inst string, t Target, idx 
 	}
 	out := make([]Snapshot, 0, len(raw))
 	for _, s := range raw {
-		if t.Strategy == StrategyDump && slices.Contains(s.Tags, tagPartial) {
+		if t.Strategy == StrategyDump && !slices.Contains(s.Tags, tagComplete) {
 			continue
 		}
 		id := s.ShortID
