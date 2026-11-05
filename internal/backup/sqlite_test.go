@@ -92,6 +92,23 @@ func TestSqliteHelperBackup(t *testing.T) {
 	}
 }
 
+// Without a read transaction open, .backup starts over whenever the app commits
+// between two steps, and a busy app keeps it from ever finishing.
+func TestSqliteBackupCopiesOneSnapshot(t *testing.T) {
+	g := newSqliteRig(t, "1000 ro\n")
+	if _, err := g.backup(t); err != nil {
+		t.Fatal(err)
+	}
+	from := g.fromArgs()
+	begin, backupAt := strings.Index(from, `"BEGIN"`), strings.Index(from, ".backup")
+	if begin < 0 || backupAt < begin || !strings.Contains(from, "sqlite_master") {
+		t.Fatalf("no read transaction around .backup: %s", from)
+	}
+	if !strings.Contains(from[backupAt:], ">/dev/null") {
+		t.Fatalf("the row that opens the transaction would land in the dump: %s", from)
+	}
+}
+
 func TestSqliteBackupMountsReadWriteWhenSqliteMustWrite(t *testing.T) {
 	g := newSqliteRig(t, "1000 rw\n")
 	if _, err := g.backup(t); err != nil {

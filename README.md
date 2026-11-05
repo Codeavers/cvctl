@@ -319,8 +319,9 @@ store:
   no other file.
 - **Owner of the volume**: the uid of `cvctl.uid`, or else the image's `USER` when it is numeric
   (`1000` or `1000:1000`). A name or an empty `USER` requires `cvctl.uid`, and root is rejected
-  (`E_SQLITE_UID`). `cvctl.uid` also sets the user the app runs as: with every capability dropped, an
-  image that defaults to root could not write to the volume. On each deploy, after the pull and
+  (`E_SQLITE_UID`). `cvctl.uid` also renders `user: <uid>` on the owner app, so the app runs as that
+  uid whatever its image says: with every capability dropped, an image that defaults to root could
+  not write to the volume. On each deploy, after the pull and
   before the hooks, a helper container holding only `CHOWN` hands the volume over if its owner differs.
 - **Strategy**: requires `recreate`, so a deploy stops the app. `project add`, `set-strategy` and the
   deploy reject `blue-green` with `E_SQLITE_RECREATE`; `project add` on prod without `--strategy`
@@ -366,7 +367,7 @@ A service backed up with `cvctl.backup: dump` has no WAL to mark, so its restore
 
 The restore creates a new volume, starts a temporary engine on it and streams the snapshot in while the service keeps running. Only then are the apps and the service stopped for the volume switch, so any failure while loading leaves the service, its volume and the instance state as they were, and the temporary container and volume are removed. A failure after the switch rolls back to the previous volume like any other restore. `cvctl backup verify` runs the same load in a throwaway engine, then the kind's `restore_check`.
 
-A `sqlite` service is dumped by a helper beside the running app, with `sqlite3 .backup` to a temporary file inside the helper and from there into restic; the volume is mounted read-only unless the database is in WAL mode or has a journal to roll back. While the database file does not exist or is empty the backup stores nothing and reports OK with a note, and a prod deploy records no restore point for it. `cvctl db restore` takes the same `--to` forms but stops the apps first, writes the snapshot to a new volume, runs `PRAGMA integrity_check` on it, switches and starts them; a failure before the switch restarts them on the old volume. `cvctl backup verify` restores to a temporary volume and requires `integrity_check` to print exactly `ok`. A `sqlite` service with no snapshot yet fails verify and `cvctl project restore` with `E_BACKUP_NO_SNAPSHOT`, like any service without backups.
+A `sqlite` service is dumped by a helper beside the running app, with `sqlite3 .backup` to a temporary file inside the helper and from there into restic; the volume is mounted read-only unless the database is in WAL mode or has a journal to roll back. The copy is one snapshot taken in a single read transaction, so it finishes however busy the app is: in WAL mode the app is not held up, while in rollback mode its commits wait until the copy ends, so its busy timeout should cover that. While the database file does not exist or is empty the backup stores nothing and reports OK with a note, and a prod deploy records no restore point for it. `cvctl db restore` takes the same `--to` forms but stops the apps first, writes the snapshot to a new volume, runs `PRAGMA integrity_check` on it, switches and starts them; a failure before the switch restarts them on the old volume. `cvctl backup verify` restores to a temporary volume and requires `integrity_check` to print exactly `ok`. A `sqlite` service with no snapshot yet fails verify and `cvctl project restore` with `E_BACKUP_NO_SNAPSHOT`, like any service without backups.
 
 Retention keeps every dump of the last 7 days, the time WAL-G keeps its restore points, so a second deploy on a day does not drop the first one's restore point. After that, the 7 daily and 4 weekly rules apply.
 

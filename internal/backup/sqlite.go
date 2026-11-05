@@ -45,10 +45,13 @@ else
 fi
 `
 
-// sqliteDumpScript copies through the backup API, consistent while the app
-// writes, and only then streams: stdout must be nothing but the finished copy.
+// sqliteDumpScript copies through the backup API and only then streams: stdout
+// must be nothing but the finished copy. The open read transaction pins one
+// snapshot: without it .backup starts over whenever the app commits between two
+// steps, and a busy app keeps it from ever finishing. In WAL mode the app does
+// not notice; in rollback mode its commits wait for the copy.
 const sqliteDumpScript = `set -e
-sqlite3 -batch /data/app.db ".timeout 60000" ".backup /tmp/cvctl-copy.db"
+sqlite3 -batch /data/app.db ".timeout 60000" "BEGIN" "SELECT count(*) FROM sqlite_master" ".backup /tmp/cvctl-copy.db" >/dev/null
 cat /tmp/cvctl-copy.db
 `
 
