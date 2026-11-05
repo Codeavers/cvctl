@@ -144,7 +144,7 @@ var validators = map[string]func(string) error{
 
 	"TRAEFIK_READ_TIMEOUT": validTimeout,
 
-	"UPGRADE_REPO": validUpgradeRepo,
+	"UPGRADE_REPO": ValidUpgradeRepo,
 }
 
 // Default step timeouts, used when the CVCTL_TIMEOUT_* key is unset.
@@ -157,7 +157,8 @@ const (
 
 var upgradeRepoRe = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
 
-func validUpgradeRepo(v string) error {
+// ValidUpgradeRepo reports whether v is an owner/repo safe to put in an API URL.
+func ValidUpgradeRepo(v string) error {
 	if !upgradeRepoRe.MatchString(v) {
 		return errors.New("must be owner/repo (letters, digits, '.', '_' and '-')")
 	}

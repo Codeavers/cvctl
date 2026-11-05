@@ -77,6 +77,11 @@ var newUpgradeEnv = func(current string) (*upgradeEnv, error) {
 // not send the upgrade to another repository.
 func upgradeRepo(getenv func(string) string, fsys sys.FS) (string, error) {
 	if v := getenv("CVCTL_UPGRADE_REPO"); v != "" {
+		if err := hostcfg.ValidUpgradeRepo(v); err != nil {
+			return "", &output.Error{Code: "E_UPGRADE_REPO",
+				Message: "CVCTL_UPGRADE_REPO is invalid: " + err.Error(),
+				Hint:    "set it to owner/repo or unset it"}
+		}
 		return v, nil
 	}
 	cfg, _, err := hostcfg.Load(fsys, hostCfgDir)

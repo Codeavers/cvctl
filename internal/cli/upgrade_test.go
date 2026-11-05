@@ -337,6 +337,8 @@ func TestUpgradeRepoPrecedence(t *testing.T) {
 		{name: "environment wins", env: "env/cvctl", hostEnv: "CVCTL_UPGRADE_REPO=fork/cvctl\n", want: "env/cvctl"},
 		{name: "config without the key", hostEnv: "CVCTL_HOST_NAME=box\n", want: defaultUpgradeRepo},
 		{name: "invalid config", hostEnv: "CVCTL_UPGRADE_REPO=nope\n", wantErr: true},
+		{name: "invalid environment", env: "nope", wantErr: true},
+		{name: "environment with a query", env: "o/r?x=1", wantErr: true},
 		{name: "environment skips invalid config", env: "env/cvctl", hostEnv: "CVCTL_UPGRADE_REPO=nope\n", want: "env/cvctl"},
 	}
 	for _, c := range cases {
