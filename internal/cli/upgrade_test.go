@@ -85,7 +85,8 @@ func newUpFixture(t *testing.T, planNew string) *upFixture {
 	f.run.On("systemctl is-active cvctl-agent", sys.Result{Stdout: []byte("active\n")})
 	f.run.On("systemctl restart cvctl-agent", sys.Result{})
 
-	oldEnv, oldLog, oldLock := newUpgradeEnv, notifyLog, sys.Lock
+	oldEnv, oldLog, oldLock, oldEUID := newUpgradeEnv, notifyLog, sys.Lock, upgradeEUID
+	upgradeEUID = func() int { return f.euid }
 	notifyLog = f.logBuf
 	sys.Lock = f.lock.Lock
 	newUpgradeEnv = func(current string) (*upgradeEnv, error) {
@@ -104,12 +105,11 @@ func newUpFixture(t *testing.T, planNew string) *upFixture {
 				},
 				Sleep: func(_ time.Duration) {},
 			},
-			EUID:        f.euid,
 			Interactive: f.tty,
 			Notifier:    func() notify.Notifier { return f.notif },
 		}, nil
 	}
-	t.Cleanup(func() { newUpgradeEnv, notifyLog, sys.Lock = oldEnv, oldLog, oldLock })
+	t.Cleanup(func() { newUpgradeEnv, notifyLog, sys.Lock, upgradeEUID = oldEnv, oldLog, oldLock, oldEUID })
 	return f
 }
 
@@ -145,6 +145,9 @@ func errCode(t *testing.T, stdout string) (code, hint string) {
 func TestUpgradeNeedsRoot(t *testing.T) {
 	f := newUpFixture(t, upPlanA)
 	f.euid = 1000
+	newUpgradeEnv = func(string) (*upgradeEnv, error) {
+		return nil, errors.New("host config is not readable without root")
+	}
 	code, out, _ := runUpgrade(t, "", "--json", "--yes")
 	c, h := errCode(t, out)
 	if code == 0 || c != "E_UPGRADE_ROOT" || h != "sudo cvctl upgrade" {

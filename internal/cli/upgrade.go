@@ -37,10 +37,11 @@ const (
 
 type upgradeEnv struct {
 	Upgrader    *upgrade.Upgrader
-	EUID        int
 	Interactive bool
 	Notifier    func() notify.Notifier
 }
+
+var upgradeEUID = os.Geteuid
 
 var newUpgradeEnv = func(current string) (*upgradeEnv, error) {
 	exe, err := os.Executable()
@@ -65,7 +66,6 @@ var newUpgradeEnv = func(current string) (*upgradeEnv, error) {
 			Deploying: deployingInstances,
 			Sleep:     time.Sleep,
 		},
-		EUID:        os.Geteuid(),
 		Interactive: term.IsTerminal(int(os.Stdin.Fd())),
 		Notifier:    hostNotifier,
 	}, nil
@@ -152,13 +152,14 @@ func newUpgradeCmd(current string) *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			asJSON, _ := cmd.Flags().GetBool("json")
+			// Before newUpgradeEnv: it reads the host config, which only root can read.
+			if upgradeEUID() != 0 {
+				return &output.Error{Code: "E_UPGRADE_ROOT", Message: "cvctl upgrade necesita root",
+					Hint: "sudo cvctl upgrade"}
+			}
 			e, err := newUpgradeEnv(current)
 			if err != nil {
 				return err
-			}
-			if e.EUID != 0 {
-				return &output.Error{Code: "E_UPGRADE_ROOT", Message: "cvctl upgrade necesita root",
-					Hint: "sudo cvctl upgrade"}
 			}
 			return doUpgrade(cmd, e, upgradeOpts{target: target, check: check, yes: yes, accept: accept, json: asJSON})
 		},
