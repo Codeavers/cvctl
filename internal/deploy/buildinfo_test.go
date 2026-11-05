@@ -74,6 +74,11 @@ CVCTL_DIGEST_API=sha256:a1
 CVCTL_DIGEST_WEB=sha256:b1
 `
 
+var bothLinks = []notify.Link{
+	{Service: "api", URL: "https://api.example.com"},
+	{Service: "web", URL: "https://web.example.com"},
+}
+
 func twoAppsRig(t *testing.T) (*testRig, *fakeLabels) {
 	t.Helper()
 	rig := setupTestRig(t, "dev", "demo-dev")
@@ -113,8 +118,8 @@ func TestDeployInfoChangedAgainstCurrent(t *testing.T) {
 	if !reflect.DeepEqual(info.Builds, want) {
 		t.Fatalf("Builds = %+v", info.Builds)
 	}
-	if info.AppURL != "https://web.example.com" {
-		t.Fatalf("AppURL = %q", info.AppURL)
+	if !reflect.DeepEqual(info.Links, bothLinks) {
+		t.Fatalf("Links = %+v", info.Links)
 	}
 	if info.Logs != "" {
 		t.Fatalf("Logs = %q for info level", info.Logs)
@@ -139,8 +144,8 @@ func TestDeployInfoNilCurrentChangesAllSorted(t *testing.T) {
 	if info.Logs != "sudo cvctl history demo-dev" {
 		t.Fatalf("Logs = %q", info.Logs)
 	}
-	if info.AppURL != "https://api.example.com" {
-		t.Fatalf("AppURL = %q", info.AppURL)
+	if !reflect.DeepEqual(info.Links, bothLinks) {
+		t.Fatalf("Links = %+v", info.Links)
 	}
 }
 
@@ -244,17 +249,31 @@ func TestDeployInfoNoDigestsNoReads(t *testing.T) {
 	}
 }
 
-func TestDeployInfoAppURLPrefersChangedService(t *testing.T) {
+func TestDeployInfoLinksEveryAppWithADomain(t *testing.T) {
 	rig, _ := twoAppsRig(t)
 	cur := desiredOf("sha256:a1", "sha256:b0")
 	info := rig.deployer.deployInfo(context.Background(), "demo-dev", &state.State{Current: &cur}, desiredOf("sha256:a1", "sha256:b1"), "info")
-	if info.AppURL != "https://web.example.com" {
-		t.Fatalf("changed web: AppURL = %q", info.AppURL)
+	if !reflect.DeepEqual(info.Links, bothLinks) {
+		t.Fatalf("changed web: Links = %+v", info.Links)
 	}
 	same := desiredOf("sha256:a1", "sha256:b1")
 	info = rig.deployer.deployInfo(context.Background(), "demo-dev", &state.State{Current: &same}, same, "info")
-	if info.AppURL != "https://api.example.com" {
-		t.Fatalf("nothing changed: AppURL = %q", info.AppURL)
+	if !reflect.DeepEqual(info.Links, bothLinks) {
+		t.Fatalf("nothing changed: Links = %+v", info.Links)
+	}
+}
+
+func TestDeployInfoLinksSkipAppsWithoutExpose(t *testing.T) {
+	rig, _ := twoAppsRig(t)
+	compose := strings.Replace(twoAppsCompose, `, cvctl.expose: "3001"`, "", 1)
+	if err := os.WriteFile(filepath.Join(rig.infraDir, "compose.yml"), []byte(compose), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	same := desiredOf("sha256:a1", "sha256:b1")
+	info := rig.deployer.deployInfo(context.Background(), "demo-dev", &state.State{Current: &same}, same, "info")
+	want := []notify.Link{{Service: "api", URL: "https://api.example.com"}}
+	if !reflect.DeepEqual(info.Links, want) {
+		t.Fatalf("Links = %+v", info.Links)
 	}
 }
 
@@ -282,7 +301,7 @@ func TestDeployInfoNilLabelsReader(t *testing.T) {
 	rig, _ := twoAppsRig(t)
 	rig.deployer.Labels = nil
 	info := rig.deployer.deployInfo(context.Background(), "demo-dev", &state.State{}, desiredOf("sha256:a1", "sha256:b1"), "info")
-	if len(info.Builds) != 0 || len(info.Changed) != 2 || !strings.HasPrefix(info.AppURL, "https://") {
+	if len(info.Builds) != 0 || len(info.Changed) != 2 || len(info.Links) != 2 {
 		t.Fatalf("info = %+v", info)
 	}
 }
@@ -361,7 +380,7 @@ func TestPostDeployHookFailureReadsLabelsOnce(t *testing.T) {
 	}
 }
 
-func TestDeployInfoAppURLIgnoresExposedDataServices(t *testing.T) {
+func TestDeployInfoLinksIgnoreExposedDataServices(t *testing.T) {
 	const compose = `services:
   api:
     image: ghcr.io/org/project-api
@@ -391,15 +410,16 @@ CVCTL_DOMAIN_ASSETS=assets.example.com
 	if p, dec := rig.deployer.loadForNotice("demo-dev"); p == nil || dec.Domains["assets"] == "" {
 		t.Fatalf("fixture must give the data service a domain: %+v", dec)
 	}
-	if info := rig.deployer.deployInfo(context.Background(), "demo-dev", nil, want, "info"); info.AppURL != "" {
-		t.Fatalf("only a data service has a domain: AppURL = %q", info.AppURL)
+	if info := rig.deployer.deployInfo(context.Background(), "demo-dev", nil, want, "info"); len(info.Links) != 0 {
+		t.Fatalf("only a data service has a domain: Links = %+v", info.Links)
 	}
 
-	// The data service sorts first, so a list of all domains would pick it.
+	// The data service sorts first, so a list of all domains would include it.
 	write(strings.Replace(compose, "cvctl.role: worker", `cvctl.role: app, cvctl.expose: "3000"`, 1),
 		env+"CVCTL_DOMAIN_API=zzz.example.com\n")
 	same := state.State{Current: &want}
-	if info := rig.deployer.deployInfo(context.Background(), "demo-dev", &same, want, "info"); info.AppURL != "https://zzz.example.com" {
-		t.Fatalf("AppURL = %q", info.AppURL)
+	info := rig.deployer.deployInfo(context.Background(), "demo-dev", &same, want, "info")
+	if !reflect.DeepEqual(info.Links, []notify.Link{{Service: "api", URL: "https://zzz.example.com"}}) {
+		t.Fatalf("Links = %+v", info.Links)
 	}
 }
