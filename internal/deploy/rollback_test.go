@@ -159,17 +159,29 @@ func TestRollbackEnsuresImagesBeforeWriting(t *testing.T) {
 	}
 }
 
-func TestRollbackTargetWithoutDigestsPullsNothing(t *testing.T) {
+func TestRollbackEnsuresDigestKeptFromEnv(t *testing.T) {
 	rig := setupTestRig(t, "dev", "demo-dev")
 	target, _ := seedRollback(t, rig)
 	target.Digests = nil
 
-	res, err := rig.deployer.Rollback(context.Background(), "demo-dev", &target, "cli:admin")
-	if err != nil || res.Status != state.StatusPaused {
-		t.Fatalf("res=%+v err=%v", res, err)
+	if _, err := rig.deployer.Rollback(context.Background(), "demo-dev", &target, "cli:test"); err != nil {
+		t.Fatal(err)
 	}
-	if got := ensureCalls(rig); len(got) != 0 {
-		t.Fatalf("pulled %v", got)
+	got := ensureCalls(rig)
+	if len(got) != 1 || !strings.Contains(got[0], "@sha256:") {
+		t.Fatalf("ensured %v", got)
+	}
+	ensure, up := -1, -1
+	for i, c := range rig.compose.calls {
+		if strings.HasPrefix(c, "ensure:") && ensure < 0 {
+			ensure = i
+		}
+		if strings.HasPrefix(c, "up") && up < 0 {
+			up = i
+		}
+	}
+	if ensure < 0 || up < 0 || ensure > up {
+		t.Fatalf("ensure must run before up: %v", rig.compose.calls)
 	}
 }
 

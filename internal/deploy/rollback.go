@@ -39,13 +39,13 @@ func (e *imagePullError) Unwrap() error { return e.err }
 
 // ensureTargetImages fetches the target's images that are not on the host,
 // which a rollback past the kept versions needs. Images come from the contract
-// of that revision: the state records only digests. A service without a digest
-// in target is left to the render.
-func (d *Deployer) ensureTargetImages(ctx context.Context, c ComposeAPI, inst string, p *contract.Project, target *state.Desired) error {
+// of that revision: the state records only digests. digests are the ones the
+// render will use, including those target leaves to cvctl.env.
+func (d *Deployer) ensureTargetImages(ctx context.Context, c ComposeAPI, inst string, p *contract.Project, digests map[string]string) error {
 	ctx, cancel := withStepTimeout(ctx, d.Host.TimeoutPull(), "pull")
 	defer cancel()
 	for _, a := range p.Apps {
-		digest := target.Digests[a.Name]
+		digest := digests[a.Name]
 		if digest == "" {
 			continue
 		}
@@ -145,7 +145,7 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 		}
 	}
 	if ensureImages {
-		if err := d.ensureTargetImages(ctx, finalCompose, inst, p, target); err != nil {
+		if err := d.ensureTargetImages(ctx, finalCompose, inst, p, dec.Digests); err != nil {
 			return err
 		}
 	}
