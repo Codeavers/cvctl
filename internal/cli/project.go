@@ -80,6 +80,7 @@ var newProjectEnv = func(o projectOpts) (*project.Env, error) {
 
 	data := &backup.Runner{
 		Run:        run,
+		Pipe:       sys.NewExecPiper(),
 		FS:         fsys,
 		Compose:    func(inst string) *compose.Project { return deployer.ComposeProject(run, inst) },
 		Load:       backup.LoadInstance("/srv/deploy", cat),

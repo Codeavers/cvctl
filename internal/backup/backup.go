@@ -1,5 +1,5 @@
-// Package backup runs and records WAL-G and restic backups of local data
-// services, and creates postgres restore points.
+// Package backup runs and records WAL-G, restic and dump backups of local data
+// services, and creates restore points before a deploy.
 package backup
 
 import (
@@ -27,6 +27,7 @@ import (
 const (
 	StrategyWalG   = "wal-g"
 	StrategyVolume = "volume"
+	StrategyDump   = "dump"
 	StrategyEnv    = "env"
 
 	// pgData is the image default; the render step keeps PGDATA at the volume root.
@@ -45,8 +46,9 @@ var deployOwner = sys.Owner{User: "deployer", Group: "deploy"}
 // Target is one local data service that has a backup strategy.
 type Target struct {
 	Service  string `json:"service"`
-	Strategy string `json:"strategy"` // wal-g | volume
+	Strategy string `json:"strategy"` // wal-g | volume | dump
 	Volume   string `json:"volume,omitempty"`
+	Kind     string `json:"-"`
 }
 
 // Targets lists the local data services of an instance with backup != none.
@@ -56,10 +58,10 @@ func Targets(p *contract.Project, d *instance.Decisions) []Target {
 		if d.Services[ds.Name].Mode != "local" {
 			continue
 		}
-		if ds.Backup != StrategyWalG && ds.Backup != StrategyVolume {
+		if ds.Backup != StrategyWalG && ds.Backup != StrategyVolume && ds.Backup != StrategyDump {
 			continue
 		}
-		out = append(out, Target{Service: ds.Name, Strategy: ds.Backup, Volume: render.VolumeName(d, ds.Name)})
+		out = append(out, Target{Service: ds.Name, Strategy: ds.Backup, Volume: render.VolumeName(d, ds.Name), Kind: ds.Kind})
 	}
 	return out
 }
@@ -129,6 +131,7 @@ type Snapshot struct {
 
 type Runner struct {
 	Run     sys.Runner
+	Pipe    sys.Piper
 	FS      sys.FS
 	Compose func(inst string) *compose.Project
 	Load    Loader
@@ -394,10 +397,7 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 					// a hung wal-g or restic must not hold the remaining services
 					tctx, cancel := context.WithTimeout(ctx, backupTimeout)
 					defer cancel()
-					if t.Strategy == StrategyWalG {
-						return dataRunner.walgBackup(tctx, inst, t)
-					}
-					return dataRunner.resticBackup(tctx, inst, t)
+					return dataRunner.backupTarget(tctx, inst, t)
 				}()
 				res := Result{Instance: inst, Service: t.Service, Strategy: t.Strategy, OK: runErr == nil}
 				if runErr != nil {
@@ -469,9 +469,6 @@ func (r *Runner) BackupService(ctx context.Context, inst, svc string) error {
 	}
 	tctx, cancel := context.WithTimeout(ctx, backupTimeout)
 	defer cancel()
-	if ts[0].Strategy == StrategyWalG {
-		return dataRunner.walgBackup(tctx, inst, ts[0])
-	}
 	if ts[0].Strategy == StrategyEnv {
 		if err := hostRunner.envBackup(tctx, inst); err != nil {
 			var oe *output.Error
@@ -483,7 +480,17 @@ func (r *Runner) BackupService(ctx context.Context, inst, svc string) error {
 		}
 		return nil
 	}
-	return dataRunner.resticBackup(tctx, inst, ts[0])
+	return dataRunner.backupTarget(tctx, inst, ts[0])
+}
+
+func (r *Runner) backupTarget(ctx context.Context, inst string, t Target) error {
+	switch t.Strategy {
+	case StrategyWalG:
+		return r.walgBackup(ctx, inst, t)
+	case StrategyDump:
+		return r.dumpBackup(ctx, inst, t)
+	}
+	return r.resticBackup(ctx, inst, t)
 }
 
 // List returns the backups of one service, or of every target when svc is empty.

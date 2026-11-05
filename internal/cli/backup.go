@@ -14,6 +14,7 @@ import (
 	"github.com/codeavers/cvctl/internal/deploy"
 	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/output"
+	"github.com/codeavers/cvctl/internal/sys"
 )
 
 type backupResultsReport struct {
@@ -42,6 +43,7 @@ func (e *OpsEnv) backupRunner() *backup.Runner {
 	}
 	return &backup.Runner{
 		Run:        run,
+		Pipe:       sys.NewExecPiper(),
 		FS:         e.fs(),
 		Compose:    func(inst string) *compose.Project { return d.ComposeProject(run, inst) },
 		Load:       backup.LoadInstance(e.deployRoot(), e.Catalog),

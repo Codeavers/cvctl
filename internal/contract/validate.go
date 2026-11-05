@@ -92,7 +92,7 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 		}
 		if b, ok := svc.Labels[LabelBackup]; ok && !kinds.ValidBackup(b) {
 			add("E_CONTRACT_BACKUP_INVALID", name, fmt.Sprintf("%s %q is not valid", LabelBackup, b),
-				fmt.Sprintf("set %s to wal-g, volume or none", LabelBackup))
+				fmt.Sprintf("set %s to wal-g, dump, volume or none", LabelBackup))
 		}
 		if svc.Labels[LabelRole] == "" && svc.Labels[LabelKind] == "" {
 			add("E_CONTRACT_NO_ROLE", name, "service has neither cvctl.role nor cvctl.kind",
@@ -137,15 +137,18 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 				add("E_CONTRACT_KIND_VERSION", d.Name, fmt.Sprintf("kind %s has no version %q", d.Kind, d.Version),
 					"use one of: "+strings.Join(k.Versions, ", "))
 			}
-			// wal-g runs postgres tools inside the service; a file-level copy
-			// of a live postgres volume is torn.
+			// wal-g and dump run the engine's tools inside the service; a
+			// file-level copy of a live database volume is torn.
+			supported := k.Backup
+			if supported == "none" {
+				supported = "volume"
+			}
+			hint := fmt.Sprintf("set %s to %s or none for this service", LabelBackup, supported)
 			switch {
-			case d.Backup == "wal-g" && k.Backup != "wal-g":
-				add("E_CONTRACT_BACKUP_UNSUPPORTED", d.Name, fmt.Sprintf("kind %s does not support %s wal-g", d.Kind, LabelBackup),
-					fmt.Sprintf("set %s to volume or none for this service", LabelBackup))
-			case d.Backup == "volume" && k.Backup == "wal-g":
-				add("E_CONTRACT_BACKUP_UNSUPPORTED", d.Name, fmt.Sprintf("kind %s cannot be backed up as a volume while it runs", d.Kind),
-					fmt.Sprintf("set %s to wal-g or none for this service", LabelBackup))
+			case (d.Backup == "wal-g" || d.Backup == "dump") && k.Backup != d.Backup:
+				add("E_CONTRACT_BACKUP_UNSUPPORTED", d.Name, fmt.Sprintf("kind %s does not support %s %s", d.Kind, LabelBackup, d.Backup), hint)
+			case d.Backup == "volume" && (k.Backup == "wal-g" || k.Backup == "dump"):
+				add("E_CONTRACT_BACKUP_UNSUPPORTED", d.Name, fmt.Sprintf("kind %s cannot be backed up as a volume while it runs", d.Kind), hint)
 			}
 			svc := p.Compose.Services[d.Name]
 			if k.Buckets {

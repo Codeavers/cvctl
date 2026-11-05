@@ -1474,3 +1474,29 @@ func TestDeployRejectedOnDiskContractPicksUpFix(t *testing.T) {
 		t.Fatal("infra/ still holds the rejected contract")
 	}
 }
+
+func TestStatusBackupNotConfiguredWarningForDump(t *testing.T) {
+	_, env := setupOpsFixture(t, "myapp-dev")
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := cat["postgres"]
+	k.Backup = "dump"
+	cat["postgres"] = k
+	env.Catalog = cat
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+	code, out, errb := run(t, "status", "--json")
+	if code != 0 || !strings.Contains(out, "backups are not configured") {
+		t.Fatalf("code=%d out=%s err=%s", code, out, errb)
+	}
+}
+
+func TestBackupRunnerCanPipe(t *testing.T) {
+	_, env := setupOpsFixture(t, "myapp-dev")
+	if env.backupRunner().Pipe == nil {
+		t.Fatal("the CLI backup runner needs a Piper for dump targets")
+	}
+}

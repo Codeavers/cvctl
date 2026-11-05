@@ -135,13 +135,29 @@ func (d *Deployer) ensureNetworks(ctx context.Context, inst string, p *contract.
 		return nil
 	}
 	for _, ds := range p.Data {
-		if dec.Services[ds.Name].Mode == "local" && (ds.Backup == "wal-g" || ds.Backup == "volume") {
+		if dec.Services[ds.Name].Mode == "local" && (ds.Backup == "wal-g" || ds.Backup == "volume" || ds.Backup == "dump") {
 			// Internal only with the host silo: external storage (R2, S3) is
 			// reached over the internet, so the network needs egress.
 			return sys.EnsureNetwork(ctx, d.Run, render.NetworkBackup(inst), d.Backup.Local)
 		}
 	}
 	return nil
+}
+
+// restoreHintService picks the service a failed migration most likely damaged.
+func restoreHintService(p *contract.Project) string {
+	for _, ds := range p.Data {
+		if ds.Backup == "wal-g" || ds.Backup == "dump" || ds.Kind == "postgres" {
+			return ds.Name
+		}
+	}
+	if len(p.Data) > 0 {
+		return p.Data[0].Name
+	}
+	if len(p.X.Hooks.PreDeploy) > 0 {
+		return p.X.Hooks.PreDeploy[0].Service
+	}
+	return ""
 }
 
 func errNoRunner() error {
@@ -1103,7 +1119,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 	resticKeep := map[string]bool{}
 	for _, t := range backup.Targets(p, dec) {
-		if t.Strategy == backup.StrategyVolume {
+		if t.Strategy == backup.StrategyVolume || t.Strategy == backup.StrategyDump {
 			resticKeep[t.Service] = true
 		}
 	}
@@ -1367,20 +1383,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	errText := redactedLogs
 	next := ""
 	if preHooksRan && dec.Env == "prod" {
-		dataSvc := ""
-		for _, ds := range p.Data {
-			if ds.Backup == "wal-g" || ds.Kind == "postgres" {
-				dataSvc = ds.Name
-				break
-			}
-		}
-		if dataSvc == "" && len(p.Data) > 0 {
-			dataSvc = p.Data[0].Name
-		}
-		if dataSvc == "" && len(p.X.Hooks.PreDeploy) > 0 {
-			dataSvc = p.X.Hooks.PreDeploy[0].Service
-		}
-		next = fmt.Sprintf("cvctl db restore %s %s --to %s", inst, dataSvc, deployID)
+		next = fmt.Sprintf("cvctl db restore %s %s --to %s", inst, restoreHintService(p), deployID)
 		errText += fmt.Sprintf("\nmigrations ran; restore point %s: %s", deployID, next)
 	}
 

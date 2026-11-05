@@ -412,7 +412,7 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 			return nil, err
 		}
 		isExposedBucket := k.Buckets && ds.ExposePort > 0
-		isBackedUp := o.Backup != nil && (ds.Backup == "wal-g" || ds.Backup == "volume")
+		isBackedUp := o.Backup != nil && (ds.Backup == "wal-g" || ds.Backup == "volume" || ds.Backup == "dump")
 		if isBackedUp {
 			usesBackupNet = true
 		}

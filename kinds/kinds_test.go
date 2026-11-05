@@ -287,3 +287,43 @@ func TestPostgisKind(t *testing.T) {
 		t.Errorf("postgis 15 accepted")
 	}
 }
+
+func TestValidBackupAcceptsDump(t *testing.T) {
+	if !ValidBackup("dump") {
+		t.Fatal("dump must be a valid backup strategy")
+	}
+}
+
+func TestKindDumpNeedsCommands(t *testing.T) {
+	const base = "image: x:{version}\nversions: [\"1\"]\ndefault_version: \"1\"\nbackup: dump\n"
+	cases := map[string]struct {
+		extra string
+		ok    bool
+	}{
+		"none":         {"", false},
+		"only dump":    {"dump_command: [d]\n", false},
+		"only restore": {"restore_command: [r]\n", false},
+		"both":         {"dump_command: [d]\nrestore_command: [r]\n", true},
+		"helper":       {"helper: cvctl-sqlite\nno_container: true\n", true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			c, err := LoadFS(fstest.MapFS{"x.yml": {Data: []byte(base + tc.extra)}})
+			if !tc.ok {
+				if err == nil || code(t, err) != "E_KIND_INVALID" {
+					t.Fatalf("want E_KIND_INVALID, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name == "helper" && (c["x"].Helper != "cvctl-sqlite" || !c["x"].NoContainer) {
+				t.Fatalf("kind: %+v", c["x"])
+			}
+			if name == "both" && (!reflect.DeepEqual(c["x"].DumpCommand, []string{"d"}) || !reflect.DeepEqual(c["x"].RestoreCommand, []string{"r"})) {
+				t.Fatalf("kind: %+v", c["x"])
+			}
+		})
+	}
+}

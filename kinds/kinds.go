@@ -19,7 +19,7 @@ import (
 //go:embed *.yml
 var embedded embed.FS
 
-var backups = []string{"wal-g", "volume", "none"}
+var backups = []string{"wal-g", "dump", "volume", "none"}
 
 // ValidBackup reports whether b is an accepted backup strategy.
 func ValidBackup(b string) bool { return slices.Contains(backups, b) }
@@ -43,6 +43,16 @@ type Kind struct {
 	Buckets           bool              `yaml:"buckets"`
 	// CapAdd are the capabilities a service needs back after cap_drop: [ALL].
 	CapAdd []string `yaml:"cap_add"`
+	// DumpCommand and RestoreCommand are joined with spaces into one sh -c
+	// script run inside the service, so $VAR reads its credentials from the
+	// container's own environment and they never reach argv.
+	DumpCommand    []string `yaml:"dump_command"`
+	RestoreCommand []string `yaml:"restore_command"`
+	// Helper names an auxiliary image that takes the dump instead of the
+	// service; such a kind declares no commands.
+	Helper string `yaml:"helper"`
+	// NoContainer marks a kind that runs no service container of its own.
+	NoContainer bool `yaml:"no_container"`
 }
 
 type Catalog map[string]Kind
@@ -83,6 +93,9 @@ func LoadFS(fsys fs.FS) (Catalog, error) {
 func validate(k Kind) error {
 	if !slices.Contains(backups, k.Backup) {
 		return invalid(k.Name, fmt.Sprintf("backup %q must be one of %v", k.Backup, backups))
+	}
+	if k.Backup == "dump" && k.Helper == "" && (len(k.DumpCommand) == 0 || len(k.RestoreCommand) == 0) {
+		return invalid(k.Name, "backup dump requires dump_command and restore_command, or helper")
 	}
 	if !slices.Contains(k.Versions, k.DefaultVersion) {
 		return invalid(k.Name, fmt.Sprintf("default_version %q is not in versions", k.DefaultVersion))
