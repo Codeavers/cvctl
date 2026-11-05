@@ -18,13 +18,14 @@ import (
 )
 
 const (
-	dumpScript = `fakedump --all-databases -p"$FAKE_ROOT_PASSWORD"`
-	snapID     = "4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e"
-	composePS  = "docker compose -p app-prod --env-file /srv/deploy/app-prod/app.env -f /srv/deploy/app-prod/compose.cvctl.yml ps -a --format json db"
-	retention  = "forget --keep-daily 7 --keep-weekly 4 --prune"
-	unmark     = "tag --remove partial " + snapID
-	purge      = "forget --tag partial --unsafe-allow-remove-all"
-	listCmd    = "docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 snapshots --json"
+	dumpScript  = `fakedump --all-databases -p"$FAKE_ROOT_PASSWORD"`
+	snapID      = "4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e"
+	composePS   = "docker compose -p app-prod --env-file /srv/deploy/app-prod/app.env -f /srv/deploy/app-prod/compose.cvctl.yml ps -a --format json db"
+	retention   = "forget --keep-daily 7 --keep-weekly 4 --prune"
+	unmark      = "tag --remove partial " + snapID
+	resticImage = "restic/restic:0.19.1"
+	purge       = "forget --tag partial --unsafe-allow-remove-all"
+	listCmd     = "docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 snapshots --json"
 )
 
 // Newest last, as restic prints them.
@@ -100,7 +101,7 @@ func TestDumpPipesServiceIntoRestic(t *testing.T) {
 	if !slices.Equal(from.Args, []string{"exec", "c0ffee", "sh", "-c", dumpScript}) || from.Name != "docker" {
 		t.Fatalf("producer: %v", from)
 	}
-	want := "run -i --rm --name " + dumpContainer + " --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 backup --stdin --stdin-filename db.dump --host h1 --tag app-prod --tag partial --json --quiet"
+	want := "run -i --rm --name " + dumpContainer + " --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 --retry-lock 10m backup --stdin --stdin-filename db.dump --host h1 --tag app-prod --tag partial --json --quiet"
 	if got := strings.Join(to.Args, " "); got != want {
 		t.Fatalf("consumer:\n got %s\nwant %s", got, want)
 	}
@@ -195,7 +196,7 @@ func TestDumpResticIncompleteForgetsSnapshot(t *testing.T) {
 func TestDumpForgetFailureIsReported(t *testing.T) {
 	g := newDumpRig(t)
 	g.pipe.Result.From = sys.Result{ExitCode: 1, Stderr: []byte("dump broke")}
-	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 forget "+snapID,
+	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 --retry-lock 10m forget "+snapID,
 		sys.Result{ExitCode: 1, Stderr: []byte("repo locked")})
 	res, err := g.backup(t)
 	if err == nil {
@@ -307,7 +308,7 @@ func TestDumpFailureKeepsPartialMark(t *testing.T) {
 
 func TestDumpUnmarkFailureForgetsSnapshot(t *testing.T) {
 	g := newDumpRig(t)
-	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 tag",
+	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 --retry-lock 10m tag",
 		sys.Result{ExitCode: 1, Stderr: []byte("repo locked")})
 	res, err := g.backup(t)
 	if err == nil || res[0].OK {
@@ -394,32 +395,55 @@ func TestDumpRestoreIgnoresPartial(t *testing.T) {
 	}
 }
 
-func TestRestorePointDumpTakesDataLock(t *testing.T) {
+// A deploy holds the instance lock, and a backup holding the data lock waits
+// for that same lock to record its status: waiting here would invert the order.
+func TestRestorePointDumpTakesNoDataLock(t *testing.T) {
 	g := newDumpRig(t)
 	g.run.On(psAll, sys.Result{Stdout: []byte("running\n")})
-	fl, unlock := holdDataLock(t)
-	sleeps := 0
-	g.r.Sleep = func(time.Duration) {
-		sleeps++
-		if sleeps == 2 {
-			if len(g.pipe.Calls) != 0 {
-				t.Error("dumped without the data lock")
-			}
-			unlock()
-		}
-	}
+	holdDataLock(t)
+	g.r.Sleep = func(time.Duration) { t.Error("the restore point waited for the data lock") }
 	rp := &backup.RestorePoint{Compose: g.r.Compose, Load: g.r.Load, Data: g.r}
 	if err := rp.Create(context.Background(), "app-prod", "deploy-5"); err != nil {
 		t.Fatal(err)
 	}
-	if sleeps != 2 || len(g.pipe.Calls) != 1 {
-		t.Fatalf("sleeps=%d pipe=%d", sleeps, len(g.pipe.Calls))
+	if len(g.pipe.Calls) != 1 {
+		t.Fatalf("pipe calls: %+v", g.pipe.Calls)
 	}
-	release, err := fl.LockFile(dataLock, 0o640, sys.Owner{})
-	if err != nil {
-		t.Fatalf("data lock not released: %v", err)
+	if to := strings.Join(g.pipe.Calls[0].To.Args, " "); !strings.Contains(to, "--retry-lock 10m backup --stdin") {
+		t.Fatalf("backup must wait for restic's repository lock: %s", to)
 	}
-	release()
+}
+
+// A prune locks the repository exclusively, and tag and forget need that lock
+// too, so a retry on the backup alone only moves the collision.
+func TestDumpEveryResticCommandRetriesLock(t *testing.T) {
+	g := newDumpRig(t)
+	if _, err := g.backup(t); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, c := range g.calls() {
+		if strings.Contains(c, resticImage) {
+			n++
+			if !strings.Contains(c, resticImage+" --retry-lock 10m ") {
+				t.Fatalf("no retry: %s", c)
+			}
+		}
+	}
+	if n != 4 {
+		t.Fatalf("want snapshots, tag, purge and retention: %v", g.calls())
+	}
+}
+
+func TestDumpForgetAfterFailureRetriesLock(t *testing.T) {
+	g := newDumpRig(t)
+	g.pipe.Result.From.ExitCode = 1
+	if _, err := g.backup(t); err == nil {
+		t.Fatal("want error")
+	}
+	if len(g.resticCalls("--retry-lock 10m forget "+snapID+" --prune")) != 1 {
+		t.Fatalf("calls: %v", g.calls())
+	}
 }
 
 type pipeFunc func(context.Context, sys.Cmd, sys.Cmd) (sys.PipeResult, error)

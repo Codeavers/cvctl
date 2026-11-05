@@ -332,7 +332,7 @@ bucket, plus `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` and `S3_REGION`.
 
 Per app the daily timer backs up databases (WAL-G) and the env files (`cvctl.env`, `app.env`, deploy key) encrypted with the host restic key; object storage (`s3` services) is not backed up by default: set `cvctl.backup: volume` on the service to back it up. Run manual env backups with `cvctl backup now <inst> env`.
 
-A service backed up with `cvctl.backup: dump` has no WAL to mark, so its restore point before a prod deploy is a full dump. Each prod deploy takes that dump first, so deploy time grows with the size of the database. It also waits for the host data lock, so a running backup or verify delays the deploy.
+A service backed up with `cvctl.backup: dump` has no WAL to mark, so its restore point before a prod deploy is a full dump. Each prod deploy takes that dump first, so deploy time grows with the size of the database. If a prune holds the restic repository, the dump waits up to 10 minutes for it.
 
 ### Disaster recovery and restore
 

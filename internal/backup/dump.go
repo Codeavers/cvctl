@@ -16,6 +16,11 @@ import (
 // tagPartial marks a dump snapshot not yet known to be complete.
 const tagPartial = "partial"
 
+// repoLockWait lets a dump outlast a prune of its repository. A restore point
+// cannot wait on the data lock instead: it runs under the instance lock, and a
+// backup holding the data lock waits for that lock to record its status.
+const repoLockWait = "10m"
+
 // forgetTimeout bounds removing a partial snapshot: --prune rewrites pack
 // files, which takes far longer on a large repository than cleanupTimeout.
 const forgetTimeout = 30 * time.Minute
@@ -44,7 +49,7 @@ func (r *Runner) dump(ctx context.Context, inst string, t Target, tags ...string
 	if err != nil {
 		return err
 	}
-	if err := r.resticInit(ctx, inst, envFile); err != nil {
+	if err := r.resticInit(ctx, inst, envFile, "--retry-lock", repoLockWait); err != nil {
 		return err
 	}
 	from := r.docker("exec", container, "sh", "-c", script)
@@ -56,7 +61,7 @@ func (r *Runner) dump(ctx context.Context, inst string, t Target, tags ...string
 	}
 	name := r.tempName("dump", inst, t.Service)
 	to := r.docker(append([]string{"run", "-i", "--rm", "--name", name, "--network", render.NetworkBackup(inst),
-		"--env-file", envFile, resticImage}, append(args, "--json", "--quiet")...)...)
+		"--env-file", envFile, resticImage, "--retry-lock", repoLockWait}, append(args, "--json", "--quiet")...)...)
 
 	res, pipeErr := r.Pipe.Pipe(ctx, from, to)
 	if ctx.Err() != nil {
@@ -73,7 +78,7 @@ func (r *Runner) dump(ctx context.Context, inst string, t Target, tags ...string
 		}
 	}
 	if cause == nil {
-		_, cause = r.exec(ctx, r.resticCmd(inst, envFile, "", "tag", "--remove", tagPartial, id))
+		_, cause = r.exec(ctx, r.dumpRestic(inst, envFile, "tag", "--remove", tagPartial, id))
 	}
 	if cause != nil {
 		if id != "" {
@@ -83,11 +88,15 @@ func (r *Runner) dump(ctx context.Context, inst string, t Target, tags ...string
 	}
 	// Leftovers go first: retention would count one as the day's snapshot and
 	// drop the complete one beside it.
-	if _, err := r.exec(ctx, r.resticCmd(inst, envFile, "", "forget", "--tag", tagPartial, "--unsafe-allow-remove-all")); err != nil {
+	if _, err := r.exec(ctx, r.dumpRestic(inst, envFile, "forget", "--tag", tagPartial, "--unsafe-allow-remove-all")); err != nil {
 		return err
 	}
-	_, err = r.exec(ctx, r.resticCmd(inst, envFile, "", "forget", "--keep-daily", "7", "--keep-weekly", "4", "--prune"))
+	_, err = r.exec(ctx, r.dumpRestic(inst, envFile, "forget", "--keep-daily", "7", "--keep-weekly", "4", "--prune"))
 	return err
+}
+
+func (r *Runner) dumpRestic(inst, envFile string, args ...string) sys.Cmd {
+	return r.resticCmd(inst, envFile, "", append([]string{"--retry-lock", repoLockWait}, args...)...)
 }
 
 // completeDump resolves snap ("latest" or an id prefix) to a complete snapshot
@@ -165,7 +174,7 @@ func (r *Runner) pipeFailure(from, to sys.Cmd, res sys.PipeResult, err error) er
 func (r *Runner) forgetPartial(ctx context.Context, inst, envFile, id string, cause error) error {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), forgetTimeout)
 	defer cancel()
-	if _, err := r.exec(cctx, r.resticCmd(inst, envFile, "", "forget", id, "--prune")); err != nil {
+	if _, err := r.exec(cctx, r.dumpRestic(inst, envFile, "forget", id, "--prune")); err != nil {
 		return &output.Error{
 			Code:    "E_BACKUP_FAILED",
 			Message: r.redact(fmt.Sprintf("partial snapshot %s could not be removed: %v; the backup failed: %v", id, err, cause)),

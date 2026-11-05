@@ -97,12 +97,6 @@ func (rp *RestorePoint) dumpPoint(ctx context.Context, inst string, p *contract.
 	if err != nil {
 		return err
 	}
-	// A nightly prune holds restic's exclusive lock; this waits it out.
-	unlock, err := r.lockData(ctx, true)
-	if err != nil {
-		return err
-	}
-	defer unlock()
 	tctx, cancel := context.WithTimeout(ctx, backupTimeout)
 	defer cancel()
 	return r.dump(tctx, inst, t, id)

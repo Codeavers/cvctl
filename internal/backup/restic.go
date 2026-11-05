@@ -97,8 +97,10 @@ func (r *Runner) resticBackup(ctx context.Context, inst string, t Target) error 
 	return err
 }
 
-func (r *Runner) resticInit(ctx context.Context, inst, envFile string) error {
-	cmd := r.resticCmd(inst, envFile, "", "snapshots", "--json")
+// resticInit creates the repository if it is missing; global holds restic
+// options for both commands.
+func (r *Runner) resticInit(ctx context.Context, inst, envFile string, global ...string) error {
+	cmd := r.resticCmd(inst, envFile, "", append(global, "snapshots", "--json")...)
 	res, err := r.Run.Run(ctx, cmd)
 	if err == nil && res.ExitCode == 0 {
 		return nil
@@ -106,7 +108,7 @@ func (r *Runner) resticInit(ctx context.Context, inst, envFile string) error {
 	if err != nil || res.ExitCode != resticExitNoRepo {
 		return r.cmdFailed(cmd, res, err)
 	}
-	_, err = r.exec(ctx, r.resticCmd(inst, envFile, "", "init"))
+	_, err = r.exec(ctx, r.resticCmd(inst, envFile, "", append(global, "init")...))
 	return err
 }
 
