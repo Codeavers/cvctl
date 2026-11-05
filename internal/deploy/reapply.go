@@ -16,5 +16,5 @@ func (d *Deployer) Reapply(ctx context.Context, inst string, target *state.Desir
 	if err != nil {
 		return err
 	}
-	return d.executeSwap(ctx, inst, target, existing, false)
+	return d.executeSwap(ctx, inst, target, existing, false, false)
 }

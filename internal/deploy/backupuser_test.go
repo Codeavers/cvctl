@@ -116,7 +116,7 @@ func TestDeployBackupProvisionFailureIsTransientAndRedacted(t *testing.T) {
 func TestExecuteSwapProvisionsBackupUserBeforeUp(t *testing.T) {
 	rig, _ := keyedRig(t)
 	target := defaultDesired()
-	if err := rig.deployer.executeSwap(context.Background(), "demo-dev", &target, map[string]string{}, false); err != nil {
+	if err := rig.deployer.executeSwap(context.Background(), "demo-dev", &target, map[string]string{}, false, false); err != nil {
 		t.Fatal(err)
 	}
 	calls := rig.compose.calls

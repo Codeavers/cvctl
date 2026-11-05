@@ -12,6 +12,7 @@ import (
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/gitrepo"
 	"github.com/codeavers/cvctl/internal/hostcfg"
+	"github.com/codeavers/cvctl/internal/images"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/registry"
 	"github.com/codeavers/cvctl/internal/render"
@@ -32,6 +33,10 @@ func Wire(d *Deployer, run sys.Runner) {
 	}
 	if d.Labels == nil && d.Host != nil {
 		d.Labels = registry.NewLabels(auth.User, auth.Token, auth.TokenHost, auth.Insecure)
+	}
+
+	if d.Images == nil {
+		d.Images = &images.Pruner{Run: run}
 	}
 
 	d.Repo = func(inst string) CheckoutAPI {

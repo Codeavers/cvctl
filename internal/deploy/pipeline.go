@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/envspec"
 	"github.com/codeavers/cvctl/internal/hostcfg"
+	"github.com/codeavers/cvctl/internal/images"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/objstore"
@@ -36,6 +38,7 @@ var deployOwner = sys.Owner{User: "deployer", Group: "deploy"}
 type ComposeAPI interface {
 	Config(ctx context.Context) error
 	Pull(ctx context.Context, services ...string) error
+	EnsureImage(ctx context.Context, ref string) error
 	UpData(ctx context.Context, services []string, waitTimeout time.Duration) error
 	RunHook(ctx context.Context, service, script string) (sys.Result, error)
 	ExecScript(ctx context.Context, service, script string) (sys.Result, error)
@@ -107,6 +110,11 @@ type Deployer struct {
 	// Sleep waits for the pinned route to settle in a blue-green swap; nil
 	// sleeps for real.
 	Sleep func(ctx context.Context, d time.Duration) error
+	// Images removes surplus images after a deploy; nil means no cleanup.
+	Images *images.Pruner
+	// Log receives failures that must not change a result; nil is stderr,
+	// which unattended runs send to the journal.
+	Log io.Writer
 }
 
 // traefikContainer is the host proxy container; it joins each instance's edge
@@ -443,7 +451,7 @@ func (d *Deployer) interrupted(ctx context.Context, inst string, st *state.State
 		rbCtx, cancel := withStepTimeout(context.WithoutCancel(ctx), rb.cap, "rollback")
 		defer cancel()
 		target := *st.Current
-		if err := d.swapOrRestore(rbCtx, inst, &target, st.Current, rb.env, rb.absent); err != nil {
+		if err := d.swapOrRestore(rbCtx, inst, &target, st.Current, rb.env, rb.absent, false); err != nil {
 			detail := stepErrText(rbCtx, err)
 			st.Status = state.StatusFailed
 			st.Promoted = false
@@ -563,7 +571,7 @@ func (d *Deployer) handlePromoteFailure(ctx context.Context, inst string, st *st
 	d.cleanupStaging(stagingDir, stagingOverride, stagingAppEnv, stagingRoute)
 	restoreMsg := ""
 	if st.Current != nil {
-		if rErr := d.swapOrRestore(ctx, inst, st.Current, st.Current, existingEnv, appEnvAbsent); rErr != nil {
+		if rErr := d.swapOrRestore(ctx, inst, st.Current, st.Current, existingEnv, appEnvAbsent, false); rErr != nil {
 			restoreMsg = fmt.Sprintf("; restore to %s failed: %v", RevShort(*st.Current), rErr)
 		} else {
 			restoreMsg = fmt.Sprintf("; restored to %s", RevShort(*st.Current))
@@ -1211,6 +1219,10 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		}); err != nil {
 			okErrs = append(okErrs, err)
 		}
+		// The cleanup trusts what is on disk, which a failed write left stale.
+		if len(okErrs) == 0 {
+			d.pruneImages(ctx, inst)
+		}
 
 		return Result{
 			Status: state.StatusOK,
@@ -1299,7 +1311,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 
 	rollbackTarget := *st.Current
-	rollbackErr := d.swapOrRestore(rbCtx, inst, &rollbackTarget, st.Current, rollbackEnv, false)
+	rollbackErr := d.swapOrRestore(rbCtx, inst, &rollbackTarget, st.Current, rollbackEnv, false, false)
 
 	st.Status = state.StatusFailed
 	st.FailedHash = want.Hash()

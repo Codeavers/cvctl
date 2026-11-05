@@ -18,8 +18,8 @@ import (
 // swapOrRestore runs executeSwap and, when it fails, checks out current again
 // so infra/ never stays at a revision that was not installed, as DeployLocked
 // does before promotion.
-func (d *Deployer) swapOrRestore(ctx context.Context, inst string, target, current *state.Desired, appEnv map[string]string, appEnvAbsent bool) error {
-	err := d.executeSwap(ctx, inst, target, appEnv, appEnvAbsent)
+func (d *Deployer) swapOrRestore(ctx context.Context, inst string, target, current *state.Desired, appEnv map[string]string, appEnvAbsent, ensureImages bool) error {
+	err := d.executeSwap(ctx, inst, target, appEnv, appEnvAbsent, ensureImages)
 	if err == nil || !hasInfra(current) {
 		return err
 	}
@@ -31,8 +31,41 @@ func (d *Deployer) swapOrRestore(ctx context.Context, inst string, target, curre
 	return err
 }
 
-// executeSwap performs checkout, render, promotion, Up, and health check for target state.
-func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.Desired, appEnv map[string]string, appEnvAbsent bool) error {
+// imagePullError marks a failure raised before anything was promoted.
+type imagePullError struct{ err *output.Error }
+
+func (e *imagePullError) Error() string { return e.err.Error() }
+func (e *imagePullError) Unwrap() error { return e.err }
+
+// ensureTargetImages fetches the target's images that are not on the host,
+// which a rollback past the kept versions needs. Images come from the contract
+// of that revision: the state records only digests. digests are the ones the
+// render will use, including those target leaves to cvctl.env.
+func (d *Deployer) ensureTargetImages(ctx context.Context, c ComposeAPI, inst string, p *contract.Project, digests map[string]string) error {
+	ctx, cancel := withStepTimeout(ctx, d.Host.TimeoutPull(), "pull")
+	defer cancel()
+	for _, a := range p.Apps {
+		digest := digests[a.Name]
+		if digest == "" {
+			continue
+		}
+		ref := a.Image + "@" + digest
+		if err := c.EnsureImage(ctx, ref); err != nil {
+			return &imagePullError{&output.Error{
+				Code:    "E_ROLLBACK_IMAGE",
+				Message: fmt.Sprintf("cannot pull %s, it may have been removed from the registry: %s", ref, stepErrText(ctx, err)),
+				Hint:    "nothing changed; pick a version that is still available from cvctl history " + inst,
+			}}
+		}
+	}
+	return nil
+}
+
+// executeSwap performs checkout, render, promotion, Up, and health check for
+// target state. With ensureImages it fetches missing images before promoting;
+// paths returning to the running version have them on disk and must not depend
+// on the registry.
+func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.Desired, appEnv map[string]string, appEnvAbsent, ensureImages bool) error {
 	if err := d.checkout(ctx, inst, *target); err != nil {
 		return err
 	}
@@ -103,6 +136,20 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 		return err
 	}
 
+	finalCompose := d.Compose(inst, finalOverridePath, finalAppEnvPath)
+	if finalCompose == nil {
+		return &output.Error{
+			Code:    "E_DEPLOY_MISCONFIGURED",
+			Message: "deployer misconfigured: Compose returned nil",
+			Hint:    "ensure Compose factory returns a valid ComposeAPI",
+		}
+	}
+	if ensureImages {
+		if err := d.ensureTargetImages(ctx, finalCompose, inst, p, dec.Digests); err != nil {
+			return err
+		}
+	}
+
 	fsys := d.fs()
 	// Promote order: app.env -> backup envs -> route -> override
 	if appEnvAbsent {
@@ -128,14 +175,6 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 		return err
 	}
 
-	finalCompose := d.Compose(inst, finalOverridePath, finalAppEnvPath)
-	if finalCompose == nil {
-		return &output.Error{
-			Code:    "E_DEPLOY_MISCONFIGURED",
-			Message: "deployer misconfigured: Compose returned nil",
-			Hint:    "ensure Compose factory returns a valid ComposeAPI",
-		}
-	}
 	if err := d.ensureNetworks(ctx, inst, p, dec); err != nil {
 		return err
 	}
@@ -207,7 +246,14 @@ func (d *Deployer) Rollback(ctx context.Context, inst string, to *state.Desired,
 		return Result{}, err
 	}
 
-	swapErr := d.swapOrRestore(ctx, inst, target, st.Current, existingEnv, false)
+	swapErr := d.swapOrRestore(ctx, inst, target, st.Current, existingEnv, false, true)
+	// Not errors.As: swapOrRestore wraps the error when infra/ could not be
+	// restored, and then the instance no longer matches its state.
+	if pullErr, ok := swapErr.(*imagePullError); ok {
+		e := *pullErr.err
+		e.Message = redact(e.Message, withSecrets(existingEnv, d.cvctlSecrets(filepath.Join(instDir, "cvctl.env"))))
+		return Result{}, &e
+	}
 	if swapErr != nil {
 		st.Status = state.StatusFailed
 		st.RollbackFailed = true

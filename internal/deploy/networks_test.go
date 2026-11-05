@@ -69,7 +69,7 @@ func TestExecuteSwapConnectsEdgeNetwork(t *testing.T) {
 	rig := setupTestRig(t, "dev", "demo-dev")
 	rig.deployer.Run = &netRunner{log: rig.compose}
 	target := defaultDesired()
-	if err := rig.deployer.executeSwap(context.Background(), "demo-dev", &target, map[string]string{}, false); err != nil {
+	if err := rig.deployer.executeSwap(context.Background(), "demo-dev", &target, map[string]string{}, false, false); err != nil {
 		t.Fatal(err)
 	}
 	calls := rig.compose.calls
@@ -134,7 +134,7 @@ func TestExecuteSwapConnectFailureReturnsError(t *testing.T) {
 	rig := setupTestRig(t, "dev", "demo-dev")
 	rig.deployer.Run = &netRunner{log: rig.compose, failConnect: true}
 	target := defaultDesired()
-	err := rig.deployer.executeSwap(context.Background(), "demo-dev", &target, map[string]string{}, false)
+	err := rig.deployer.executeSwap(context.Background(), "demo-dev", &target, map[string]string{}, false, false)
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("err=%v", err)
 	}
