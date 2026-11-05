@@ -3,9 +3,11 @@ package backup_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codeavers/cvctl/internal/backup"
 	"github.com/codeavers/cvctl/internal/contract"
@@ -20,7 +22,17 @@ const (
 	snapID     = "4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e"
 	composePS  = "docker compose -p app-prod --env-file /srv/deploy/app-prod/app.env -f /srv/deploy/app-prod/compose.cvctl.yml ps -a --format json db"
 	retention  = "forget --keep-daily 7 --keep-weekly 4 --prune"
+	unmark     = "tag --remove partial " + snapID
+	purge      = "forget --tag partial --unsafe-allow-remove-all"
+	listCmd    = "docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 snapshots --json"
 )
+
+// Newest last, as restic prints them.
+var snapshotsWithPartial = []byte(`[
+{"short_id":"aaaa1111","time":"2026-11-03T03:00:00Z","tags":["app-prod"]},
+{"short_id":"bbbb2222","time":"2026-11-04T03:00:00Z","tags":["app-prod","partial"]}]`)
+
+var dumpContainer = fmt.Sprintf("cvctl-dump-app-prod-db-%d-0a0b0c0d", time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).Unix())
 
 var resticSummary = []byte(`{"message_type":"status","percent_done":1}
 {"message_type":"summary","files_new":1,"snapshot_id":"` + snapID + `"}
@@ -88,7 +100,7 @@ func TestDumpPipesServiceIntoRestic(t *testing.T) {
 	if !slices.Equal(from.Args, []string{"exec", "c0ffee", "sh", "-c", dumpScript}) || from.Name != "docker" {
 		t.Fatalf("producer: %v", from)
 	}
-	want := "run -i --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 backup --stdin --stdin-filename db.dump --host h1 --tag app-prod --json --quiet"
+	want := "run -i --rm --name " + dumpContainer + " --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 backup --stdin --stdin-filename db.dump --host h1 --tag app-prod --tag partial --json --quiet"
 	if got := strings.Join(to.Args, " "); got != want {
 		t.Fatalf("consumer:\n got %s\nwant %s", got, want)
 	}
@@ -198,44 +210,216 @@ func TestDumpForgetFailureIsReported(t *testing.T) {
 
 type ctxRecorder struct {
 	*systest.Runner
-	forgetErr error
+	match string
+	err   error
 }
 
 func (r *ctxRecorder) Run(ctx context.Context, c sys.Cmd) (sys.Result, error) {
-	if strings.Contains(c.String(), "forget "+snapID) {
-		r.forgetErr = ctx.Err()
+	if strings.Contains(c.String(), r.match) {
+		r.err = ctx.Err()
 	}
 	return r.Runner.Run(ctx, c)
 }
 
-func TestDumpCancelledRunStillForgetsSnapshot(t *testing.T) {
-	g := newDumpRig(t)
-	rec := &ctxRecorder{Runner: g.run, forgetErr: errors.New("forget never ran")}
-	g.r.Run = rec
-	ctx, cancel := context.WithCancel(context.Background())
-	g.r.Pipe = pipeFunc(func(context.Context, sys.Cmd, sys.Cmd) (sys.PipeResult, error) {
+func cancellingPipe(cancel func(), res sys.PipeResult) pipeFunc {
+	return func(context.Context, sys.Cmd, sys.Cmd) (sys.PipeResult, error) {
 		cancel()
-		return sys.PipeResult{To: sys.Result{Stdout: resticSummary}}, context.Canceled
-	})
-	if err := g.r.BackupService(ctx, "app-prod", "db"); err == nil {
-		t.Fatal("want error")
-	}
-	if rec.forgetErr != nil {
-		t.Fatalf("forget context: %v", rec.forgetErr)
+		return res, context.Canceled
 	}
 }
 
-func TestDumpCancelledRunWarnsWhenSnapshotUnknown(t *testing.T) {
+func TestDumpCancelledRunStillForgetsSnapshot(t *testing.T) {
 	g := newDumpRig(t)
+	rec := &ctxRecorder{Runner: g.run, match: "forget " + snapID, err: errors.New("forget never ran")}
+	g.r.Run = rec
 	ctx, cancel := context.WithCancel(context.Background())
-	g.r.Pipe = pipeFunc(func(context.Context, sys.Cmd, sys.Cmd) (sys.PipeResult, error) {
-		cancel()
-		return sys.PipeResult{}, context.Canceled
-	})
-	err := g.r.BackupService(ctx, "app-prod", "db")
-	if err == nil || !strings.Contains(err.Error(), "partial snapshot may remain") {
-		t.Fatalf("err: %v", err)
+	g.r.Pipe = cancellingPipe(cancel, sys.PipeResult{To: sys.Result{Stdout: resticSummary}})
+	if err := g.r.BackupService(ctx, "app-prod", "db"); err == nil {
+		t.Fatal("want error")
 	}
+	if rec.err != nil {
+		t.Fatalf("forget context: %v", rec.err)
+	}
+}
+
+func TestDumpCancelRemovesContainer(t *testing.T) {
+	g := newDumpRig(t)
+	rec := &ctxRecorder{Runner: g.run, match: "docker rm -f " + dumpContainer, err: errors.New("rm never ran")}
+	g.r.Run = rec
+	ctx, cancel := context.WithCancel(context.Background())
+	g.r.Pipe = cancellingPipe(cancel, sys.PipeResult{})
+	if err := g.r.BackupService(ctx, "app-prod", "db"); err == nil {
+		t.Fatal("want error")
+	}
+	if rec.err != nil {
+		t.Fatalf("rm context: %v", rec.err)
+	}
+}
+
+func TestDumpFailureWithoutCancelLeavesContainerAlone(t *testing.T) {
+	g := newDumpRig(t)
+	g.pipe.Result.From.ExitCode = 1
+	if _, err := g.backup(t); err == nil {
+		t.Fatal("want error")
+	}
+	for _, c := range g.calls() {
+		if strings.HasPrefix(c, "docker rm") {
+			t.Fatalf("restic already exited: %s", c)
+		}
+	}
+}
+
+func TestDumpMarksPartialUntilComplete(t *testing.T) {
+	g := newDumpRig(t)
+	if _, err := g.backup(t); err != nil {
+		t.Fatal(err)
+	}
+	if to := strings.Join(g.pipe.Calls[0].To.Args, " "); !strings.Contains(to, "--tag partial") {
+		t.Fatalf("snapshot not marked partial: %s", to)
+	}
+	calls := g.calls()
+	at := func(suffix string) int {
+		return slices.IndexFunc(calls, func(c string) bool { return strings.HasSuffix(c, suffix) })
+	}
+	iUnmark, iPurge, iRetain := at(unmark), at(purge), at(retention)
+	if iUnmark < 0 || iPurge < iUnmark || iRetain < iPurge {
+		t.Fatalf("want unmark, purge, retention in order: %v", calls)
+	}
+}
+
+func TestDumpFailureKeepsPartialMark(t *testing.T) {
+	for name, res := range map[string]sys.PipeResult{
+		"producer": {From: sys.Result{ExitCode: 1}, To: sys.Result{Stdout: resticSummary}},
+		"restic":   {To: sys.Result{ExitCode: 3, Stdout: resticSummary}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newDumpRig(t)
+			g.pipe.Result = res
+			if _, err := g.backup(t); err == nil {
+				t.Fatal("want error")
+			}
+			if len(g.resticCalls(unmark)) != 0 {
+				t.Fatalf("a failed run must stay partial: %v", g.calls())
+			}
+		})
+	}
+}
+
+func TestDumpUnmarkFailureForgetsSnapshot(t *testing.T) {
+	g := newDumpRig(t)
+	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 tag",
+		sys.Result{ExitCode: 1, Stderr: []byte("repo locked")})
+	res, err := g.backup(t)
+	if err == nil || res[0].OK {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	if len(g.resticCalls("forget "+snapID+" --prune")) != 1 || len(g.resticCalls(retention)) != 0 {
+		t.Fatalf("calls: %v", g.calls())
+	}
+}
+
+// Without the id the mark cannot come off, so the snapshot is unusable.
+func TestDumpWithoutSnapshotIDFails(t *testing.T) {
+	g := newDumpRig(t)
+	g.pipe.Result.To.Stdout = nil
+	res, err := g.backup(t)
+	if err == nil || res[0].OK {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
+
+func TestDumpListIgnoresPartial(t *testing.T) {
+	g := newDumpRig(t)
+	g.run.OnPrefix(listCmd, sys.Result{Stdout: snapshotsWithPartial})
+	snaps, err := g.r.List(context.Background(), "app-prod", "db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps) != 1 || snaps[0].ID != "aaaa1111" {
+		t.Fatalf("snapshots: %+v", snaps)
+	}
+}
+
+func TestVolumeListKeepsPartialTag(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-files.env restic/restic:0.19.1 snapshots --json",
+		sys.Result{Stdout: snapshotsWithPartial})
+	snaps, err := g.r.List(context.Background(), "app-prod", "files")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps) != 2 {
+		t.Fatalf("a user tag on a volume snapshot means nothing: %+v", snaps)
+	}
+}
+
+func TestDumpVerifyIgnoresPartial(t *testing.T) {
+	g := newDumpRig(t)
+	g.run.OnPrefix(listCmd, sys.Result{Stdout: snapshotsWithPartial})
+	g.run.OnPrefix("docker run --name cvctl-verify", sys.Result{Stdout: []byte("1\n")})
+	if _, err := g.r.Verify(context.Background(), "app-prod", "db"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range g.calls() {
+		if strings.Contains(c, "restic restore") && !strings.Contains(c, "restic restore aaaa1111 ") {
+			t.Fatalf("verify must read the newest complete snapshot: %s", c)
+		}
+	}
+	if !strings.Contains(strings.Join(g.calls(), "\n"), "restic restore aaaa1111 ") {
+		t.Fatalf("no restore: %v", g.calls())
+	}
+}
+
+func TestDumpVerifyWithOnlyPartialFails(t *testing.T) {
+	g := newDumpRig(t)
+	g.run.OnPrefix(listCmd, sys.Result{Stdout: []byte(`[{"short_id":"bbbb2222","time":"2026-11-04T03:00:00Z","tags":["partial"]}]`)})
+	res, err := g.r.Verify(context.Background(), "app-prod", "db")
+	if err == nil || res[0].OK || !strings.Contains(res[0].Error, "no complete") {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
+
+func TestDumpRestoreIgnoresPartial(t *testing.T) {
+	g := newDumpRig(t)
+	g.run.OnPrefix(listCmd, sys.Result{Stdout: snapshotsWithPartial})
+	g.run.On("docker volume inspect fresh-vol", sys.Result{ExitCode: 1, Stderr: []byte("no such volume")})
+	p, d, _ := g.r.Load("app-prod")
+	if err := g.r.RestoreFresh(context.Background(), "app-prod", "db", p, d, "fresh-vol"); err != nil {
+		t.Fatal(err)
+	}
+	all := strings.Join(g.calls(), "\n")
+	if !strings.Contains(all, " restore aaaa1111") || strings.Contains(all, " restore latest") || strings.Contains(all, "bbbb2222") {
+		t.Fatalf("calls: %v", g.calls())
+	}
+}
+
+func TestRestorePointDumpTakesDataLock(t *testing.T) {
+	g := newDumpRig(t)
+	g.run.On(psAll, sys.Result{Stdout: []byte("running\n")})
+	fl, unlock := holdDataLock(t)
+	sleeps := 0
+	g.r.Sleep = func(time.Duration) {
+		sleeps++
+		if sleeps == 2 {
+			if len(g.pipe.Calls) != 0 {
+				t.Error("dumped without the data lock")
+			}
+			unlock()
+		}
+	}
+	rp := &backup.RestorePoint{Compose: g.r.Compose, Load: g.r.Load, Data: g.r}
+	if err := rp.Create(context.Background(), "app-prod", "deploy-5"); err != nil {
+		t.Fatal(err)
+	}
+	if sleeps != 2 || len(g.pipe.Calls) != 1 {
+		t.Fatalf("sleeps=%d pipe=%d", sleeps, len(g.pipe.Calls))
+	}
+	release, err := fl.LockFile(dataLock, 0o640, sys.Owner{})
+	if err != nil {
+		t.Fatalf("data lock not released: %v", err)
+	}
+	release()
 }
 
 type pipeFunc func(context.Context, sys.Cmd, sys.Cmd) (sys.PipeResult, error)

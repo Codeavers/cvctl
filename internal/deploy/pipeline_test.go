@@ -3603,13 +3603,13 @@ func TestRestoreHintServicePrefersDump(t *testing.T) {
 }
 
 func TestWireGivesRestorePointADumpRunner(t *testing.T) {
-	d := &Deployer{Backup: testBackupTarget(), FS: systest.NewFS()}
+	d := &Deployer{Backup: testBackupTarget(), FS: systest.NewFS(), Store: state.NewStore(systest.NewFS(), "/var/lib/cvctl")}
 	Wire(d, &systest.Runner{})
 	rp, ok := d.Restore.(*backup.RestorePoint)
 	if !ok {
 		t.Fatalf("restore: %T", d.Restore)
 	}
-	if rp.Data == nil || rp.Data.Pipe == nil || rp.Data.Host != d.Backup || rp.Data.Run == nil || rp.Data.FS == nil {
+	if rp.Data == nil || rp.Data.Pipe == nil || rp.Data.Host != d.Backup || rp.Data.Store != d.Store || rp.Data.Run == nil || rp.Data.FS == nil {
 		t.Fatalf("data runner: %+v", rp.Data)
 	}
 }

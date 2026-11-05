@@ -86,6 +86,7 @@ func Wire(d *Deployer, run sys.Runner) {
 				Run:        run,
 				Pipe:       sys.NewExecPiper(),
 				FS:         d.fs(),
+				Store:      d.Store,
 				Compose:    project,
 				Load:       load,
 				Catalog:    d.Catalog,

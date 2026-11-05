@@ -74,7 +74,7 @@ func (r *Runner) RestoreFresh(ctx context.Context, inst, svc string, p *contract
 		}
 		return r.walgRecover(ctx, inst, svc, p, d, "LATEST", tgt, volume)
 	}
-	return r.resticRecover(ctx, inst, svc, tgt, volume)
+	return r.resticRecover(ctx, inst, svc, target.Strategy, tgt, volume)
 }
 
 // BaseBackup pushes a base backup of svc so the generation it now archives

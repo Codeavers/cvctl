@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/codeavers/cvctl/internal/output"
+	"github.com/codeavers/cvctl/internal/render"
 	"github.com/codeavers/cvctl/internal/sys"
 )
+
+// tagPartial marks a dump snapshot not yet known to be complete.
+const tagPartial = "partial"
 
 // forgetTimeout bounds removing a partial snapshot: --prune rewrites pack
 // files, which takes far longer on a large repository than cleanupTimeout.
@@ -20,9 +25,9 @@ func (r *Runner) dumpBackup(ctx context.Context, inst string, t Target) error {
 }
 
 // dump streams the service's dump into restic without touching the host disk.
-// restic reads to EOF and stores whatever arrived, so a producer that dies
-// mid-way still leaves a snapshot: a failed run must remove it or it becomes
-// the latest good backup.
+// restic stores whatever arrived by EOF, so a killed producer looks complete.
+// Every snapshot therefore starts tagged partial and loses the tag only once
+// both sides exited 0: a crash at any point leaves one nothing will use.
 func (r *Runner) dump(ctx context.Context, inst string, t Target, tags ...string) error {
 	script, err := r.dumpScript(t)
 	if err != nil {
@@ -46,26 +51,66 @@ func (r *Runner) dump(ctx context.Context, inst string, t Target, tags ...string
 	// --quiet drops the status lines --json would print ten times a second for
 	// the whole dump; the summary with the snapshot id is printed regardless.
 	args := []string{"backup", "--stdin", "--stdin-filename", t.Service + ".dump", "--host", r.Host.Host, "--tag", inst}
-	for _, tag := range tags {
+	for _, tag := range append(tags, tagPartial) {
 		args = append(args, "--tag", tag)
 	}
-	to := r.resticStdinCmd(inst, envFile, nil, append(args, "--json", "--quiet")...)
+	name := r.tempName("dump", inst, t.Service)
+	to := r.docker(append([]string{"run", "-i", "--rm", "--name", name, "--network", render.NetworkBackup(inst),
+		"--env-file", envFile, resticImage}, append(args, "--json", "--quiet")...)...)
 
 	res, pipeErr := r.Pipe.Pipe(ctx, from, to)
+	if ctx.Err() != nil {
+		// Killing the docker client leaves the container running.
+		r.cleanup(ctx, name, "")
+	}
+	id := resticSnapshotID(res.To.Stdout)
 	cause := r.pipeFailure(from, to, res, pipeErr)
+	if cause == nil && id == "" {
+		cause = &output.Error{
+			Code:    "E_BACKUP_FAILED",
+			Message: fmt.Sprintf("restic reported no snapshot id for %s", t.Service),
+			Hint:    "run the backup again; without the id the snapshot stays partial and unused",
+		}
+	}
 	if cause == nil {
-		_, err = r.exec(ctx, r.resticCmd(inst, envFile, "", "forget", "--keep-daily", "7", "--keep-weekly", "4", "--prune"))
+		_, cause = r.exec(ctx, r.resticCmd(inst, envFile, "", "tag", "--remove", tagPartial, id))
+	}
+	if cause != nil {
+		if id != "" {
+			return r.forgetPartial(ctx, inst, envFile, id, cause)
+		}
+		return cause
+	}
+	// Leftovers go first: retention would count one as the day's snapshot and
+	// drop the complete one beside it.
+	if _, err := r.exec(ctx, r.resticCmd(inst, envFile, "", "forget", "--tag", tagPartial, "--unsafe-allow-remove-all")); err != nil {
 		return err
 	}
-	if id := resticSnapshotID(res.To.Stdout); id != "" {
-		return r.forgetPartial(ctx, inst, envFile, id, cause)
+	_, err = r.exec(ctx, r.resticCmd(inst, envFile, "", "forget", "--keep-daily", "7", "--keep-weekly", "4", "--prune"))
+	return err
+}
+
+// completeDump resolves snap ("latest" or an id prefix) to a complete snapshot
+// and the repository holding it, newest repository first. restic's own latest
+// cannot exclude a tag.
+func (r *Runner) completeDump(ctx context.Context, inst, svc, snap string) (int, string, error) {
+	t := Target{Service: svc, Strategy: StrategyDump}
+	for i := r.Host.ResticRepoIndex(svc); i >= 0; i-- {
+		snaps, err := r.resticRepoList(ctx, inst, t, i, true)
+		if err != nil {
+			return 0, "", err
+		}
+		for _, s := range slices.Backward(snaps) {
+			if snap == "latest" || strings.HasPrefix(s.ID, snap) || strings.HasPrefix(snap, s.ID) {
+				return i, s.ID, nil
+			}
+		}
 	}
-	if ctx.Err() != nil {
-		// Killing the docker client leaves the restic container running, and
-		// it stores what it read once its stdin closes.
-		return fmt.Errorf("%w; a partial snapshot may remain: check cvctl backup list", cause)
+	return 0, "", &output.Error{
+		Code:    "E_BACKUP_NO_SNAPSHOT",
+		Message: fmt.Sprintf("no complete snapshot of %s matches %s", svc, snap),
+		Hint:    "run cvctl backup list <instance> to see the complete snapshots",
 	}
-	return cause
 }
 
 func (r *Runner) dumpScript(t Target) (string, error) {
@@ -124,7 +169,7 @@ func (r *Runner) forgetPartial(ctx context.Context, inst, envFile, id string, ca
 		return &output.Error{
 			Code:    "E_BACKUP_FAILED",
 			Message: r.redact(fmt.Sprintf("partial snapshot %s could not be removed: %v; the backup failed: %v", id, err, cause)),
-			Hint:    "remove it with restic forget <id> --prune before restoring: it would count as the latest backup",
+			Hint:    "it stays tagged partial, so nothing uses it; the next good backup removes it",
 		}
 	}
 	return cause

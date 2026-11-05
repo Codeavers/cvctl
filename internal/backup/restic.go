@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/codeavers/cvctl/internal/output"
@@ -151,9 +152,10 @@ func (r *Runner) resticRepoList(ctx context.Context, inst string, t Target, idx 
 		return nil, r.cmdFailed(cmd, res, err)
 	}
 	var raw []struct {
-		ShortID string `json:"short_id"`
-		ID      string `json:"id"`
-		Time    string `json:"time"`
+		ShortID string   `json:"short_id"`
+		ID      string   `json:"id"`
+		Time    string   `json:"time"`
+		Tags    []string `json:"tags"`
 	}
 	if len(res.Stdout) > 0 {
 		if err := json.Unmarshal(res.Stdout, &raw); err != nil {
@@ -166,6 +168,9 @@ func (r *Runner) resticRepoList(ctx context.Context, inst string, t Target, idx 
 	}
 	out := make([]Snapshot, 0, len(raw))
 	for _, s := range raw {
+		if t.Strategy == StrategyDump && slices.Contains(s.Tags, tagPartial) {
+			continue
+		}
 		id := s.ShortID
 		if id == "" {
 			id = s.ID

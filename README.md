@@ -332,6 +332,8 @@ bucket, plus `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` and `S3_REGION`.
 
 Per app the daily timer backs up databases (WAL-G) and the env files (`cvctl.env`, `app.env`, deploy key) encrypted with the host restic key; object storage (`s3` services) is not backed up by default: set `cvctl.backup: volume` on the service to back it up. Run manual env backups with `cvctl backup now <inst> env`.
 
+A service backed up with `cvctl.backup: dump` has no WAL to mark, so its restore point before a prod deploy is a full dump. Each prod deploy takes that dump first, so deploy time grows with the size of the database. It also waits for the host data lock, so a running backup or verify delays the deploy.
+
 ### Disaster recovery and restore
 
 With off-site backups (`CVCTL_STORAGE=s3`), rebuilding an instance on a new host only needs the host bundle (`cvctl secrets export --host`) plus `cvctl project restore <inst>`. `cvctl.env`, `app.env` and the deploy key are recovered automatically from the latest off-site env backup (or pick an older one with `--env-snapshot <id>`). If `cvctl.env` already exists locally, those files are kept as is and `--env-snapshot` is rejected (`E_USAGE_ENV_SNAPSHOT`).

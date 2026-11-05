@@ -515,7 +515,7 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 			if err := r.walgRecover(ctx, inst, svc, p, d, backupName, tgt, res.Volume); err != nil {
 				return err
 			}
-		} else if err := r.resticRecover(ctx, inst, svc, tgt, res.Volume); err != nil {
+		} else if err := r.resticRecover(ctx, inst, svc, target.Strategy, tgt, res.Volume); err != nil {
 			return err
 		}
 		updates := map[string]*string{volKey: strp(res.Volume)}
@@ -727,12 +727,18 @@ func (r *Runner) waitRestored(ctx context.Context, name string, c kinds.Credenti
 	}
 }
 
-func (r *Runner) resticRecover(ctx context.Context, inst, svc string, tgt restoreTarget, volume string) error {
+func (r *Runner) resticRecover(ctx context.Context, inst, svc, strategy string, tgt restoreTarget, volume string) error {
 	snap := "latest"
 	if tgt.kind == "snapshot" {
 		snap = tgt.name
 	}
-	idx, err := r.resticRestoreRepo(ctx, inst, svc, snap)
+	var idx int
+	var err error
+	if strategy == StrategyDump {
+		idx, snap, err = r.completeDump(ctx, inst, svc, snap)
+	} else {
+		idx, err = r.resticRestoreRepo(ctx, inst, svc, snap)
+	}
 	if err != nil {
 		return err
 	}
