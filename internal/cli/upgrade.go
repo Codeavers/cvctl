@@ -157,7 +157,7 @@ func newUpgradeCmd(current string) *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			asJSON, _ := cmd.Flags().GetBool("json")
-			// Before newUpgradeEnv: it reads the host config, which only root can read.
+			// Before newUpgradeEnv, so a user who cannot read the host config gets this error.
 			if upgradeEUID() != 0 {
 				return &output.Error{Code: "E_UPGRADE_ROOT", Message: "cvctl upgrade necesita root",
 					Hint: "sudo cvctl upgrade"}
