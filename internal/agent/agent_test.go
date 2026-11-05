@@ -670,6 +670,34 @@ func (blockingSource) Desired(ctx context.Context, d *instance.Decisions) (state
 	return state.Desired{}, errors.New("killed")
 }
 
+func TestAgentShutdownDuringFetchSendsNoError(t *testing.T) {
+	store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
+	seedOK(t, store, "app-a")
+	var out bytes.Buffer
+	notif := &fakeNotifier{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cfg := agent.Config{
+		Store: store, Deployer: &fakeDeployer{}, Notify: notif, Out: &out, Once: true,
+		Host: agentHost(t, "TIMEOUT_FETCH", "1m"),
+		Load: func(inst string) (*instance.Decisions, *contract.Project, error) {
+			return &instance.Decisions{Instance: inst, Env: "dev"}, &contract.Project{}, nil
+		},
+		Sources: func(d *instance.Decisions) deploy.Source {
+			time.AfterFunc(10*time.Millisecond, cancel)
+			return blockingSource{}
+		},
+	}
+	if err := agent.Run(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if len(notif.messages) != 0 {
+		t.Fatalf("messages = %+v", notif.messages)
+	}
+	if strings.Contains(out.String(), `"action":"error"`) {
+		t.Fatalf("log = %s", out.String())
+	}
+}
+
 func TestAgentFetchTimeout(t *testing.T) {
 	store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
 	seedOK(t, store, "app-a")

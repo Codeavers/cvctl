@@ -188,6 +188,10 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	recordError := func(inst, reason string) {
+		// A restart cancels the fetch in progress; that is not a failure to report.
+		if ctx.Err() != nil {
+			return
+		}
 		if lastErrors[inst] != reason {
 			lastErrors[inst] = reason
 			logDecision(inst, "error", reason)
