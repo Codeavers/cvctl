@@ -735,3 +735,29 @@ func (c countingList) Run(ctx context.Context, cmd sys.Cmd) (sys.Result, error) 
 	}
 	return c.Runner.Run(ctx, cmd)
 }
+
+// A chown that fails partway leaves the children on the new user and the root
+// on the old one, so the root says nothing about what the undo has to do.
+func TestPrepareSqliteUndoAfterPartialChown(t *testing.T) {
+	g := newSqliteRig(t, "")
+	g.r.Run = spyRunner{Runner: g.run, before: func(_ context.Context, c sys.Cmd) (sys.Result, bool) {
+		s := c.String()
+		if strings.Contains(s, "sh -c stat") {
+			return sys.Result{Stdout: []byte("999\n")}, true
+		}
+		if strings.Contains(s, "OWNER_UID=1000") {
+			return sys.Result{ExitCode: 1, Stderr: []byte("find: /data/private: Permission denied")}, true
+		}
+		return sys.Result{}, false
+	}}
+	undo, err := g.r.PrepareSqlite(context.Background(), g.p, g.d)
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if err := undo(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if g.index("docker run --rm --cap-add CHOWN -e OWNER_UID=999 ") < 0 {
+		t.Fatalf("the undo skipped the volume: %v", g.calls())
+	}
+}

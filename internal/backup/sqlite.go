@@ -260,8 +260,12 @@ func (r *Runner) sqliteOwn(ctx context.Context, image, volume, uid string) (stri
 	if prev == uid {
 		return "", nil
 	}
-	_, err = r.helperExec(ctx, r.helperCmd(image, "0", volume+":/data", sqliteChownScript, "--cap-add", "CHOWN", "-e", "OWNER_UID="+uid))
-	return prev, err
+	return prev, r.sqliteChown(ctx, image, volume, uid)
+}
+
+func (r *Runner) sqliteChown(ctx context.Context, image, volume, uid string) error {
+	_, err := r.helperExec(ctx, r.helperCmd(image, "0", volume+":/data", sqliteChownScript, "--cap-add", "CHOWN", "-e", "OWNER_UID="+uid))
+	return err
 }
 
 // PrepareSqlite gives every local volume of a kind without a container to the
@@ -275,10 +279,12 @@ func (r *Runner) PrepareSqlite(ctx context.Context, p *contract.Project, d *inst
 	r = r.withServiceSecrets(d)
 	type change struct{ image, volume, owner string }
 	var changes []change
+	// No check of the owner first: the root changes last, so after a partial
+	// chown it still shows the old owner while the files below it do not.
 	undo := func(ctx context.Context) error {
 		var errs []error
 		for _, c := range changes {
-			if _, err := r.sqliteOwn(ctx, c.image, c.volume, c.owner); err != nil {
+			if err := r.sqliteChown(ctx, c.image, c.volume, c.owner); err != nil {
 				errs = append(errs, err)
 			}
 		}
