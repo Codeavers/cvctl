@@ -43,11 +43,14 @@ func (d *Deployer) deployInfo(ctx context.Context, inst string, st *state.State,
 	if p == nil || dec == nil {
 		return info
 	}
-	domains := make(map[string]string, len(p.Apps))
 	for _, a := range p.Apps {
-		domains[a.Name] = dec.Domains[a.Name]
+		if dom := dec.Domains[a.Name]; dom != "" && a.ExposePort > 0 {
+			info.Links = append(info.Links, notify.Link{Service: a.Name, URL: "https://" + dom})
+		}
 	}
-	info.AppURL = appURL(domains, info.Changed)
+	slices.SortFunc(info.Links, func(a, b notify.Link) int {
+		return cmp.Compare(a.Service, b.Service)
+	})
 	if d.Labels == nil || len(info.Changed) == 0 {
 		return info
 	}
@@ -133,25 +136,4 @@ func (d *Deployer) loadForNotice(inst string) (*contract.Project, *instance.Deci
 		return nil, nil
 	}
 	return p, dec
-}
-
-// appURL picks the first changed service with a domain, else the first
-// service with a domain, both in alphabetical order.
-func appURL(domains map[string]string, changed []string) string {
-	for _, svc := range changed {
-		if dom := domains[svc]; dom != "" {
-			return "https://" + dom
-		}
-	}
-	names := make([]string, 0, len(domains))
-	for svc, dom := range domains {
-		if dom != "" {
-			names = append(names, svc)
-		}
-	}
-	slices.Sort(names)
-	if len(names) == 0 {
-		return ""
-	}
-	return "https://" + domains[names[0]]
 }
