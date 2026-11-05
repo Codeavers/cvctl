@@ -177,7 +177,7 @@ func (r *Runner) resticRepoList(ctx context.Context, inst string, t Target, idx 
 		if id == "" {
 			id = s.ID
 		}
-		out = append(out, Snapshot{Service: t.Service, Strategy: t.Strategy, ID: id, Time: s.Time})
+		out = append(out, Snapshot{Service: t.Service, Strategy: t.Strategy, ID: id, Time: s.Time, Tags: s.Tags})
 	}
 	return out, nil
 }

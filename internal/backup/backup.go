@@ -127,6 +127,8 @@ type Snapshot struct {
 	// Repo names an older restic repository (r<index>) the snapshot lives in;
 	// empty is the current one.
 	Repo string `json:"repo,omitempty"`
+	// Tags finds a dump's restore point; it stays out of the listing.
+	Tags []string `json:"-"`
 }
 
 type Runner struct {

@@ -327,3 +327,25 @@ func TestKindDumpNeedsCommands(t *testing.T) {
 		})
 	}
 }
+
+// A dump kind's command and health also reach docker argv, in the temporary
+// engine of a restore.
+func TestDumpKindKeepsPasswordOutOfCommandAndHealth(t *testing.T) {
+	const base = "image: x:{version}\nversions: [\"1\"]\ndefault_version: \"1\"\nbackup: dump\ndump_command: [d]\nrestore_command: [r]\n"
+	for name, tc := range map[string]struct {
+		extra string
+		ok    bool
+	}{
+		"clean":   {"command: [run]\nhealth: [CMD, ping]\n", true},
+		"command": {"command: [run, \"{password}\"]\n", false},
+		"health":  {"health: [CMD, ping, \"{password}\"]\n", false},
+		"app":     {"health: [CMD, ping, \"{app_password}\"]\n", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadFS(fstest.MapFS{"k.yml": {Data: []byte(base + tc.extra)}})
+			if (err == nil) != tc.ok {
+				t.Fatalf("err: %v", err)
+			}
+		})
+	}
+}

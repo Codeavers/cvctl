@@ -334,6 +334,12 @@ Per app the daily timer backs up databases (WAL-G) and the env files (`cvctl.env
 
 A service backed up with `cvctl.backup: dump` has no WAL to mark, so its restore point before a prod deploy is a full dump. Each prod deploy takes that dump first, so deploy time grows with the size of the database. If a prune holds the restic repository, the dump waits up to 10 minutes for it.
 
+`dump` has no point-in-time recovery. `cvctl db restore <inst> <svc> --to` takes `latest`, a snapshot id, a restore point `deploy-<id>`, or a timestamp; a timestamp restores the latest complete snapshot not newer than it and says which one it used, and one older than every snapshot fails with `E_RESTORE_NO_BACKUP`. A snapshot left incomplete by a failed dump is never used.
+
+The restore creates a new volume, starts a temporary engine on it and streams the snapshot in while the service keeps running. Only then are the apps and the service stopped for the volume switch, so any failure while loading leaves the service, its volume and the instance state as they were, and the temporary container and volume are removed. A failure after the switch rolls back to the previous volume like any other restore. `cvctl backup verify` runs the same load in a throwaway engine, then the kind's `restore_check`.
+
+Retention keeps every dump of the last 7 days, the time WAL-G keeps its restore points, so a second deploy on a day does not drop the first one's restore point. After that, the 7 daily and 4 weekly rules apply.
+
 ### Disaster recovery and restore
 
 With off-site backups (`CVCTL_STORAGE=s3`), rebuilding an instance on a new host only needs the host bundle (`cvctl secrets export --host`) plus `cvctl project restore <inst>`. `cvctl.env`, `app.env` and the deploy key are recovered automatically from the latest off-site env backup (or pick an older one with `--env-snapshot <id>`). If `cvctl.env` already exists locally, those files are kept as is and `--env-snapshot` is rejected (`E_USAGE_ENV_SNAPSHOT`).

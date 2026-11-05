@@ -1028,6 +1028,16 @@ func TestDBRestoreHumanOutputPrintsWarnings(t *testing.T) {
 	}
 }
 
+func TestDBRestoreHumanOutputNamesSnapshot(t *testing.T) {
+	var b strings.Builder
+	writeDBRestoreHuman(&b, &backup.RestoreResult{
+		Instance: "app-prod", Service: "db", Target: "deploy-5", Volume: "v2", PreviousVolume: "v1", Snapshot: "cccc3333",
+	})
+	if !strings.Contains(b.String(), "snapshot: cccc3333\n") {
+		t.Fatalf("output: %s", b.String())
+	}
+}
+
 func TestDBRestoreHasSkipWALFlushFlag(t *testing.T) {
 	var stdout, stderr strings.Builder
 	code := Execute(NewRoot("test"), []string{"db", "restore", "app-prod", "db", "--skip-wal-flush"}, &stdout, &stderr)

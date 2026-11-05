@@ -48,6 +48,13 @@ func (r *Runner) RestoreFresh(ctx context.Context, inst, svc string, p *contract
 			Hint:    fmt.Sprintf("if a previous project restore failed after deploy, use cvctl project update %s; otherwise remove volume %s and re-run", inst, volume),
 		}
 	}
+	if target.Strategy == StrategyDump {
+		// the instance is not deployed yet, so p and d are the only decisions
+		r.Load = func(string) (*contract.Project, *instance.Decisions, error) { return p, d, nil }
+		fresh := *target
+		fresh.Volume = volume
+		return r.dumpRestore(ctx, inst, fresh, "latest")
+	}
 	if _, err := r.exec(ctx, r.docker("volume", "create", volume)); err != nil {
 		return err
 	}
@@ -74,7 +81,7 @@ func (r *Runner) RestoreFresh(ctx context.Context, inst, svc string, p *contract
 		}
 		return r.walgRecover(ctx, inst, svc, p, d, "LATEST", tgt, volume)
 	}
-	return r.resticRecover(ctx, inst, svc, target.Strategy, tgt, volume)
+	return r.resticRecover(ctx, inst, svc, tgt, volume)
 }
 
 // BaseBackup pushes a base backup of svc so the generation it now archives

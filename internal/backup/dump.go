@@ -3,14 +3,18 @@ package backup
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/render"
 	"github.com/codeavers/cvctl/internal/sys"
+	"github.com/codeavers/cvctl/kinds"
 )
 
 // tagPartial marks a dump snapshot not yet known to be complete.
@@ -24,6 +28,13 @@ const repoLockWait = "10m"
 // forgetTimeout bounds removing a partial snapshot: --prune rewrites pack
 // files, which takes far longer on a large repository than cleanupTimeout.
 const forgetTimeout = 30 * time.Minute
+
+// engineReadyTimeout bounds the start of an empty engine: no data is loaded
+// yet, so a longer wait would only hide a broken image.
+const (
+	engineReadyTimeout = 5 * time.Minute
+	enginePollInterval = 2 * time.Second
+)
 
 func (r *Runner) dumpBackup(ctx context.Context, inst string, t Target) error {
 	return r.dump(ctx, inst, t)
@@ -91,7 +102,10 @@ func (r *Runner) dump(ctx context.Context, inst string, t Target, tags ...string
 	if _, err := r.exec(ctx, r.dumpRestic(inst, envFile, "forget", "--tag", tagPartial, "--unsafe-allow-remove-all")); err != nil {
 		return err
 	}
-	_, err = r.exec(ctx, r.dumpRestic(inst, envFile, "forget", "--keep-daily", "7", "--keep-weekly", "4", "--prune"))
+	// --keep-daily keeps only a day's newest snapshot, so a second deploy would
+	// drop the first one's restore point. --keep-within counts back from the
+	// newest snapshot, which is the one just taken.
+	_, err = r.exec(ctx, r.dumpRestic(inst, envFile, "forget", "--keep-within", strconv.Itoa(walgRetainDays)+"d", "--keep-daily", "7", "--keep-weekly", "4", "--prune"))
 	return err
 }
 
@@ -99,9 +113,9 @@ func (r *Runner) dumpRestic(inst, envFile string, args ...string) sys.Cmd {
 	return r.resticCmd(inst, envFile, "", append([]string{"--retry-lock", repoLockWait}, args...)...)
 }
 
-// completeDump resolves snap ("latest" or an id prefix) to a complete snapshot
-// and the repository holding it, newest repository first. restic's own latest
-// cannot exclude a tag.
+// completeDump resolves snap ("latest", an id prefix or a restore point tag) to
+// a complete snapshot and the repository holding it, newest repository first.
+// restic's own latest cannot exclude a tag.
 func (r *Runner) completeDump(ctx context.Context, inst, svc, snap string) (int, string, error) {
 	t := Target{Service: svc, Strategy: StrategyDump}
 	for i := r.Host.ResticRepoIndex(svc); i >= 0; i-- {
@@ -110,7 +124,7 @@ func (r *Runner) completeDump(ctx context.Context, inst, svc, snap string) (int,
 			return 0, "", err
 		}
 		for _, s := range slices.Backward(snaps) {
-			if snap == "latest" || strings.HasPrefix(s.ID, snap) || strings.HasPrefix(snap, s.ID) {
+			if snap == "latest" || strings.HasPrefix(s.ID, snap) || strings.HasPrefix(snap, s.ID) || slices.Contains(s.Tags, snap) {
 				return i, s.ID, nil
 			}
 		}
@@ -119,6 +133,229 @@ func (r *Runner) completeDump(ctx context.Context, inst, svc, snap string) (int,
 		Code:    "E_BACKUP_NO_SNAPSHOT",
 		Message: fmt.Sprintf("no complete snapshot of %s matches %s", svc, snap),
 		Hint:    "run cvctl backup list <instance> to see the complete snapshots",
+	}
+}
+
+// pickDump resolves a restore target to a complete snapshot. A timestamp has no
+// replay to stop at, so it takes the latest snapshot not newer than it, looking
+// at every repository instead of trusting their order.
+func (r *Runner) pickDump(ctx context.Context, inst, svc string, tgt restoreTarget) (Snapshot, error) {
+	if tgt.kind != "time" {
+		snap := tgt.name
+		if tgt.kind == "latest" {
+			snap = "latest"
+		}
+		_, id, err := r.completeDump(ctx, inst, svc, snap)
+		return Snapshot{ID: id}, err
+	}
+	var best Snapshot
+	var bestAt time.Time
+	t := Target{Service: svc, Strategy: StrategyDump}
+	for i := r.Host.ResticRepoIndex(svc); i >= 0; i-- {
+		snaps, err := r.resticRepoList(ctx, inst, t, i, true)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		for _, s := range snaps {
+			at, err := time.Parse(time.RFC3339Nano, s.Time)
+			if err != nil || at.After(tgt.at) {
+				continue
+			}
+			if best.ID == "" || at.After(bestAt) {
+				best, bestAt = s, at
+			}
+		}
+	}
+	if best.ID == "" {
+		return Snapshot{}, restoreFailedErr("E_RESTORE_NO_BACKUP",
+			fmt.Sprintf("no complete snapshot of %s at or before %s", svc, tgt.at.Format(time.RFC3339)),
+			"pick a later target; run cvctl backup list <instance> to see the complete snapshots")
+	}
+	return best, nil
+}
+
+// dumpRestore loads snapshot into the new volume t.Volume and leaves it ready
+// for the service. The caller checked that the volume did not exist, so a
+// failure can remove it without reaching data in use.
+func (r *Runner) dumpRestore(ctx context.Context, inst string, t Target, snapshot string) (retErr error) {
+	if _, err := r.exec(ctx, r.docker("volume", "create", t.Volume)); err != nil {
+		return err
+	}
+	name := r.tempName("restore", inst, t.Service)
+	defer func() {
+		if retErr != nil {
+			r.cleanup(ctx, name, t.Volume)
+			return
+		}
+		r.cleanup(ctx, name, "")
+	}()
+	if err := r.dumpLoad(ctx, inst, t, snapshot, name, t.Volume); err != nil {
+		return err
+	}
+	// a clean shutdown leaves the volume ready for the real container
+	_, err := r.exec(ctx, r.docker("stop", "-t", restoreStopTimeout, name))
+	return err
+}
+
+// dumpVerify loads the newest complete snapshot into a throwaway engine and
+// runs restore_check there: a shell script, like the kind's other commands,
+// whose last output line is a count that must be above zero.
+func (r *Runner) dumpVerify(ctx context.Context, inst string, t Target) error {
+	cat, err := r.catalog()
+	if err != nil {
+		return err
+	}
+	check := cat[t.Kind].RestoreCheck
+	if check == "" {
+		return verifyFailed(fmt.Sprintf("kind %q of %s has no restore_check", t.Kind, t.Service), "declare restore_check in the kind definition")
+	}
+	name := r.tempName("verify", inst, t.Service)
+	if _, err := r.exec(ctx, r.docker("volume", "create", name)); err != nil {
+		return err
+	}
+	defer r.cleanup(ctx, name, name)
+	if err := r.dumpLoad(ctx, inst, t, "latest", name, name); err != nil {
+		return err
+	}
+	res, err := r.exec(ctx, r.docker("exec", name, "sh", "-c", check))
+	if err != nil {
+		return err
+	}
+	out := lastLine(string(res.Stdout))
+	n, convErr := strconv.Atoi(out)
+	if convErr != nil {
+		return verifyFailed(fmt.Sprintf("restore check returned %q, expected a number", truncate(out, 32)), "check the kind's restore_check")
+	}
+	if n <= 0 {
+		return verifyEmpty(fmt.Sprintf("restored %s dump holds no data", t.Service))
+	}
+	return nil
+}
+
+// dumpLoad starts a temporary engine called name on volume and streams snapshot
+// into it. The caller removes the container and the volume.
+func (r *Runner) dumpLoad(ctx context.Context, inst string, t Target, snapshot, name, volume string) error {
+	cat, err := r.catalog()
+	if err != nil {
+		return err
+	}
+	k := cat[t.Kind]
+	if len(k.RestoreCommand) == 0 {
+		return restoreFailedErr("E_RESTORE_FAILED", fmt.Sprintf("kind %q of %s has no restore_command", t.Kind, t.Service), "declare restore_command in the kind definition")
+	}
+	idx, id, err := r.completeDump(ctx, inst, t.Service, snapshot)
+	if err != nil {
+		return err
+	}
+	envFile, err := r.writeResticEnv(inst, t.Service, idx)
+	if err != nil {
+		return err
+	}
+	if err := r.startEngine(ctx, inst, t, k, name, volume); err != nil {
+		return err
+	}
+	reader := r.tempName("read", inst, t.Service)
+	from := r.docker("run", "--rm", "--name", reader, "--network", render.NetworkBackup(inst),
+		"--env-file", envFile, resticImage, "--retry-lock", repoLockWait, "dump", id, t.Service+".dump")
+	to := r.docker("exec", "-i", name, "sh", "-c", strings.Join(k.RestoreCommand, " "))
+	res, pipeErr := r.Pipe.Pipe(ctx, from, to)
+	if ctx.Err() != nil {
+		// Killing the docker client leaves the container running.
+		r.cleanup(ctx, reader, "")
+	}
+	// A cut stream fails the engine's client too, which hides the real cause.
+	if pipeErr == nil && res.From.ExitCode != 0 && res.To.ExitCode != 0 {
+		return errors.Join(r.cmdFailed(from, res.From, nil), r.cmdFailed(to, res.To, nil))
+	}
+	return r.pipeFailure(from, to, res, pipeErr)
+}
+
+// startEngine runs the kind's image as the service would, hardened the same way
+// and with its entrypoint, so the engine initialises the empty volume. It joins
+// no network: only docker exec talks to it, and nothing may reach half-loaded
+// data. Credentials go through a file that docker has read once run returns.
+func (r *Runner) startEngine(ctx context.Context, inst string, t Target, k kinds.Kind, name, volume string) error {
+	p, d, err := r.Load(inst)
+	if err != nil {
+		return err
+	}
+	sd := d.Services[t.Service]
+	version := sd.Version
+	if version == "" {
+		for _, ds := range p.Data {
+			if ds.Name == t.Service {
+				version = ds.Version
+			}
+		}
+	}
+	image, err := k.ImageFor(version)
+	if err != nil {
+		return err
+	}
+	test, err := engineHealth(k, sd.Creds, t.Service)
+	if err != nil {
+		return err
+	}
+	envFile := filepath.Join(r.instanceDir(inst), "engine-"+t.Service+".env")
+	if err := r.FS.WriteFile(envFile, envFileBody(k.ContainerEnvFor(sd.Creds)), 0o640, deployOwner); err != nil {
+		return restoreFailedErr("E_FILE_WRITE", fmt.Sprintf("cannot write %s: %v", envFile, err), "check permissions and free space of the instance directory")
+	}
+	defer func() { _ = r.FS.Remove(envFile) }()
+	args := []string{"run", "-d", "--name", name, "--network", "none", "--env-file", envFile,
+		"--cap-drop", "ALL", "--security-opt", "no-new-privileges:true"}
+	for _, c := range k.CapAdd {
+		args = append(args, "--cap-add", c)
+	}
+	args = append(args, "-v", volume+":"+k.VolumePath, image)
+	for _, c := range k.Command {
+		args = append(args, k.Substitute(c, sd.Creds))
+	}
+	if _, err := r.exec(ctx, r.docker(args...)); err != nil {
+		return err
+	}
+	return r.waitEngine(ctx, name, test)
+}
+
+// engineHealth turns the kind's compose healthcheck into a command for docker
+// exec. Without one the engine's readiness is unknown, and a load into an engine
+// still starting fails halfway.
+func engineHealth(k kinds.Kind, c kinds.Credentials, svc string) ([]string, error) {
+	if len(k.Health) > 1 {
+		var test []string
+		for _, s := range k.Health[1:] {
+			test = append(test, k.Substitute(s, c))
+		}
+		switch k.Health[0] {
+		case "CMD":
+			return test, nil
+		case "CMD-SHELL":
+			return []string{"sh", "-c", strings.Join(test, " ")}, nil
+		}
+	}
+	return nil, restoreFailedErr("E_RESTORE_FAILED", fmt.Sprintf("kind %q of %s has no usable health check", k.Name, svc),
+		"declare health as [CMD, ...] or [CMD-SHELL, ...] in the kind definition")
+}
+
+func (r *Runner) waitEngine(ctx context.Context, name string, test []string) error {
+	var waited time.Duration
+	for {
+		if err := ctx.Err(); err != nil {
+			return restoreFailedErr("E_RESTORE_FAILED", "cancelled while the temporary engine started: "+err.Error(), "run the command again")
+		}
+		running, _ := r.Run.Run(ctx, r.docker("inspect", "-f", "{{.State.Running}}", name))
+		if running.ExitCode == 0 && strings.TrimSpace(string(running.Stdout)) == "false" {
+			logs, _ := r.Run.Run(ctx, r.docker("logs", "--tail", "20", name))
+			return restoreFailedErr("E_RESTORE_FAILED", "temporary engine exited before it was healthy: "+r.redact(strings.TrimSpace(string(logs.Stderr)+string(logs.Stdout))),
+				"check that the image of the kind starts on an empty volume")
+		}
+		if res, err := r.Run.Run(ctx, r.docker(append([]string{"exec", name}, test...)...)); err == nil && res.ExitCode == 0 {
+			return nil
+		}
+		if waited >= engineReadyTimeout {
+			return restoreFailedErr("E_RESTORE_FAILED", fmt.Sprintf("temporary engine was not healthy after %s", engineReadyTimeout), "check that the image of the kind starts on an empty volume")
+		}
+		r.sleep(enginePollInterval)
+		waited += enginePollInterval
 	}
 }
 

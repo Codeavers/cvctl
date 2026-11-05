@@ -70,12 +70,14 @@ exec gosu postgres postgres "$@"
 
 // RestoreResult describes a finished restore.
 type RestoreResult struct {
-	Instance       string   `json:"instance"`
-	Service        string   `json:"service"`
-	Target         string   `json:"target"`
-	Volume         string   `json:"volume"`
-	PreviousVolume string   `json:"previous_volume"`
-	Warnings       []string `json:"warnings,omitempty"`
+	Instance       string `json:"instance"`
+	Service        string `json:"service"`
+	Target         string `json:"target"`
+	Volume         string `json:"volume"`
+	PreviousVolume string `json:"previous_volume"`
+	// Snapshot is the dump snapshot restored; other strategies leave it empty.
+	Snapshot string   `json:"snapshot,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 type restoreTarget struct {
@@ -103,14 +105,21 @@ func parseRestoreTarget(to, strategy string, now time.Time) (restoreTarget, erro
 		t.kind, t.name = "snapshot", to
 		return t, nil
 	}
+	if strategy == StrategyDump && resticSnapID.MatchString(to) {
+		t.kind, t.name = "snapshot", to
+		return t, nil
+	}
 	if restorePointID.MatchString(to) {
 		t.kind, t.name = "name", to
 		return t, nil
 	}
 	at, err := time.Parse(time.RFC3339, to)
 	if err != nil {
-		return t, restoreInvalid(fmt.Sprintf("invalid restore target %q", to),
-			"use --to latest, an RFC3339 timestamp (2026-10-17T10:30:00Z) or a restore point deploy-<id>")
+		hint := "use --to latest, an RFC3339 timestamp (2026-10-17T10:30:00Z) or a restore point deploy-<id>"
+		if strategy == StrategyDump {
+			hint += ", or a snapshot id from cvctl backup list"
+		}
+		return t, restoreInvalid(fmt.Sprintf("invalid restore target %q", to), hint)
 	}
 	if !at.Before(now) {
 		return t, restoreInvalid(fmt.Sprintf("restore target %s is not in the past", to),
@@ -466,10 +475,29 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 		newMax = max(newMax, used+1)
 	}
 
+	// A dump loads while the service keeps running, so a failure here has
+	// nothing to roll back and the outage lasts only the swap.
+	isDump, dumpWarn := target.Strategy == StrategyDump, ""
+	if isDump {
+		snap, err := r.pickDump(ctx, inst, svc, tgt)
+		if err != nil {
+			return nil, err
+		}
+		res.Snapshot = snap.ID
+		if tgt.kind == "time" {
+			dumpWarn = fmt.Sprintf("%s has no point-in-time recovery: restored snapshot %s from %s, the latest complete one not newer than %s", svc, snap.ID, snap.Time, to)
+		}
+		fresh := *target
+		fresh.Volume = res.Volume
+		if err := r.dumpRestore(ctx, inst, fresh, snap.ID); err != nil {
+			return nil, r.dumpRestoreFailed(ctx, res, st, err)
+		}
+	}
+
 	// Nothing but the app services is touched until the WAL is archived, so a
 	// lag leaves volumes and decisions as they were.
 	if err := r.stopApps(ctx, inst, p); err != nil {
-		return nil, r.rollbackRestore(ctx, restoreRun{inst: inst, svc: svc, res: res, st: st, tgt: tgt}, err)
+		return nil, r.rollbackRestore(ctx, restoreRun{inst: inst, svc: svc, res: res, st: st, tgt: tgt, created: isDump}, err)
 	}
 	flushWarn := ""
 	if target.Strategy == StrategyWalG {
@@ -502,21 +530,24 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 	run := restoreRun{
 		inst: inst, svc: svc, res: res, st: st, tgt: tgt, envPath: envPath,
 		volKey: volKey, genKey: genKey, prevVol: prevVol, hadVol: hadVol, prevGen: prevGen, hadGen: hadGen,
+		created: isDump,
 	}
 	runErr := func() error {
 		if _, err := r.exec(ctx, r.Compose(inst).Cmd("stop", svc)); err != nil {
 			return err
 		}
-		if _, err := r.exec(ctx, r.docker("volume", "create", res.Volume)); err != nil {
-			return err
-		}
-		run.created = true
-		if target.Strategy == StrategyWalG {
-			if err := r.walgRecover(ctx, inst, svc, p, d, backupName, tgt, res.Volume); err != nil {
+		if !isDump {
+			if _, err := r.exec(ctx, r.docker("volume", "create", res.Volume)); err != nil {
 				return err
 			}
-		} else if err := r.resticRecover(ctx, inst, svc, target.Strategy, tgt, res.Volume); err != nil {
-			return err
+			run.created = true
+			if target.Strategy == StrategyWalG {
+				if err := r.walgRecover(ctx, inst, svc, p, d, backupName, tgt, res.Volume); err != nil {
+					return err
+				}
+			} else if err := r.resticRecover(ctx, inst, svc, tgt, res.Volume); err != nil {
+				return err
+			}
 		}
 		updates := map[string]*string{volKey: strp(res.Volume)}
 		if target.Strategy == StrategyWalG {
@@ -552,6 +583,9 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 		warns = append(warns, warning{fmt.Sprintf("%s/%s: backup generation changed", inst, svc),
 			fmt.Sprintf("backup generation changed to %d; re-run cvctl secrets export so a rebuilt host restores the new data", newMax)})
 	}
+	if dumpWarn != "" {
+		warns = append(warns, warning{fmt.Sprintf("%s/%s: restored the snapshot before the timestamp", inst, svc), dumpWarn})
+	}
 	for _, w := range warns {
 		res.Warnings = append(res.Warnings, w.text)
 	}
@@ -570,6 +604,25 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 		return res, err
 	}
 	return res, nil
+}
+
+// dumpRestoreFailed reports a load that never touched the instance: there is
+// nothing to roll back, only the attempt to record.
+func (r *Runner) dumpRestoreFailed(ctx context.Context, res *RestoreResult, st *state.State, cause error) error {
+	rctx := context.WithoutCancel(ctx)
+	msg := r.redact(fmt.Sprintf("restore of %s in %s failed: %s; the service was not touched and stays on volume %s", res.Service, res.Instance, cause.Error(), res.PreviousVolume))
+	if r.Notify != nil {
+		_ = r.Notify.Send(rctx, notify.Message{Host: r.HostName, Level: "error", Title: fmt.Sprintf("%s restore of %s FAILED", res.Instance, res.Service), Text: msg})
+	}
+	e := &output.Error{Code: "E_RESTORE_FAILED", Message: msg, Hint: "fix the cause and retry; the temporary container and volume were removed"}
+	now := r.now()
+	if err := r.Store.Append(res.Instance, state.Event{
+		At: now, ID: fmt.Sprintf("restore-%d", now.Unix()), Kind: "restore", From: st.Current, To: st.Current,
+		Result: "restore_failed", Detail: msg, Actor: "cli",
+	}); err != nil {
+		return errors.Join(e, err)
+	}
+	return e
 }
 
 type restoreRun struct {
@@ -727,18 +780,12 @@ func (r *Runner) waitRestored(ctx context.Context, name string, c kinds.Credenti
 	}
 }
 
-func (r *Runner) resticRecover(ctx context.Context, inst, svc, strategy string, tgt restoreTarget, volume string) error {
+func (r *Runner) resticRecover(ctx context.Context, inst, svc string, tgt restoreTarget, volume string) error {
 	snap := "latest"
 	if tgt.kind == "snapshot" {
 		snap = tgt.name
 	}
-	var idx int
-	var err error
-	if strategy == StrategyDump {
-		idx, snap, err = r.completeDump(ctx, inst, svc, snap)
-	} else {
-		idx, err = r.resticRestoreRepo(ctx, inst, svc, snap)
-	}
+	idx, err := r.resticRestoreRepo(ctx, inst, svc, snap)
 	if err != nil {
 		return err
 	}

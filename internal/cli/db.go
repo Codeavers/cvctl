@@ -30,6 +30,9 @@ func newDBCmd() *cobra.Command {
 func writeDBRestoreHuman(w io.Writer, res *backup.RestoreResult) {
 	fmt.Fprintf(w, "restored %s of %s to %s\nnew volume: %s\nprevious volume (kept): %s\n",
 		res.Service, res.Instance, res.Target, res.Volume, res.PreviousVolume)
+	if res.Snapshot != "" {
+		fmt.Fprintf(w, "snapshot: %s\n", res.Snapshot)
+	}
 	for _, warn := range res.Warnings {
 		fmt.Fprintf(w, "warning: %s\n", warn)
 	}
@@ -50,7 +53,14 @@ here: use cvctl db cleanup.
 
 --to takes latest, an RFC3339 timestamp in the past, or a restore point
 deploy-<id> for WAL-G postgres services; latest or a snapshot id for volume
-backups.`,
+backups.
+
+A dump service loads the snapshot into a temporary engine while it keeps
+running, and is stopped only for the switch: if the load fails nothing changed,
+and the temporary container and volume are removed. --to takes latest,
+deploy-<id>, a snapshot id or a timestamp. Dumps have no point-in-time recovery:
+a timestamp restores the latest complete snapshot not newer than it, and says
+which.`,
 		Example: `  cvctl db restore myapp-prod db --to latest
   cvctl db restore myapp-prod db --to 2026-10-17T10:30:00Z
   cvctl db restore myapp-prod db --to deploy-1760697000000000000 --json`,

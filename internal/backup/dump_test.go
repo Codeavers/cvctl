@@ -12,16 +12,19 @@ import (
 	"github.com/codeavers/cvctl/internal/backup"
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/instance"
+	"github.com/codeavers/cvctl/internal/output"
+	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/internal/sys/systest"
 	"github.com/codeavers/cvctl/kinds"
 )
 
 const (
+	enginePass  = "engine-pass-SECRET-321"
 	dumpScript  = `fakedump --all-databases -p"$FAKE_ROOT_PASSWORD"`
 	snapID      = "4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e4f1c2d3e"
 	composePS   = "docker compose -p app-prod --env-file /srv/deploy/app-prod/app.env -f /srv/deploy/app-prod/compose.cvctl.yml ps -a --format json db"
-	retention   = "forget --keep-daily 7 --keep-weekly 4 --prune"
+	retention   = "forget --keep-within 7d --keep-daily 7 --keep-weekly 4 --prune"
 	unmark      = "tag --remove partial " + snapID
 	resticImage = "restic/restic:0.19.1"
 	purge       = "forget --tag partial --unsafe-allow-remove-all"
@@ -52,11 +55,16 @@ func newDumpRig(t *testing.T) *dumpRig {
 	pipe := &systest.Piper{Result: sys.PipeResult{To: sys.Result{Stdout: resticSummary}}}
 	g.r.Pipe = pipe
 	g.r.Catalog = kinds.Catalog{"fakedb": {
-		Name: "fakedb", Backup: "dump",
-		DumpCommand: []string{dumpScript}, RestoreCommand: []string{"fakerestore"},
+		Name: "fakedb", Backup: "dump", Image: "fake/db:{version}", Versions: []string{"1"},
+		VolumePath: "/var/lib/fake", Command: []string{"fakedbd", "--user", "{user}"},
+		ContainerEnv: map[string]string{"FAKE_ROOT_PASSWORD": "{password}"}, CapAdd: []string{"CHOWN", "SETUID"},
+		Health:      []string{"CMD-SHELL", "fakeping"},
+		DumpCommand: []string{dumpScript}, RestoreCommand: []string{"fakerestore", "--all"}, RestoreCheck: "fakecount",
 	}}
 	p := &contract.Project{Data: []contract.DataService{{Name: "db", Kind: "fakedb", Backup: "dump"}}}
-	d := &instance.Decisions{Instance: "app-prod", Services: map[string]instance.ServiceDecision{"db": {Mode: "local"}}}
+	d := &instance.Decisions{Instance: "app-prod", Services: map[string]instance.ServiceDecision{"db": {
+		Mode: "local", Version: "1", Creds: kinds.Credentials{User: "root", Password: enginePass, DB: "app"},
+	}}}
 	g.r.Load = func(string) (*contract.Project, *instance.Decisions, error) { return p, d, nil }
 	return &dumpRig{rig: g, pipe: pipe}
 }
@@ -358,17 +366,12 @@ func TestVolumeListKeepsPartialTag(t *testing.T) {
 func TestDumpVerifyIgnoresPartial(t *testing.T) {
 	g := newDumpRig(t)
 	g.run.OnPrefix(listCmd, sys.Result{Stdout: snapshotsWithPartial})
-	g.run.OnPrefix("docker run --name cvctl-verify", sys.Result{Stdout: []byte("1\n")})
+	g.run.On("docker exec "+dumpVerifyName+" sh -c fakecount", sys.Result{Stdout: []byte("1\n")})
 	if _, err := g.r.Verify(context.Background(), "app-prod", "db"); err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range g.calls() {
-		if strings.Contains(c, "restic restore") && !strings.Contains(c, "restic restore aaaa1111 ") {
-			t.Fatalf("verify must read the newest complete snapshot: %s", c)
-		}
-	}
-	if !strings.Contains(strings.Join(g.calls(), "\n"), "restic restore aaaa1111 ") {
-		t.Fatalf("no restore: %v", g.calls())
+	if len(g.pipe.Calls) != 1 || !strings.Contains(g.pipe.Calls[0].From.String(), " dump aaaa1111 db.dump") {
+		t.Fatalf("verify must read the newest complete snapshot: %+v", g.pipe.Calls)
 	}
 }
 
@@ -389,9 +392,8 @@ func TestDumpRestoreIgnoresPartial(t *testing.T) {
 	if err := g.r.RestoreFresh(context.Background(), "app-prod", "db", p, d, "fresh-vol"); err != nil {
 		t.Fatal(err)
 	}
-	all := strings.Join(g.calls(), "\n")
-	if !strings.Contains(all, " restore aaaa1111") || strings.Contains(all, " restore latest") || strings.Contains(all, "bbbb2222") {
-		t.Fatalf("calls: %v", g.calls())
+	if len(g.pipe.Calls) != 1 || !strings.Contains(g.pipe.Calls[0].From.String(), " dump aaaa1111 db.dump") {
+		t.Fatalf("pipe: %+v", g.pipe.Calls)
 	}
 }
 
@@ -568,5 +570,550 @@ func TestRestorePointDumpWithoutDestinationSkips(t *testing.T) {
 	}
 	if len(g.pipe.Calls) != 0 {
 		t.Fatal("no destination, no dump")
+	}
+}
+
+const (
+	engineEnvPath = "/srv/deploy/app-prod/engine-db.env"
+	dumpEnvBefore = "CVCTL_INSTANCE=app-prod\nCVCTL_SVC_DB_MODE=local\n"
+)
+
+var (
+	dumpVerifyName = fmt.Sprintf("cvctl-verify-app-prod-db-%d-0a0b0c0d", time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).Unix())
+
+	dumpNow     = time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	dumpNewVol  = fmt.Sprintf("app-prod_db-data-r%d", dumpNow.Unix())
+	dumpTemp    = fmt.Sprintf("cvctl-restore-app-prod-db-%d-0a0b0c0d", dumpNow.Unix())
+	dumpReader  = fmt.Sprintf("cvctl-read-app-prod-db-%d-0a0b0c0d", dumpNow.Unix())
+	dumpHistory = []byte(`[
+{"short_id":"aaaa1111","time":"2026-11-02T03:00:00Z","tags":["app-prod"]},
+{"short_id":"cccc3333","time":"2026-11-03T03:00:00.5+01:00","tags":["app-prod","deploy-5"]},
+{"short_id":"dddd4444","time":"2026-11-04T03:00:00Z","tags":["app-prod"]},
+{"short_id":"bbbb2222","time":"2026-11-04T09:00:00Z","tags":["app-prod","partial"]},
+{"short_id":"eeee5555","time":"2026-11-04T10:00:00Z","tags":["app-prod","deploy-7","partial"]}]`)
+)
+
+type dumpRestoreRig struct {
+	*dumpRig
+	applies int
+	failAt  int
+}
+
+// PIPE and APPLY markers put both in the call order the tests read.
+func newDumpRestoreRig(t *testing.T) *dumpRestoreRig {
+	t.Helper()
+	g := &dumpRestoreRig{dumpRig: newDumpRig(t)}
+	g.r.Clock = func() time.Time { return dumpNow }
+	g.r.Sleep = func(time.Duration) {}
+	if err := g.fs.WriteFile(envPath, []byte(dumpEnvBefore), 0o640, sys.Owner{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.store.Save(&state.State{Instance: "app-prod", Status: state.StatusOK, Current: &state.Desired{InfraCommit: "abc"}, UpdatedAt: dumpNow}); err != nil {
+		t.Fatal(err)
+	}
+	g.r.Apply = func(context.Context, string, *state.Desired) error {
+		g.run.Calls = append(g.run.Calls, sys.Cmd{Name: "APPLY"})
+		g.applies++
+		if g.applies == g.failAt {
+			return errors.New("apply broke")
+		}
+		return nil
+	}
+	g.r.Pipe = pipeFunc(func(ctx context.Context, from, to sys.Cmd) (sys.PipeResult, error) {
+		g.run.Calls = append(g.run.Calls, sys.Cmd{Name: "PIPE"})
+		return g.pipe.Pipe(ctx, from, to)
+	})
+	g.pipe.Result = sys.PipeResult{}
+	g.run.OnPrefix(listCmd, sys.Result{Stdout: dumpHistory})
+	g.run.On("docker volume inspect "+dumpNewVol, sys.Result{ExitCode: 1})
+	return g
+}
+
+func (g *dumpRestoreRig) restore(to string) (*backup.RestoreResult, error) {
+	return g.r.Restore(context.Background(), "app-prod", "db", to)
+}
+
+func (g *dumpRestoreRig) read() string {
+	if len(g.pipe.Calls) != 1 {
+		return ""
+	}
+	return strings.Join(g.pipe.Calls[0].From.Args, " ")
+}
+
+func (g *dumpRestoreRig) assertUntouched(t *testing.T) {
+	t.Helper()
+	for _, c := range g.calls() {
+		if strings.Contains(c, " stop db") || strings.Contains(c, " stop web") || c == "APPLY" {
+			t.Fatalf("the service was touched: %v", g.calls())
+		}
+	}
+	raw, err := g.fs.ReadFile(envPath)
+	if err != nil || string(raw) != dumpEnvBefore {
+		t.Fatalf("cvctl.env changed: %s %v", raw, err)
+	}
+	st, err := g.store.Load("app-prod")
+	if err != nil || st.Status != state.StatusOK || st.Current == nil || st.Current.InfraCommit != "abc" {
+		t.Fatalf("state changed: %+v %v", st, err)
+	}
+}
+
+func TestDumpRestoreUsesNewVolume(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	res, err := g.restore("latest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Volume != dumpNewVol || res.PreviousVolume != "app-prod_db-data" || res.Snapshot != "dddd4444" {
+		t.Fatalf("res: %+v", res)
+	}
+	last := -1
+	for _, want := range []string{
+		"docker volume inspect " + dumpNewVol,
+		"docker volume create " + dumpNewVol,
+		"docker run -d --name " + dumpTemp,
+		"docker exec " + dumpTemp + " sh -c fakeping",
+		"PIPE",
+		"docker stop -t 120 " + dumpTemp,
+		"docker rm -f " + dumpTemp,
+		cp + "stop db",
+		"APPLY",
+		cp + "up -d --wait --wait-timeout 150 db",
+	} {
+		i := g.index(want)
+		if i <= last {
+			t.Fatalf("%q out of order (%d <= %d): %v", want, i, last, g.calls())
+		}
+		last = i
+	}
+	wantRun := "docker run -d --name " + dumpTemp + " --network none --env-file " + engineEnvPath +
+		" --cap-drop ALL --security-opt no-new-privileges:true --cap-add CHOWN --cap-add SETUID -v " + dumpNewVol + ":/var/lib/fake fake/db:1 fakedbd --user root"
+	if run := g.calls()[g.index("docker run -d")]; run != wantRun {
+		t.Fatalf("engine:\n got %s\nwant %s", run, wantRun)
+	}
+	wantRead := "run --rm --name " + dumpReader + " --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env " + resticImage + " --retry-lock 10m dump dddd4444 db.dump"
+	if got := g.read(); got != wantRead {
+		t.Fatalf("reader:\n got %s\nwant %s", got, wantRead)
+	}
+	if to := g.pipe.Calls[0].To.Args; !slices.Equal(to, []string{"exec", "-i", dumpTemp, "sh", "-c", "fakerestore --all"}) {
+		t.Fatalf("consumer: %q", to)
+	}
+	if g.has("docker volume rm") != 0 {
+		t.Fatalf("a good restore keeps its volume: %v", g.calls())
+	}
+	raw, _ := g.fs.ReadFile(envPath)
+	if !strings.Contains(string(raw), dumpNewVol) {
+		t.Fatalf("no swap: %s", raw)
+	}
+}
+
+func TestDumpRestoreFailureKeepsCurrentVolume(t *testing.T) {
+	for name, breakIt := range map[string]func(*dumpRestoreRig){
+		"restic":   func(g *dumpRestoreRig) { g.pipe.Result.From.ExitCode = 1 },
+		"restore":  func(g *dumpRestoreRig) { g.pipe.Result.To.ExitCode = 1 },
+		"pipe":     func(g *dumpRestoreRig) { g.pipe.Err = errors.New("no pipe") },
+		"run":      func(g *dumpRestoreRig) { g.run.OnPrefix("docker run -d", sys.Result{ExitCode: 125}) },
+		"exited":   func(g *dumpRestoreRig) { g.run.OnPrefix("docker inspect", sys.Result{Stdout: []byte("false\n")}) },
+		"health":   func(g *dumpRestoreRig) { g.run.On("docker exec "+dumpTemp+" sh -c fakeping", sys.Result{ExitCode: 1}) },
+		"shutdown": func(g *dumpRestoreRig) { g.run.On("docker stop -t 120 "+dumpTemp, sys.Result{ExitCode: 1}) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newDumpRestoreRig(t)
+			breakIt(g)
+			res, err := g.restore("latest")
+			if err == nil || res != nil {
+				t.Fatalf("res=%+v err=%v", res, err)
+			}
+			g.assertUntouched(t)
+			rm, rmVol := g.index("docker rm -f "+dumpTemp), g.index("docker volume rm -f "+dumpNewVol)
+			if rm < 0 || rmVol < rm {
+				t.Fatalf("temporary container and volume must go, in that order: %v", g.calls())
+			}
+			hist, err := g.store.History("app-prod", 0)
+			if err != nil || len(hist) != 1 || hist[0].Result != "restore_failed" {
+				t.Fatalf("history: %+v %v", hist, err)
+			}
+			if len(g.note.msgs) != 1 || g.note.msgs[0].Level != "error" {
+				t.Fatalf("notify: %+v", g.note.msgs)
+			}
+		})
+	}
+}
+
+func TestDumpRestoreBothSidesFailedReportsBoth(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	g.pipe.Result = sys.PipeResult{
+		From: sys.Result{ExitCode: 1, Stderr: []byte("wrong password")},
+		To:   sys.Result{ExitCode: 1, Stderr: []byte("unexpected end of input")},
+	}
+	_, err := g.restore("latest")
+	if err == nil || !strings.Contains(err.Error(), "wrong password") || !strings.Contains(err.Error(), "unexpected end of input") {
+		t.Fatalf("err: %v", err)
+	}
+}
+
+func TestDumpRestoreCancelRemovesEverything(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	rec := &ctxRecorder{Runner: g.run, match: "docker rm -f " + dumpReader, err: errors.New("rm never ran")}
+	g.r.Run = rec
+	ctx, cancel := context.WithCancel(context.Background())
+	g.r.Pipe = cancellingPipe(cancel, sys.PipeResult{})
+	if _, err := g.r.Restore(ctx, "app-prod", "db", "latest"); err == nil {
+		t.Fatal("want error")
+	}
+	if rec.err != nil {
+		t.Fatalf("rm context: %v", rec.err)
+	}
+	if g.index("docker rm -f "+dumpTemp) < 0 || g.index("docker volume rm -f "+dumpNewVol) < 0 {
+		t.Fatalf("calls: %v", g.calls())
+	}
+}
+
+func TestDumpRestoreRollsBackAfterSwapFailure(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	g.failAt = 1
+	_, err := g.restore("latest")
+	if err == nil || !strings.Contains(err.Error(), "was kept for inspection") {
+		t.Fatalf("err: %v", err)
+	}
+	raw, _ := g.fs.ReadFile(envPath)
+	if strings.Contains(string(raw), dumpNewVol) {
+		t.Fatalf("env still names the new volume: %s", raw)
+	}
+	if g.applies != 2 {
+		t.Fatalf("applies: %d", g.applies)
+	}
+}
+
+func TestDumpRestoreToTimestampPicksPrevious(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	res, err := g.restore("2026-11-03T12:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Snapshot != "cccc3333" || !strings.Contains(g.read(), " dump cccc3333 db.dump") {
+		t.Fatalf("res=%+v read=%s", res, g.read())
+	}
+	said := strings.Join(res.Warnings, "\n")
+	for _, want := range []string{"cccc3333", "2026-11-03T03:00:00.5+01:00", "2026-11-03T12:00:00Z", "no point-in-time"} {
+		if !strings.Contains(said, want) {
+			t.Fatalf("output misses %q: %s", want, said)
+		}
+	}
+}
+
+func TestDumpRestoreTimestampComparesInstantsInclusive(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	res, err := g.restore("2026-11-03T02:00:00.5Z")
+	if err != nil || res.Snapshot != "cccc3333" {
+		t.Fatalf("a snapshot at the timestamp is not newer: res=%+v err=%v", res, err)
+	}
+}
+
+func TestDumpRestoreTimestampSkipsPartial(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	res, err := g.restore("2026-11-04T11:00:00Z")
+	if err != nil || res.Snapshot != "dddd4444" {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
+
+func TestDumpRestoreTimestampLooksInOlderRepositories(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	g.r.Host.KeyGen = map[string]int{"db": 1}
+	// Both repositories share the env path, so the listing alternates: the
+	// current one is empty, the older one holds the snapshot.
+	lists := 0
+	g.r.Run = &beforeRun{Runner: g.run, hook: func(c sys.Cmd) {
+		if c.String() != listCmd {
+			return
+		}
+		lists++
+		out := []byte(`[]`)
+		if lists%2 == 0 {
+			out = []byte(`[{"short_id":"ffff6666","time":"2026-11-04T03:00:00Z"}]`)
+		}
+		g.run.OnPrefix(listCmd, sys.Result{Stdout: out})
+	}}
+	res, err := g.restore("2026-11-05T01:00:00Z")
+	if err != nil || res.Snapshot != "ffff6666" {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
+
+func TestDumpRestoreTimestampBeforeEverySnapshotFails(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	res, err := g.restore("2026-11-01T00:00:00Z")
+	var oe *output.Error
+	if res != nil || !errors.As(err, &oe) || oe.Code != "E_RESTORE_NO_BACKUP" {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	if g.has("docker volume create") != 0 || len(g.pipe.Calls) != 0 {
+		t.Fatalf("nothing may start: %v", g.calls())
+	}
+	g.assertUntouched(t)
+}
+
+func TestDumpRestoreToSnapshotID(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	res, err := g.restore("aaaa1111")
+	if err != nil || res.Snapshot != "aaaa1111" || len(res.Warnings) != 0 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
+
+func TestDumpRestoreToRestorePoint(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	res, err := g.restore("deploy-5")
+	if err != nil || res.Snapshot != "cccc3333" || !strings.Contains(g.read(), " dump cccc3333 db.dump") {
+		t.Fatalf("res=%+v err=%v read=%s", res, err, g.read())
+	}
+}
+
+func TestDumpRestoreNeverReadsPartial(t *testing.T) {
+	for _, to := range []string{"bbbb2222", "deploy-7", "deploy-404", "abcdef12"} {
+		t.Run(to, func(t *testing.T) {
+			g := newDumpRestoreRig(t)
+			if _, err := g.restore(to); err == nil || !strings.Contains(err.Error(), "no complete snapshot") {
+				t.Fatalf("err: %v", err)
+			}
+			if g.has("docker volume create") != 0 {
+				t.Fatalf("nothing may start: %v", g.calls())
+			}
+			g.assertUntouched(t)
+		})
+	}
+}
+
+func TestDumpRestoreRejectsBadTargets(t *testing.T) {
+	for _, to := range []string{"yesterday", "2099-01-01T00:00:00Z", "abc"} {
+		g := newDumpRestoreRig(t)
+		var oe *output.Error
+		if _, err := g.restore(to); !errors.As(err, &oe) || oe.Code != "E_RESTORE_TARGET_INVALID" {
+			t.Fatalf("%s: %v", to, err)
+		}
+	}
+}
+
+func TestDumpRestoreWithoutCommandFailsCleanly(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	k := g.r.Catalog["fakedb"]
+	k.RestoreCommand = nil
+	g.r.Catalog["fakedb"] = k
+	if _, err := g.restore("latest"); err == nil || !strings.Contains(err.Error(), "restore_command") {
+		t.Fatalf("err: %v", err)
+	}
+	if g.has("docker run -d") != 0 {
+		t.Fatalf("calls: %v", g.calls())
+	}
+	g.assertUntouched(t)
+}
+
+func TestDumpRestoreWithoutHealthFails(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	k := g.r.Catalog["fakedb"]
+	k.Health = nil
+	g.r.Catalog["fakedb"] = k
+	if _, err := g.restore("latest"); err == nil || !strings.Contains(err.Error(), "health") {
+		t.Fatalf("err: %v", err)
+	}
+	if len(g.pipe.Calls) != 0 {
+		t.Fatal("a restore into an engine of unknown readiness")
+	}
+}
+
+func TestDumpEngineExecHealthForm(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	k := g.r.Catalog["fakedb"]
+	k.Health = []string{"CMD", "fakeping", "--user", "{user}"}
+	g.r.Catalog["fakedb"] = k
+	if _, err := g.restore("latest"); err != nil {
+		t.Fatal(err)
+	}
+	if g.index("docker exec "+dumpTemp+" fakeping --user root") < 0 {
+		t.Fatalf("calls: %v", g.calls())
+	}
+}
+
+type beforeRun struct {
+	*systest.Runner
+	hook func(sys.Cmd)
+}
+
+func (r *beforeRun) Run(ctx context.Context, c sys.Cmd) (sys.Result, error) {
+	r.hook(c)
+	return r.Runner.Run(ctx, c)
+}
+
+// The engine reads its credentials from a file: docker -e would put them in argv.
+func TestDumpRestoreNoSecretsInArgv(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	var body string
+	g.r.Run = &beforeRun{Runner: g.run, hook: func(c sys.Cmd) {
+		if strings.HasPrefix(c.String(), "docker run -d") {
+			raw, _ := g.fs.ReadFile(engineEnvPath)
+			body = string(raw)
+		}
+	}}
+	if _, err := g.restore("latest"); err != nil {
+		t.Fatal(err)
+	}
+	if body != "FAKE_ROOT_PASSWORD="+enginePass+"\n" {
+		t.Fatalf("engine env file: %q", body)
+	}
+	if _, err := g.fs.ReadFile(engineEnvPath); err == nil {
+		t.Fatal("the engine env file must not outlive docker run")
+	}
+	argv := append(g.calls(), g.pipe.Calls[0].From.String(), g.pipe.Calls[0].To.String())
+	for _, c := range argv {
+		for _, s := range []string{enginePass, resticPass, secretKey, libsodium} {
+			if strings.Contains(c, s) {
+				t.Fatalf("secret in argv: %s", c)
+			}
+		}
+		if strings.Contains(c, " -e ") {
+			t.Fatalf("docker -e passes env through argv: %s", c)
+		}
+	}
+}
+
+func TestDumpRestoreFreshReadsDump(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	g.run.On("docker volume inspect fresh-vol", sys.Result{ExitCode: 1})
+	p, d, _ := g.r.Load("app-prod")
+	g.r.Load = func(string) (*contract.Project, *instance.Decisions, error) {
+		return nil, nil, errors.New("not deployed yet: the caller's decisions are the ones to use")
+	}
+	if err := g.r.RestoreFresh(context.Background(), "app-prod", "db", p, d, "fresh-vol"); err != nil {
+		t.Fatal(err)
+	}
+	if g.has("docker volume create fresh-vol") != 1 || !strings.Contains(g.read(), " dump dddd4444 db.dump") {
+		t.Fatalf("calls: %v", g.calls())
+	}
+	if g.has("docker volume rm") != 0 {
+		t.Fatalf("calls: %v", g.calls())
+	}
+}
+
+func TestDumpRestoreFreshFailureRemovesVolume(t *testing.T) {
+	g := newDumpRestoreRig(t)
+	g.run.On("docker volume inspect fresh-vol", sys.Result{ExitCode: 1})
+	g.pipe.Result.To.ExitCode = 1
+	p, d, _ := g.r.Load("app-prod")
+	if err := g.r.RestoreFresh(context.Background(), "app-prod", "db", p, d, "fresh-vol"); err == nil {
+		t.Fatal("want error")
+	}
+	if g.has("docker volume rm -f fresh-vol") == 0 {
+		t.Fatalf("calls: %v", g.calls())
+	}
+}
+
+func dumpVerifyRig(t *testing.T, check sys.Result) (*dumpRig, string) {
+	t.Helper()
+	g := newDumpRig(t)
+	g.r.Sleep = func(time.Duration) {}
+	g.pipe.Result = sys.PipeResult{}
+	g.run.OnPrefix(listCmd, sys.Result{Stdout: dumpHistory})
+	g.run.On("docker exec "+dumpVerifyName+" sh -c fakecount", check)
+	return g, dumpVerifyName
+}
+
+func TestDumpVerifyRunsRestoreCheck(t *testing.T) {
+	g, name := dumpVerifyRig(t, sys.Result{Stdout: []byte("a notice\n3\n")})
+	res, err := g.r.Verify(context.Background(), "app-prod", "db")
+	if err != nil || len(res) != 1 || !res[0].OK || res[0].Strategy != "dump" {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	last := -1
+	for _, want := range []string{
+		"docker volume create " + name,
+		"docker run -d --name " + name,
+		"docker exec " + name + " sh -c fakeping",
+		"docker exec " + name + " sh -c fakecount",
+		"docker rm -f " + name,
+		"docker volume rm -f " + name,
+	} {
+		i := g.index(want)
+		if i <= last {
+			t.Fatalf("%q out of order (%d <= %d): %v", want, i, last, g.calls())
+		}
+		last = i
+	}
+	if len(g.pipe.Calls) != 1 || !strings.Contains(g.pipe.Calls[0].From.String(), " dump dddd4444 db.dump") {
+		t.Fatalf("pipe: %+v", g.pipe.Calls)
+	}
+	if to := g.pipe.Calls[0].To.Args; !slices.Equal(to, []string{"exec", "-i", name, "sh", "-c", "fakerestore --all"}) {
+		t.Fatalf("consumer: %q", to)
+	}
+	st, err := g.store.Load("app-prod")
+	if err != nil || st.Backups["db"].LastVerifyOK.IsZero() || st.Backups["db"].LastVerifyError != "" {
+		t.Fatalf("recorded: %+v %v", st.Backups, err)
+	}
+}
+
+func TestDumpVerifyCleansUp(t *testing.T) {
+	for name, tc := range map[string]struct {
+		check    sys.Result
+		breakIt  func(*dumpRig)
+		wantText string
+	}{
+		"empty":     {check: sys.Result{Stdout: []byte("0\n")}, wantText: "no data"},
+		"not a num": {check: sys.Result{Stdout: []byte("many\n")}, wantText: "expected a number"},
+		"check":     {check: sys.Result{ExitCode: 1, Stderr: []byte("check broke")}, wantText: "check broke"},
+		"restore": {check: sys.Result{Stdout: []byte("3\n")}, wantText: "restore broke", breakIt: func(g *dumpRig) {
+			g.pipe.Result.To = sys.Result{ExitCode: 1, Stderr: []byte("restore broke")}
+		}},
+		"restic": {check: sys.Result{Stdout: []byte("3\n")}, wantText: "repo broke", breakIt: func(g *dumpRig) {
+			g.pipe.Result.From = sys.Result{ExitCode: 1, Stderr: []byte("repo broke")}
+		}},
+		"engine": {check: sys.Result{Stdout: []byte("3\n")}, wantText: "exited", breakIt: func(g *dumpRig) {
+			g.run.OnPrefix("docker inspect", sys.Result{Stdout: []byte("false\n")})
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g, temp := dumpVerifyRig(t, tc.check)
+			if tc.breakIt != nil {
+				tc.breakIt(g)
+			}
+			res, err := g.r.Verify(context.Background(), "app-prod", "db")
+			if err == nil || res[0].OK || !strings.Contains(res[0].Error, tc.wantText) {
+				t.Fatalf("res=%+v err=%v", res, err)
+			}
+			if g.has("docker rm -f "+temp) != 1 || g.has("docker volume rm -f "+temp) != 1 {
+				t.Fatalf("cleanup: %v", g.calls())
+			}
+			st, err := g.store.Load("app-prod")
+			if err != nil || !strings.Contains(st.Backups["db"].LastVerifyError, tc.wantText) {
+				t.Fatalf("recorded: %+v %v", st.Backups, err)
+			}
+		})
+	}
+}
+
+// A check that cannot run proves nothing, so it must not pass as a good verify.
+func TestDumpVerifyWithoutRestoreCheckFails(t *testing.T) {
+	g, _ := dumpVerifyRig(t, sys.Result{})
+	k := g.r.Catalog["fakedb"]
+	k.RestoreCheck = ""
+	g.r.Catalog["fakedb"] = k
+	res, err := g.r.Verify(context.Background(), "app-prod", "db")
+	if err == nil || res[0].OK || !strings.Contains(res[0].Error, "restore_check") {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
+
+// keep-daily alone keeps one snapshot per day, so a second deploy on a day would
+// drop the first one's restore point. WAL-G keeps a week of them.
+func TestDumpRetentionKeepsRestorePointsAsLongAsWalg(t *testing.T) {
+	g := newDumpRig(t)
+	g.run.On(psAll, sys.Result{Stdout: []byte("running\n")})
+	rp := &backup.RestorePoint{Compose: g.r.Compose, Load: g.r.Load, Data: g.r}
+	if err := rp.Create(context.Background(), "app-prod", "deploy-5"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.backup(t); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(g.resticCalls("--retry-lock 10m forget --keep-within 7d --keep-daily 7 --keep-weekly 4 --prune")); n != 2 {
+		t.Fatalf("restore point and daily runs must both keep a week: %v", g.calls())
 	}
 }

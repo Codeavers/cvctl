@@ -40,7 +40,7 @@ exec gosu postgres postgres -c listen_addresses= -c archive_mode=off -c "restore
 `
 
 const resticVerifyScript = `set -e
-restic restore %s --target /restore >/dev/null
+restic restore latest --target /restore >/dev/null
 find /restore -type f | wc -l
 `
 
@@ -102,6 +102,9 @@ func (r *Runner) Verify(ctx context.Context, inst, only string) ([]Result, error
 			defer cancel()
 			if t.Strategy == StrategyWalG {
 				return r.walgVerify(tctx, inst, p, d, cat, t)
+			}
+			if t.Strategy == StrategyDump {
+				return r.dumpVerify(tctx, inst, t)
 			}
 			return r.resticVerify(tctx, inst, t)
 		}()
@@ -317,14 +320,7 @@ func (r *Runner) waitRecovered(ctx context.Context, name, user, db string) error
 }
 
 func (r *Runner) resticVerify(ctx context.Context, inst string, t Target) error {
-	idx, snap := r.Host.ResticRepoIndex(t.Service), "latest"
-	if t.Strategy == StrategyDump {
-		var err error
-		if idx, snap, err = r.completeDump(ctx, inst, t.Service, snap); err != nil {
-			return err
-		}
-	}
-	envFile, err := r.writeResticEnv(inst, t.Service, idx)
+	envFile, err := r.writeResticEnv(inst, t.Service, r.Host.ResticRepoIndex(t.Service))
 	if err != nil {
 		return err
 	}
@@ -335,7 +331,7 @@ func (r *Runner) resticVerify(ctx context.Context, inst string, t Target) error 
 	name := r.tempName("verify", inst, t.Service)
 	defer r.cleanup(ctx, name, "")
 	cmd := r.docker("run", "--name", name, "--network", net, "--env-file", envFile,
-		"--entrypoint", "sh", resticImage, "-c", fmt.Sprintf(resticVerifyScript, snap))
+		"--entrypoint", "sh", resticImage, "-c", resticVerifyScript)
 	res, err := r.exec(ctx, cmd)
 	if err != nil {
 		return err

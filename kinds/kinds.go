@@ -39,8 +39,11 @@ type Kind struct {
 	Backup            string            `yaml:"backup"`
 	External          []string          `yaml:"external"`
 	Health            []string          `yaml:"health"`
-	RestoreCheck      string            `yaml:"restore_check"`
-	Buckets           bool              `yaml:"buckets"`
+	// RestoreCheck is SQL on the restored cluster for a wal-g kind. For a dump
+	// kind it is a shell script run like DumpCommand; for both, the result is a
+	// count that must be above zero.
+	RestoreCheck string `yaml:"restore_check"`
+	Buckets      bool   `yaml:"buckets"`
 	// CapAdd are the capabilities a service needs back after cap_drop: [ALL].
 	CapAdd []string `yaml:"cap_add"`
 	// DumpCommand and RestoreCommand are joined with spaces into one sh -c
@@ -116,12 +119,13 @@ func validate(k Kind) error {
 		return invalid(k.Name, "env keys and external fields must name the same variables")
 	}
 	// A password inside a CMD-SHELL line is parsed by a shell, so it would need
-	// quoting; kinds with shell health checks must not put it there.
-	if len(k.Health) > 0 && k.Health[0] == "CMD-SHELL" {
+	// quoting; kinds with shell health checks must not put it there. A dump
+	// kind's command and health run from docker argv during a restore.
+	if k.Backup == "dump" || len(k.Health) > 0 && k.Health[0] == "CMD-SHELL" {
 		for _, e := range append(slices.Clone(k.Health), k.Command...) {
 			for _, placeholder := range []string{"{password}", "{app_password}"} {
 				if strings.Contains(e, placeholder) {
-					return invalid(k.Name, fmt.Sprintf("%s must not appear in command or health when health uses CMD-SHELL", placeholder))
+					return invalid(k.Name, fmt.Sprintf("%s must not appear in command or health of a dump kind or when health uses CMD-SHELL", placeholder))
 				}
 			}
 		}
