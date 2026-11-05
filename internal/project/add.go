@@ -423,6 +423,15 @@ func promptDataServices(ctx context.Context, e *Env, cat kinds.Catalog, p *contr
 		k := cat[ds.Kind]
 		sd := d.Services[ds.Name]
 
+		if k.NoContainer {
+			sd.Mode = "local"
+			if sd.Version == "" {
+				sd.Version = ds.Version
+			}
+			d.Services[ds.Name] = sd
+			continue
+		}
+
 		mode := sd.Mode
 		if mode == "" {
 			mode = "local"
@@ -745,7 +754,7 @@ func checkDecisions(d *instance.Decisions, p *contract.Project, cat kinds.Catalo
 	}
 	var checkIssues []output.Issue
 	for _, iss := range instance.Check(d, p, cat) {
-		if iss.Code == "E_S3_PUBLIC_LOCAL_PROD" {
+		if iss.Code == "E_S3_PUBLIC_LOCAL_PROD" || iss.Code == "E_SQLITE_RECREATE" {
 			checkIssues = append(checkIssues, iss)
 			continue
 		}
@@ -861,7 +870,8 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		}
 	}
 
-	if opts.Strategy == "" {
+	defaultStrategy := opts.Strategy == ""
+	if defaultStrategy {
 		opts.Strategy = "recreate"
 		if envName == "prod" {
 			opts.Strategy = "blue-green"
@@ -1068,6 +1078,16 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		return nil, err
 	}
 
+	var warnings []string
+	if svcs := instance.RecreateOnly(p, cat); opts.Strategy == "blue-green" && len(svcs) > 0 {
+		if !defaultStrategy {
+			cleanupInst()
+			return nil, instance.RecreateErr(svcs)
+		}
+		opts.Strategy = "recreate"
+		warnings = append(warnings, fmt.Sprintf("strategy is recreate, not the blue-green default of prod: %s needs it, so the app stops during a deploy", strings.Join(svcs, ", ")))
+	}
+
 	d := &instance.Decisions{
 		Instance:    inst,
 		Env:         envName,
@@ -1143,7 +1163,6 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	appEnvPath := filepath.Join(instDir, "app.env")
 
 	addEntries := d.Entries()
-	var warnings []string
 	if !isOCI {
 		storedURL, stripped := storableInfraURL(repoURL)
 		addEntries[keyInfraURL] = storedURL

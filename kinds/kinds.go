@@ -56,7 +56,9 @@ type Kind struct {
 	// Helper names an auxiliary image that takes the dump instead of the
 	// service; such a kind declares no commands.
 	Helper string `yaml:"helper"`
-	// NoContainer marks a kind that runs no service container of its own.
+	// NoContainer marks a kind that runs no service container of its own: a
+	// volume mounted in one app under VolumePath/<service>. It needs a Helper and
+	// has no external mode, so its env describes a local value only.
 	NoContainer bool `yaml:"no_container"`
 }
 
@@ -117,7 +119,11 @@ func validate(k Kind) error {
 	for _, f := range k.External {
 		extKeys[strings.ToUpper(f)] = true
 	}
-	if !maps.Equal(envKeys, extKeys) {
+	if k.NoContainer {
+		if k.Helper == "" || len(k.External) > 0 {
+			return invalid(k.Name, "no_container requires helper and no external fields")
+		}
+	} else if !maps.Equal(envKeys, extKeys) {
 		return invalid(k.Name, "env keys and external fields must name the same variables")
 	}
 	// A password inside a CMD-SHELL line is parsed by a shell, so it would need

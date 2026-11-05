@@ -60,7 +60,12 @@ running, and is stopped only for the switch: if the load fails nothing changed,
 and the temporary container and volume are removed. --to takes latest,
 deploy-<id>, a snapshot id or a timestamp. Dumps have no point-in-time recovery:
 a timestamp restores the latest complete snapshot not newer than it, and says
-which.`,
+which.
+
+A sqlite service takes the same --to forms, but its database belongs to a
+running app: the apps are stopped first, the snapshot is written to the new
+volume and checked, and the apps start on it. A failure before the switch
+restarts them on the old volume.`,
 		Example: `  cvctl db restore myapp-prod db --to latest
   cvctl db restore myapp-prod db --to 2026-10-17T10:30:00Z
   cvctl db restore myapp-prod db --to deploy-1760697000000000000 --json`,

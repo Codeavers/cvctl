@@ -1,0 +1,191 @@
+networks:
+  app: {}
+  data:
+    internal: true
+  edge:
+    external: true
+    name: proj-prod_edge
+services:
+  api:
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    env_file:
+      - /srv/deploy/proj-prod/app.env
+    environment:
+      APP_NAME: ${APP_NAME}
+      DATABASE_URL: ${DATABASE_URL}
+      JWT_SECRET: ${JWT_SECRET}
+      PUBLIC_URL: ${PUBLIC_URL}
+      REDIS_URL: ${REDIS_URL}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_BUCKET_PRESCRIPTIONS: ${S3_BUCKET_PRESCRIPTIONS}
+      S3_BUCKET_PRODUCTS: ${S3_BUCKET_PRODUCTS}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_PUBLIC_URL_PRODUCTS: ${S3_PUBLIC_URL_PRODUCTS}
+      S3_REGION: ${S3_REGION}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+    image: ghcr.io/example/demo-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    labels:
+      cvctl.expose: "3000"
+      cvctl.role: app
+    networks:
+      app: {}
+      data: {}
+      edge:
+        aliases:
+          - proj-prod--api
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+  cache:
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
+    cap_drop:
+      - ALL
+    command:
+      - redis-server
+      - --requirepass
+      - p$$w
+      - --appendonly
+      - "yes"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - -a
+        - p$$w
+        - ping
+    image: redis:7-alpine
+    labels:
+      cvctl.env: REDIS
+      cvctl.external: allowed
+      cvctl.kind: redis
+    networks:
+      - data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - cache-data:/data
+  main-db:
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
+    cap_drop:
+      - ALL
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    environment:
+      PGDATABASE: dbname
+      PGHOST: /var/run/postgresql
+      PGUSER: u
+      POSTGRES_DB: dbname
+      POSTGRES_PASSWORD: p$$w
+      POSTGRES_USER: u
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U u -d dbname
+    image: ghcr.io/codeavers/cvctl-postgres:16
+    labels:
+      cvctl.env: DATABASE
+      cvctl.kind: postgres
+      cvctl.version: "16"
+    networks:
+      - data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - main-db-data:/var/lib/postgresql/data
+  media:
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
+    cap_drop:
+      - ALL
+    command:
+      - server
+      - /data
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    environment:
+      MINIO_ROOT_PASSWORD: p$$w
+      MINIO_ROOT_USER: u
+    healthcheck:
+      test:
+        - CMD
+        - mc
+        - ready
+        - local
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    labels:
+      cvctl.env: S3
+      cvctl.expose: "9000"
+      cvctl.external: allowed
+      cvctl.kind: s3
+    networks:
+      data: {}
+      edge:
+        aliases:
+          - proj-prod--media
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - media-data:/data
+  worker:
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    env_file:
+      - /srv/deploy/proj-prod/app.env
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+    image: ghcr.io/example/demo-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    labels:
+      cvctl.role: worker
+    networks:
+      app: {}
+      data: {}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  cache-data:
+    name: proj-prod_cache-data
+  main-db-data:
+    name: proj-prod_main-db-data
+  media-data:
+    name: proj-prod_media-data

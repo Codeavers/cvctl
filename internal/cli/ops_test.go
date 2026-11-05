@@ -1510,3 +1510,63 @@ func TestBackupRunnerCanPipe(t *testing.T) {
 		t.Fatal("the CLI backup runner needs a Piper for dump targets")
 	}
 }
+
+const sqliteCLICompose = `
+services:
+  web:
+    image: ghcr.io/codeavers/web:develop
+    labels:
+      cvctl.role: app
+      cvctl.expose: "3000"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+  store:
+    labels:
+      cvctl.kind: sqlite
+      cvctl.owner: web
+      cvctl.env: STORE
+x-cvctl:
+  health:
+    service: web
+    http: /healthz
+`
+
+func TestSqliteRejectsBlueGreen(t *testing.T) {
+	_, env := setupOpsFixture(t, "myapp-dev")
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+	infra := filepath.Join(env.deployRoot(), "myapp-dev", "infra")
+	if err := os.WriteFile(filepath.Join(infra, "compose.yml"), []byte(sqliteCLICompose), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, _ := run(t, "set-strategy", "myapp-dev", "blue-green", "--json")
+	if code == 0 || !strings.Contains(out, "E_SQLITE_RECREATE") {
+		t.Fatalf("code=%d out=%s", code, out)
+	}
+	data, _ := os.ReadFile(filepath.Join(env.deployRoot(), "myapp-dev", "cvctl.env"))
+	if !strings.Contains(string(data), "CVCTL_STRATEGY=recreate") {
+		t.Fatalf("strategy changed: %s", data)
+	}
+	if code, out, errb := run(t, "set-strategy", "myapp-dev", "recreate", "--json"); code != 0 {
+		t.Fatalf("code %d: out=%s err=%s", code, out, errb)
+	}
+}
+
+// The deploy checks the contract again, so an unreadable one must not stop an
+// operator from changing the strategy.
+func TestSetStrategyWithoutContract(t *testing.T) {
+	_, env := setupOpsFixture(t, "myapp-dev")
+	oldEnv := newOpsEnv
+	t.Cleanup(func() { newOpsEnv = oldEnv })
+	newOpsEnv = func(o opsOpts) (*OpsEnv, error) { return env, nil }
+	if err := os.RemoveAll(filepath.Join(env.deployRoot(), "myapp-dev", "infra")); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errb := run(t, "set-strategy", "myapp-dev", "blue-green", "--json"); code != 0 {
+		t.Fatalf("code %d: out=%s err=%s", code, out, errb)
+	}
+}

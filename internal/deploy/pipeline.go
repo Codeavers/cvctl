@@ -994,7 +994,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 	var localDataServices []string
 	for _, ds := range p.Data {
-		if dec.Services[ds.Name].Mode == "local" {
+		if dec.Services[ds.Name].Mode == "local" && !cat[ds.Kind].NoContainer {
 			localDataServices = append(localDataServices, ds.Name)
 		}
 	}
@@ -1020,6 +1020,17 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 	if err := d.provisionBackupUser(ctx, inst, p, dec, backupTarget); err != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, stepErrText(ctx, err), secrets)
+	}
+	// Before the first thing that can open a volume: pre-deploy hooks run in the
+	// app's container, as its user.
+	sqlite := backup.Runner{Run: d.Run, Catalog: cat}
+	if err := sqlite.PrepareSqlite(ctx, p, dec); err != nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		var oe *output.Error
+		if errors.As(err, &oe) && oe.Code == backup.CodeSqliteUID {
+			return d.failPermanent(ctx, inst, st, want, deployID, actor, now, oe.Error()+"; "+oe.Hint, secrets)
+		}
 		return d.failTransient(ctx, inst, st, want, deployID, actor, now, stepErrText(ctx, err), secrets)
 	}
 	if err := stagingCompose.UpData(ctx, localDataServices, waitTimeout(p)); err != nil {

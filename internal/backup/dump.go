@@ -53,7 +53,7 @@ func (r *Runner) dumpBackup(ctx context.Context, inst string, t Target) error {
 // Every snapshot therefore starts tagged partial and turns complete only once
 // both sides exited 0: a crash at any point leaves one nothing will use.
 func (r *Runner) dump(ctx context.Context, inst string, t Target, tags ...string) error {
-	script, err := r.dumpScript(t)
+	from, helper, err := r.dumpSource(ctx, inst, t)
 	if err != nil {
 		return err
 	}
@@ -64,14 +64,9 @@ func (r *Runner) dump(ctx context.Context, inst string, t Target, tags ...string
 	if _, err := r.backupNet(ctx, inst); err != nil {
 		return err
 	}
-	container, err := r.runningContainer(ctx, inst, t.Service)
-	if err != nil {
-		return err
-	}
 	if err := r.resticInit(ctx, inst, envFile, "--retry-lock", repoLockWait); err != nil {
 		return err
 	}
-	from := r.docker("exec", container, "sh", "-c", script)
 	// --quiet drops the status lines --json would print ten times a second for
 	// the whole dump; the summary with the snapshot id is printed regardless.
 	args := []string{"backup", "--stdin", "--stdin-filename", t.Service + ".dump", "--host", r.Host.Host, "--tag", inst}
@@ -86,6 +81,9 @@ func (r *Runner) dump(ctx context.Context, inst string, t Target, tags ...string
 	if ctx.Err() != nil {
 		// Killing the docker client leaves the container running.
 		r.cleanup(ctx, name, "")
+		if helper != "" {
+			r.cleanup(ctx, helper, "")
+		}
 	}
 	id := resticSnapshotID(res.To.Stdout)
 	cause := r.pipeFailure(from, to, res, pipeErr)
@@ -204,6 +202,13 @@ func (r *Runner) pickDump(ctx context.Context, inst, svc string, tgt restoreTarg
 // for the service. The caller checked that the volume did not exist, so a
 // failure can remove it without reaching data in use.
 func (r *Runner) dumpRestore(ctx context.Context, inst string, t Target, snapshot string) (retErr error) {
+	helper, err := r.helperImage(t)
+	if err != nil {
+		return err
+	}
+	if helper != "" {
+		return r.sqliteRestore(ctx, inst, t, snapshot, helper)
+	}
 	if _, err := r.exec(ctx, r.docker("volume", "create", t.Volume)); err != nil {
 		return err
 	}
@@ -219,7 +224,7 @@ func (r *Runner) dumpRestore(ctx context.Context, inst string, t Target, snapsho
 		return err
 	}
 	// a clean shutdown leaves the volume ready for the real container
-	_, err := r.exec(ctx, r.docker("stop", "-t", restoreStopTimeout, name))
+	_, err = r.exec(ctx, r.docker("stop", "-t", restoreStopTimeout, name))
 	return err
 }
 
@@ -230,6 +235,9 @@ func (r *Runner) dumpVerify(ctx context.Context, inst string, t Target) error {
 	cat, err := r.catalog()
 	if err != nil {
 		return err
+	}
+	if helper := cat[t.Kind].Helper; helper != "" {
+		return r.sqliteVerify(ctx, inst, t, helper)
 	}
 	check := cat[t.Kind].RestoreCheck
 	if check == "" {
@@ -269,21 +277,34 @@ func (r *Runner) dumpLoad(ctx context.Context, inst string, t Target, snapshot, 
 	if len(k.RestoreCommand) == 0 {
 		return restoreFailedErr("E_RESTORE_FAILED", fmt.Sprintf("kind %q of %s has no restore_command", t.Kind, t.Service), "declare restore_command in the kind definition")
 	}
-	idx, id, err := r.completeDump(ctx, inst, t.Service, snapshot)
-	if err != nil {
-		return err
-	}
-	envFile, err := r.writeResticEnv(inst, t.Service, idx)
+	from, reader, err := r.dumpReader(ctx, inst, t, snapshot)
 	if err != nil {
 		return err
 	}
 	if err := r.startEngine(ctx, inst, t, k, name, volume); err != nil {
 		return err
 	}
+	return r.feed(ctx, from, reader, r.docker("exec", "-i", name, "sh", "-c", strings.Join(k.RestoreCommand, " ")))
+}
+
+// dumpReader is the command that streams snapshot out of restic, and the name
+// of its container.
+func (r *Runner) dumpReader(ctx context.Context, inst string, t Target, snapshot string) (sys.Cmd, string, error) {
+	idx, id, err := r.completeDump(ctx, inst, t.Service, snapshot)
+	if err != nil {
+		return sys.Cmd{}, "", err
+	}
+	envFile, err := r.writeResticEnv(inst, t.Service, idx)
+	if err != nil {
+		return sys.Cmd{}, "", err
+	}
 	reader := r.tempName("read", inst, t.Service)
-	from := r.docker("run", "--rm", "--name", reader, "--network", render.NetworkBackup(inst),
-		"--env-file", envFile, resticImage, "--retry-lock", repoLockWait, "dump", id, t.Service+".dump")
-	to := r.docker("exec", "-i", name, "sh", "-c", strings.Join(k.RestoreCommand, " "))
+	return r.docker("run", "--rm", "--name", reader, "--network", render.NetworkBackup(inst),
+		"--env-file", envFile, resticImage, "--retry-lock", repoLockWait, "dump", id, t.Service+".dump"), reader, nil
+}
+
+// feed pipes the reader's stream into to.
+func (r *Runner) feed(ctx context.Context, from sys.Cmd, reader string, to sys.Cmd) error {
 	res, pipeErr := r.Pipe.Pipe(ctx, from, to)
 	if ctx.Err() != nil {
 		// Killing the docker client leaves the container running.
@@ -383,6 +404,27 @@ func (r *Runner) waitEngine(ctx context.Context, name string, test []string) err
 		r.sleep(enginePollInterval)
 		waited += enginePollInterval
 	}
+}
+
+// dumpSource is the command that writes the dump of t to stdout, and the name
+// of the container it starts, if any.
+func (r *Runner) dumpSource(ctx context.Context, inst string, t Target) (sys.Cmd, string, error) {
+	helper, err := r.helperImage(t)
+	if err != nil {
+		return sys.Cmd{}, "", err
+	}
+	if helper != "" {
+		return r.sqliteSource(ctx, inst, t, helper)
+	}
+	script, err := r.dumpScript(t)
+	if err != nil {
+		return sys.Cmd{}, "", err
+	}
+	container, err := r.runningContainer(ctx, inst, t.Service)
+	if err != nil {
+		return sys.Cmd{}, "", err
+	}
+	return r.docker("exec", container, "sh", "-c", script), "", nil
 }
 
 func (r *Runner) dumpScript(t Target) (string, error) {

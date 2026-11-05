@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -477,27 +478,40 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 
 	// A dump loads while the service keeps running, so a failure here has
 	// nothing to roll back and the outage lasts only the swap.
-	isDump, dumpWarn := target.Strategy == StrategyDump, ""
+	// A helper's volume belongs to a running app instead, so the load waits for
+	// the stop; what can fail without touching the app is settled first.
+	isDump, dumpWarn, helper, uid := target.Strategy == StrategyDump, "", "", ""
 	if isDump {
 		snap, err := r.pickDump(ctx, inst, svc, tgt)
 		if err != nil {
+			return nil, err
+		}
+		if helper, err = r.helperImage(*target); err != nil {
 			return nil, err
 		}
 		res.Snapshot = snap.ID
 		if tgt.kind == "time" {
 			dumpWarn = fmt.Sprintf("%s has no point-in-time recovery: restored snapshot %s from %s, the latest complete one not newer than %s", svc, snap.ID, snap.Time, to)
 		}
-		fresh := *target
-		fresh.Volume = res.Volume
-		if err := r.dumpRestore(ctx, inst, fresh, snap.ID); err != nil {
-			return nil, r.dumpRestoreFailed(ctx, res, st, err)
+		if helper != "" {
+			i := slices.IndexFunc(p.Data, func(ds contract.DataService) bool { return ds.Name == svc })
+			if uid, err = r.sqliteUID(ctx, p, p.Data[i], st.Current.Digests); err != nil {
+				return nil, err
+			}
+		} else {
+			fresh := *target
+			fresh.Volume = res.Volume
+			if err := r.dumpRestore(ctx, inst, fresh, snap.ID); err != nil {
+				return nil, r.dumpRestoreFailed(ctx, res, st, err)
+			}
 		}
 	}
+	loaded := isDump && helper == ""
 
 	// Nothing but the app services is touched until the WAL is archived, so a
 	// lag leaves volumes and decisions as they were.
 	if err := r.stopApps(ctx, inst, p); err != nil {
-		return nil, r.rollbackRestore(ctx, restoreRun{inst: inst, svc: svc, res: res, st: st, tgt: tgt, created: isDump}, err)
+		return nil, r.rollbackRestore(ctx, restoreRun{inst: inst, svc: svc, res: res, st: st, tgt: tgt, created: loaded}, err)
 	}
 	flushWarn := ""
 	if target.Strategy == StrategyWalG {
@@ -530,10 +544,20 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 	run := restoreRun{
 		inst: inst, svc: svc, res: res, st: st, tgt: tgt, envPath: envPath,
 		volKey: volKey, genKey: genKey, prevVol: prevVol, hadVol: hadVol, prevGen: prevGen, hadGen: hadGen,
-		created: isDump,
+		created: loaded,
 	}
 	runErr := func() error {
-		if _, err := r.exec(ctx, r.Compose(inst).Cmd("stop", svc)); err != nil {
+		if helper != "" {
+			fresh := *target
+			fresh.Volume = res.Volume
+			if err := r.dumpRestore(ctx, inst, fresh, res.Snapshot); err != nil {
+				return err
+			}
+			run.created = true
+			if err := r.sqliteOwn(ctx, helper, res.Volume, uid); err != nil {
+				return err
+			}
+		} else if _, err := r.exec(ctx, r.Compose(inst).Cmd("stop", svc)); err != nil {
 			return err
 		}
 		if !isDump {
@@ -562,6 +586,9 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 		if err := r.Apply(ctx, inst, st.Current); err != nil {
 			run.applyFailed = true
 			return err
+		}
+		if helper != "" {
+			return nil
 		}
 		return r.verifyServing(ctx, inst, svc, target.Strategy, sd.Creds)
 	}()

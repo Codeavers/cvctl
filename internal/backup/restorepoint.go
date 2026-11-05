@@ -61,16 +61,28 @@ func (rp *RestorePoint) Create(ctx context.Context, inst, id string) error {
 			continue
 		}
 		proj := rp.Compose(inst)
-		exists, _, err := serviceState(ctx, proj, t.Service)
-		if err != nil {
-			return err
+		// A helper reads the volume, so no service container says whether there
+		// is data to protect: the dump itself does.
+		helper := ""
+		if dump {
+			if helper, err = rp.Data.helperImage(t); err != nil {
+				return err
+			}
 		}
-		if !exists {
-			fresh = true
-			continue
+		if helper == "" {
+			exists, _, err := serviceState(ctx, proj, t.Service)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				fresh = true
+				continue
+			}
 		}
 		if dump {
-			if err := rp.dumpPoint(ctx, inst, p, d, t, id); err != nil {
+			if err := rp.dumpPoint(ctx, inst, p, d, t, id); errors.Is(err, errNoData) {
+				fresh = true
+			} else if err != nil {
 				return err
 			}
 			continue

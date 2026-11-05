@@ -2,6 +2,7 @@ package contract
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"slices"
 	"sort"
@@ -35,6 +36,13 @@ func exposedApp(p *Project, name string) bool {
 
 // MaxHookTimeout caps x-cvctl.hooks[].timeout.
 const MaxHookTimeout = 2 * time.Hour
+
+// ValidUID reports whether v is the numeric id of an unprivileged user. Root is
+// out: apps run with every capability dropped. 2^32-1 is the kernel's "no user".
+func ValidUID(v string) bool {
+	n, err := strconv.ParseUint(v, 10, 32)
+	return err == nil && n > 0 && n < math.MaxUint32
+}
 
 // Validate checks the contract rules. A nil spec skips the env checks (the
 // caller reports the missing or invalid spec itself). The result is sorted by
@@ -122,6 +130,7 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 		}
 	}
 
+	sqliteEnvs, ownerUIDs := map[string]string{}, map[string]string{}
 	for _, d := range p.Data {
 		k, ok := cat[d.Kind]
 		if !ok {
@@ -149,6 +158,34 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 				add("E_CONTRACT_BACKUP_UNSUPPORTED", d.Name, fmt.Sprintf("kind %s does not support %s %s", d.Kind, LabelBackup, d.Backup), hint)
 			case d.Backup == "volume" && (k.Backup == "wal-g" || k.Backup == "dump"):
 				add("E_CONTRACT_BACKUP_UNSUPPORTED", d.Name, fmt.Sprintf("kind %s cannot be backed up as a volume while it runs", d.Kind), hint)
+			}
+			if k.NoContainer {
+				if !isApp[d.Owner] {
+					add("E_CONTRACT_SQLITE_OWNER", d.Name, fmt.Sprintf("%s %q is not an app service", LabelOwner, d.Owner),
+						fmt.Sprintf("set %s to the one app that uses this database", LabelOwner))
+				}
+				if d.ExternalAllowed {
+					add("E_CONTRACT_SQLITE_EXTERNAL", d.Name, fmt.Sprintf("kind %s has no external mode", d.Kind),
+						fmt.Sprintf("remove %s", LabelExternal))
+				}
+				// Every database has its own directory, so two can only clash on
+				// the variable that tells the app where it is.
+				if prev, dup := sqliteEnvs[d.EnvPrefix]; dup && d.EnvPrefix != "" {
+					add("E_CONTRACT_SQLITE_PATH", d.Name, fmt.Sprintf("%s and %s both set the path in %s_PATH", prev, d.Name, d.EnvPrefix),
+						fmt.Sprintf("give each service its own %s", LabelEnv))
+				}
+				sqliteEnvs[d.EnvPrefix] = d.Name
+				if d.UID != "" {
+					if !ValidUID(d.UID) {
+						add("E_CONTRACT_SQLITE_UID", d.Name, fmt.Sprintf("%s %q is not the numeric id of an unprivileged user", LabelUID, d.UID),
+							fmt.Sprintf("set %s to the numeric uid the app runs as, above 0", LabelUID))
+					}
+					if prev, seen := ownerUIDs[d.Owner]; seen && prev != d.UID {
+						add("E_CONTRACT_SQLITE_UID", d.Name, fmt.Sprintf("app %s cannot run as both uid %s and uid %s", d.Owner, prev, d.UID),
+							fmt.Sprintf("use one %s on every service of %s", LabelUID, d.Owner))
+					}
+					ownerUIDs[d.Owner] = d.UID
+				}
 			}
 			svc := p.Compose.Services[d.Name]
 			if k.Buckets {

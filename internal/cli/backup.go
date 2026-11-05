@@ -99,6 +99,9 @@ func printBackupResults(cmd *cobra.Command, results []backup.Result, warnings []
 		fmt.Fprintln(tw, "INSTANCE\tSERVICE\tSTRATEGY\tRESULT")
 		for _, r := range results {
 			res := "ok"
+			if r.Note != "" {
+				res = "ok: " + r.Note
+			}
 			if !r.OK {
 				res = "failed: " + r.Error
 			}

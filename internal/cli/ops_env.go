@@ -21,6 +21,7 @@ import (
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
+	"github.com/codeavers/cvctl/kinds"
 )
 
 var validEnvKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -267,6 +268,26 @@ func newGetEnvCmd() *cobra.Command {
 	return cmd
 }
 
+// recreateOnly lists the services of inst that rule out blue-green. A contract
+// that cannot be read answers nothing: the deploy reads it again and refuses.
+func (e *OpsEnv) recreateOnly(inst, infraPath string) []string {
+	cat := e.Catalog
+	if cat == nil {
+		var err error
+		if cat, err = kinds.Load(); err != nil {
+			return nil
+		}
+	}
+	if infraPath == "" {
+		infraPath = "."
+	}
+	p, err := contract.Load(filepath.Join(e.deployRoot(), inst, "infra", infraPath), cat)
+	if err != nil {
+		return nil
+	}
+	return instance.RecreateOnly(p, cat)
+}
+
 func newSetStrategyCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "set-strategy <instance> <strategy>",
@@ -317,6 +338,12 @@ func newSetStrategyCmd() *cobra.Command {
 					Code:    "E_DECISION_READ",
 					Message: fmt.Sprintf("%s is malformed (details hidden: the file holds secrets)", cvctlEnvPath),
 					Hint:    "fix syntax in cvctl.env",
+				}
+			}
+
+			if strategy == "blue-green" {
+				if svcs := e.recreateOnly(inst, m["CVCTL_INFRA_PATH"]); len(svcs) > 0 {
+					return instance.RecreateErr(svcs)
 				}
 			}
 

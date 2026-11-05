@@ -365,3 +365,30 @@ func TestKindRejectsBlankDumpCommand(t *testing.T) {
 		})
 	}
 }
+
+func TestSqliteKind(t *testing.T) {
+	k := mustLoad(t)["sqlite"]
+	if !k.NoContainer || k.Helper == "" || k.Backup != "dump" {
+		t.Fatalf("kind: %+v", k)
+	}
+	if k.Port != 0 || len(k.Health) != 0 || len(k.External) != 0 || len(k.ContainerEnv) != 0 || len(k.CapAdd) != 0 {
+		t.Fatalf("a kind without a container has no port, health, external mode, env or capabilities: %+v", k)
+	}
+	got := k.LocalVars("STORE", "store", Credentials{})
+	if len(got) != 1 || got["STORE_PATH"] != "/data/store/app.db" {
+		t.Fatalf("vars: %v", got)
+	}
+}
+
+func TestNoContainerRequiresHelperAndNoExternal(t *testing.T) {
+	base := "name: a\nimage: x:{version}\nversions: [\"1\"]\ndefault_version: \"1\"\nbackup: dump\nno_container: true\n"
+	for _, y := range []string{base, base + "helper: h:1\nexternal: [url]\n"} {
+		_, err := LoadFS(fstest.MapFS{"a.yml": {Data: []byte(y)}})
+		if got := code(t, err); got != "E_KIND_INVALID" {
+			t.Errorf("code = %s", got)
+		}
+	}
+	if _, err := LoadFS(fstest.MapFS{"a.yml": {Data: []byte(base + "helper: h:1\nenv:\n  PATH: /data/{host}/x\n")}}); err != nil {
+		t.Fatal(err)
+	}
+}

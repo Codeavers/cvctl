@@ -116,6 +116,8 @@ type Result struct {
 	Strategy string `json:"strategy"`
 	OK       bool   `json:"ok"`
 	Error    string `json:"error,omitempty"`
+	// Note says why an OK target stored nothing.
+	Note string `json:"note,omitempty"`
 }
 
 // Snapshot is one backup as listed by the backup tool.
@@ -401,7 +403,11 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 					defer cancel()
 					return dataRunner.backupTarget(tctx, inst, t)
 				}()
-				res := Result{Instance: inst, Service: t.Service, Strategy: t.Strategy, OK: runErr == nil}
+				note := ""
+				if errors.Is(runErr, errNoData) {
+					note, runErr = runErr.Error(), nil
+				}
+				res := Result{Instance: inst, Service: t.Service, Strategy: t.Strategy, OK: runErr == nil, Note: note}
 				if runErr != nil {
 					res.Error = dataRunner.redact(runErr.Error())
 					failed = append(failed, t.Service)
@@ -482,7 +488,10 @@ func (r *Runner) BackupService(ctx context.Context, inst, svc string) error {
 		}
 		return nil
 	}
-	return dataRunner.backupTarget(tctx, inst, ts[0])
+	if err := dataRunner.backupTarget(tctx, inst, ts[0]); !errors.Is(err, errNoData) {
+		return err
+	}
+	return nil
 }
 
 func (r *Runner) backupTarget(ctx context.Context, inst string, t Target) error {
