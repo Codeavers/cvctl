@@ -258,7 +258,7 @@ func (r *Runner) dumpVerify(ctx context.Context, inst string, t Target) error {
 	out := lastLine(string(res.Stdout))
 	n, convErr := strconv.Atoi(out)
 	if convErr != nil {
-		return verifyFailed(fmt.Sprintf("restore check returned %q, expected a number", truncate(out, 32)), "check the kind's restore_check")
+		return verifyFailed(fmt.Sprintf("restore check returned %q, expected a number", truncate(r.redact(out), 32)), "check the kind's restore_check")
 	}
 	if n <= 0 {
 		return verifyEmpty(fmt.Sprintf("restored %s dump holds no data", t.Service))

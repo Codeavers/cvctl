@@ -127,7 +127,7 @@ func (r *Runner) sqliteSource(ctx context.Context, inst string, t Target, image 
 	if len(f) != 2 || !slices.Contains([]string{"ro", "rw"}, f[1]) || !numeric(f[0]) {
 		return sys.Cmd{}, "", &output.Error{
 			Code:    "E_SQLITE_HELPER",
-			Message: fmt.Sprintf("the helper reported %q about %s", truncate(strings.TrimSpace(string(res.Stdout)), 64), t.Service),
+			Message: fmt.Sprintf("the helper reported %q about %s", truncate(r.redact(strings.TrimSpace(string(res.Stdout))), 64), t.Service),
 			Hint:    "check that the helper image matches this cvctl version",
 		}
 	}
@@ -172,7 +172,7 @@ func (r *Runner) sqliteRestore(ctx context.Context, inst string, t Target, snaps
 	}
 	// integrity_check exits 0 on a corrupt file; only its output tells.
 	if out := strings.TrimSpace(string(res.Stdout)); out != "ok" {
-		return verifyFailed(fmt.Sprintf("integrity_check on the snapshot of %s returned %q", t.Service, truncate(out, 200)),
+		return verifyFailed(fmt.Sprintf("integrity_check on the snapshot of %s returned %q", t.Service, truncate(r.redact(out), 200)),
 			"the snapshot is damaged; restore an older one from cvctl backup list")
 	}
 	return nil
@@ -242,6 +242,7 @@ func (r *Runner) sqliteOwn(ctx context.Context, image, volume, uid string) error
 // pre-deploy hooks included, and after the pull: the image says who that user
 // is. An error with code CodeSqliteUID will not go away by retrying.
 func (r *Runner) PrepareSqlite(ctx context.Context, p *contract.Project, d *instance.Decisions) error {
+	r = r.withServiceSecrets(d)
 	cat, err := r.catalog()
 	if err != nil {
 		return err

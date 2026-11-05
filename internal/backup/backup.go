@@ -160,6 +160,9 @@ type Runner struct {
 	LockInterval time.Duration
 	LockTimeout  time.Duration
 	Sleep        func(time.Duration)
+	// serviceSecrets are the passwords of the instance's services: an engine can
+	// print them in the output that ends up in errors and notifications.
+	serviceSecrets []string
 }
 
 const (
@@ -263,11 +266,12 @@ func (r *Runner) secretsRoot() (string, error) {
 }
 
 func (r *Runner) secrets() []string {
-	if r.Host == nil {
-		return nil
+	candidates := r.serviceSecrets
+	if r.Host != nil {
+		candidates = append(slices.Clone(candidates), r.Host.AccessKey, r.Host.SecretKey, r.Host.LibsodiumKey, r.Host.ResticPassword, r.Host.HostLibsodiumKey, r.Host.HostResticPassword)
 	}
 	var out []string
-	for _, s := range []string{r.Host.AccessKey, r.Host.SecretKey, r.Host.LibsodiumKey, r.Host.ResticPassword, r.Host.HostLibsodiumKey, r.Host.HostResticPassword} {
+	for _, s := range candidates {
 		if len(s) >= 4 {
 			out = append(out, s)
 		}
@@ -276,7 +280,20 @@ func (r *Runner) secrets() []string {
 	return out
 }
 
-// redact removes every known secret from text and caps its size.
+// withServiceSecrets is a copy of r that also redacts the passwords in d. User
+// and database names stay: they are not secret, and short ones would blank
+// unrelated words of the message.
+func (r *Runner) withServiceSecrets(d *instance.Decisions) *Runner {
+	rr := *r
+	rr.serviceSecrets = nil
+	for _, s := range d.Services {
+		rr.serviceSecrets = append(rr.serviceSecrets, s.Creds.Password, s.Creds.AppPassword)
+	}
+	return &rr
+}
+
+// redact removes every known secret from text and caps its size. Anything that
+// shortens text goes after it: a password cut in two no longer matches.
 func (r *Runner) redact(text string) string {
 	for _, s := range r.secrets() {
 		text = strings.ReplaceAll(text, s, "***")
@@ -316,10 +333,10 @@ func (r *Runner) exec(ctx context.Context, cmd sys.Cmd) (sys.Result, error) {
 // and makes sure the instance's backup user exists, so a backup or verify works
 // before the instance's first deploy with its own keys.
 func (r *Runner) forInstance(ctx context.Context, inst string, p *contract.Project, d *instance.Decisions) (*Runner, error) {
-	rr := *r
+	rr := r.withServiceSecrets(d)
 	rr.Host = render.BackupTargetFor(r.Host, d)
 	if rr.Host == nil || !rr.Host.Local || len(Targets(p, d)) == 0 {
-		return &rr, nil
+		return rr, nil
 	}
 	if _, err := rr.backupNet(ctx, inst); err != nil {
 		return nil, err
@@ -334,7 +351,7 @@ func (r *Runner) forInstance(ctx context.Context, inst string, p *contract.Proje
 		}
 		return nil, err
 	}
-	return &rr, nil
+	return rr, nil
 }
 
 func (r *Runner) targets(ctx context.Context, inst, only string) (*Runner, []Target, error) {
