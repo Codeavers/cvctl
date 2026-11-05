@@ -154,7 +154,9 @@ type Runner struct {
 	// ArchiveTimeout bounds the wait for the last WAL segment to be archived
 	// before a restore; zero means 120s.
 	ArchiveTimeout time.Duration
-	Apply          func(ctx context.Context, inst string, target *state.Desired) error
+	// EngineProbeTimeout bounds one look at a temporary engine; zero means 30s.
+	EngineProbeTimeout time.Duration
+	Apply              func(ctx context.Context, inst string, target *state.Desired) error
 	// Lock retry: deploys hold the instance lock for minutes, so a status
 	// write waits for them instead of losing the record.
 	LockInterval time.Duration

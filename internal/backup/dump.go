@@ -42,6 +42,7 @@ const forgetTimeout = 30 * time.Minute
 const (
 	engineReadyTimeout = 5 * time.Minute
 	enginePollInterval = 2 * time.Second
+	engineProbeTimeout = 30 * time.Second
 )
 
 func (r *Runner) dumpBackup(ctx context.Context, inst string, t Target) error {
@@ -347,7 +348,6 @@ func (r *Runner) startEngine(ctx context.Context, inst string, t Target, k kinds
 	if err := r.FS.WriteFile(envFile, envFileBody(k.ContainerEnvFor(sd.Creds)), 0o640, deployOwner); err != nil {
 		return restoreFailedErr("E_FILE_WRITE", fmt.Sprintf("cannot write %s: %v", envFile, err), "check permissions and free space of the instance directory")
 	}
-	defer func() { _ = r.FS.Remove(envFile) }()
 	args := []string{"run", "-d", "--name", name, "--network", "none", "--env-file", envFile,
 		"--cap-drop", "ALL", "--security-opt", "no-new-privileges:true"}
 	for _, c := range k.CapAdd {
@@ -357,7 +357,10 @@ func (r *Runner) startEngine(ctx context.Context, inst string, t Target, k kinds
 	for _, c := range k.Command {
 		args = append(args, k.Substitute(c, sd.Creds))
 	}
-	if _, err := r.exec(ctx, r.docker(args...)); err != nil {
+	_, err = r.exec(ctx, r.docker(args...))
+	// Docker has read it by now; the engine may take minutes to start.
+	_ = r.FS.Remove(envFile)
+	if err != nil {
 		return err
 	}
 	return r.waitEngine(ctx, name, test)
@@ -383,21 +386,34 @@ func engineHealth(k kinds.Kind, c kinds.Credentials, svc string) ([]string, erro
 		"declare health as [CMD, ...] or [CMD-SHELL, ...] in the kind definition")
 }
 
+// waitEngine polls until the engine is healthy. Each look has its own timeout
+// and its time counts towards the limit: an engine that hangs never answers.
 func (r *Runner) waitEngine(ctx context.Context, name string, test []string) error {
+	timeout := r.EngineProbeTimeout
+	if timeout <= 0 {
+		timeout = engineProbeTimeout
+	}
+	look := func(args ...string) (sys.Result, error) {
+		pctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		return r.Run.Run(pctx, r.docker(args...))
+	}
 	var waited time.Duration
 	for {
 		if err := ctx.Err(); err != nil {
 			return restoreFailedErr("E_RESTORE_FAILED", "cancelled while the temporary engine started: "+err.Error(), "run the command again")
 		}
-		running, _ := r.Run.Run(ctx, r.docker("inspect", "-f", "{{.State.Running}}", name))
+		began := r.now()
+		running, _ := look("inspect", "-f", "{{.State.Running}}", name)
 		if running.ExitCode == 0 && strings.TrimSpace(string(running.Stdout)) == "false" {
-			logs, _ := r.Run.Run(ctx, r.docker("logs", "--tail", "20", name))
+			logs, _ := look("logs", "--tail", "20", name)
 			return restoreFailedErr("E_RESTORE_FAILED", "temporary engine exited before it was healthy: "+r.redact(strings.TrimSpace(string(logs.Stderr)+string(logs.Stdout))),
 				"check that the image of the kind starts on an empty volume")
 		}
-		if res, err := r.Run.Run(ctx, r.docker(append([]string{"exec", name}, test...)...)); err == nil && res.ExitCode == 0 {
+		if res, err := look(append([]string{"exec", name}, test...)...); err == nil && res.ExitCode == 0 {
 			return nil
 		}
+		waited += r.now().Sub(began)
 		if waited >= engineReadyTimeout {
 			return restoreFailedErr("E_RESTORE_FAILED", fmt.Sprintf("temporary engine was not healthy after %s", engineReadyTimeout), "check that the image of the kind starts on an empty volume")
 		}
