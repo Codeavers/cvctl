@@ -1,0 +1,20 @@
+name: mysql
+image: mysql:{version}
+versions: ["8.4", "9"]
+default_version: "8.4"
+port: 3306
+volume_path: /var/lib/mysql
+container_env:
+  MYSQL_ROOT_PASSWORD: "{password}"
+  MYSQL_USER: "{user}"
+  MYSQL_PASSWORD: "{password}"
+  MYSQL_DATABASE: "{db}"
+env:
+  URL: "mysql://{user}:{password}@{host}:{port}/{db}"
+backup: dump
+external: [url]
+health: ["CMD-SHELL", "MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD\" mysql --protocol=tcp -h 127.0.0.1 -uroot -e 'select 1'"]
+dump_command: ["MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD\"", "mysqldump", "-uroot", "--single-transaction", "--set-gtid-purged=OFF", "--routines", "--events", "--databases", "\"$MYSQL_DATABASE\""]
+restore_command: ["MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD\"", "mysql", "-uroot"]
+restore_check: "MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD\" mysql -uroot -N -B -D \"$MYSQL_DATABASE\" -e 'select count(*) from information_schema.tables where table_schema = database()'"
+cap_add: [SETUID, SETGID, DAC_READ_SEARCH]

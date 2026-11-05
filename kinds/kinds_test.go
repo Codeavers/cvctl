@@ -3,6 +3,8 @@ package kinds
 import (
 	"errors"
 	"reflect"
+	"regexp"
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -390,5 +392,72 @@ func TestNoContainerRequiresHelperAndNoExternal(t *testing.T) {
 	}
 	if _, err := LoadFS(fstest.MapFS{"a.yml": {Data: []byte(base + "helper: h:1\nenv:\n  PATH: /data/{host}/x\n")}}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCatalogLoadsEngines(t *testing.T) {
+	c := mustLoad(t)
+	creds := Credentials{User: "app", Password: "p@ss", DB: "appdb"}
+	for name, want := range map[string]struct {
+		image, defaultVersion, backup, url string
+		versions                           []string
+	}{
+		"mysql":   {"mysql:8.4", "8.4", "dump", "mysql://app:p%40ss@h:3306/appdb", []string{"8.4", "9"}},
+		"mariadb": {"mariadb:11.4", "11.4", "dump", "mysql://app:p%40ss@h:3306/appdb", []string{"10.11", "11.4"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			k, ok := c[name]
+			if !ok {
+				t.Fatalf("missing kind %s", name)
+			}
+			if !reflect.DeepEqual(k.Versions, want.versions) || k.DefaultVersion != want.defaultVersion || k.Backup != want.backup {
+				t.Errorf("kind: %+v", k)
+			}
+			if img, err := k.ImageFor(k.DefaultVersion); err != nil || img != want.image {
+				t.Errorf("img=%q err=%v", img, err)
+			}
+			if got := k.LocalVars("X", "h", creds); len(got) != 1 || got["X_URL"] != want.url {
+				t.Errorf("vars: %v", got)
+			}
+			if !reflect.DeepEqual(k.External, []string{"url"}) {
+				t.Errorf("external: %v", k.External)
+			}
+		})
+	}
+}
+
+// dump_command, restore_command and restore_check run under docker exec, where
+// an expanded -p"$X" is the tool's argv and shows in ps.
+func TestEngineSecretsNotInCommand(t *testing.T) {
+	argvSecret := regexp.MustCompile(`(^|\s)(-p|--password)[=\s"']*\$`)
+	for name, k := range mustLoad(t) {
+		if k.Backup != "dump" || k.Helper != "" {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			for _, part := range [][]string{k.Command, k.Health, k.DumpCommand, k.RestoreCommand, {k.RestoreCheck}} {
+				s := strings.Join(part, " ")
+				if strings.Contains(s, "{password}") || strings.Contains(s, "{app_password}") {
+					t.Errorf("password placeholder in %q", s)
+				}
+				if argvSecret.MatchString(s) {
+					t.Errorf("password in argv: %q", s)
+				}
+			}
+			if strings.TrimSpace(k.RestoreCheck) == "" {
+				t.Error("no restore_check")
+			}
+		})
+	}
+}
+
+// The image's init runs a temporary server on the socket only: a socket check
+// would pass there, and the restore would load into a server about to stop.
+func TestMySQLHealthWaitsForTCP(t *testing.T) {
+	c := mustLoad(t)
+	for _, name := range []string{"mysql", "mariadb"} {
+		if s := strings.Join(c[name].Health, " "); !strings.Contains(s, "--protocol=tcp") {
+			t.Errorf("%s health: %q", name, s)
+		}
 	}
 }

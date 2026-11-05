@@ -298,8 +298,10 @@ sudo cvctl secrets import --force secrets.age
 ## Data kinds
 
 A service declares `cvctl.kind` to get a managed data service: `postgres` (15, 16, 17), `postgis`
-(Postgres with PostGIS, 16, 17; same WAL-G backups and PITR as `postgres`), `redis`, `s3` and
-`sqlite`.
+(Postgres with PostGIS, 16, 17; same WAL-G backups and PITR as `postgres`), `mysql` (8.4, 9),
+`mariadb` (10.11, 11.4), `redis`, `s3` and `sqlite`. `mysql` and `mariadb` are backed up with `dump`,
+so they have no point-in-time recovery; the dump covers the service's database, with its routines
+and events, not its users.
 
 ## sqlite
 

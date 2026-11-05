@@ -233,6 +233,93 @@ echo "$ver"
 echo "$ver" | jq -e '.ok == true and ([.data.results[] | select(.ok != true)] | length == 0)'
 echo "Assert 7: sqlite survives a backup, a delete and a restore"
 
+echo "=== 8c. dump engines: create, write, backup, delete, restore, check ==="
+# engine_project <name> <kind>: an instance <name>-dev whose service store runs the kind.
+engine_project() {
+  local name=$1 kind=$2 work=/tmp/$1-work repo=/tmp/$1.git
+  rm -rf "$work" "$repo"
+  mkdir -p "$work"
+  git -C "$work" init -b develop
+  cat > "$work/compose.yml" <<YML
+x-cvctl:
+  health: { service: api, http: /health, timeout: 60s }
+
+services:
+  api:
+    image: localhost:5000/e2e/api
+    labels:
+      cvctl.role: app
+      cvctl.expose: "8080"
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    environment:
+      STORE_URL: \${STORE_URL}
+  store:
+    labels:
+      cvctl.kind: $kind
+      cvctl.env: STORE
+YML
+  cat > "$work/env.spec.yml" <<'YML'
+vars:
+  STORE_URL: { source: service, service: store }
+YML
+  git -C "$work" config user.name "cvctl-test"
+  git -C "$work" config user.email "test@example.com"
+  git -C "$work" add compose.yml env.spec.yml
+  git -C "$work" commit -m "$kind infra"
+  git clone --bare "$work" "$repo"
+  chmod -R a+rX "$repo"
+  (cd /tmp && sudo -u deployer env HOME=/srv/deploy git config --global --add safe.directory "$repo")
+  add_res=$(cvctl project add "file://$repo" --name "$name" --env dev --non-interactive --domain "api=$name.e2e.local" --json)
+  echo "$add_res"
+  test "$(echo "$add_res" | jq -r '.data.status')" = "OK"
+}
+store_sh() {
+  local c
+  c=$(docker ps --filter "label=com.docker.compose.project=$1" --filter label=com.docker.compose.service=store --filter status=running --format '{{.Names}}' | head -n1)
+  docker exec "$c" sh -c "$2"
+}
+# dump_cycle <kind> <write> <wipe> <read>: the scripts run inside the service;
+# write stores the row A, wipe loses it and read prints it.
+dump_cycle() {
+  local kind=$1 write=$2 wipe=$3 read=$4 inst=$1-dev got=
+  engine_project "$kind" "$kind"
+  store_sh "$inst" "$write"
+  test "$(store_sh "$inst" "$read")" = "A"
+  res=$(cvctl backup now "$inst" store --json)
+  echo "$res"
+  echo "$res" | jq -e '.ok == true and ([.data.results[] | select(.ok != true)] | length == 0)'
+  cvctl backup list "$inst" store --json | jq -e '.data.snapshots | length == 1'
+  store_sh "$inst" "$wipe"
+  res=$(cvctl db restore "$inst" store --to latest --json) || { echo "$res"; false; }
+  echo "$res"
+  for i in $(seq 1 30); do
+    got=$(store_sh "$inst" "$read" 2>/dev/null || true)
+    [ "$got" = "A" ] && break
+    sleep 2
+  done
+  test "$got" = "A"
+  test "$(cvctl status --json | jq -r --arg i "$inst" '.data.instances[] | select(.instance==$i) | .status')" = "OK"
+  ver=$(cvctl backup verify "$inst" store --json) || { echo "$ver"; false; }
+  echo "$ver"
+  echo "$ver" | jq -e '.ok == true and ([.data.results[] | select(.ok != true)] | length == 0)'
+  echo "Assert: $kind survives a backup, a delete and a restore"
+}
+
+my_sql='MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -N -B -D "$MYSQL_DATABASE"'
+dump_cycle mysql \
+  "$my_sql -e \"create table items (name varchar(20)); insert into items values ('A')\"" \
+  "$my_sql -e 'drop table items'" \
+  "$my_sql -e 'select name from items'"
+
+maria_sql='MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb -uroot -N -B -D "$MARIADB_DATABASE"'
+dump_cycle mariadb \
+  "$maria_sql -e \"create table items (name varchar(20)); insert into items values ('A')\"" \
+  "$maria_sql -e 'drop table items'" \
+  "$maria_sql -e 'select name from items'"
+
 echo "=== 9. No secret value in journal, status, history or this script's output ==="
 cvctl status --json > /tmp/leak-status.json
 cvctl history "$INST" --json > /tmp/leak-history.json
