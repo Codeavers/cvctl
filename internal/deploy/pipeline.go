@@ -1025,7 +1025,20 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	// Before the first thing that can open a volume: pre-deploy hooks run in the
 	// app's container, as its user.
 	sqlite := backup.Runner{Run: d.Run, Catalog: cat}
-	if err := sqlite.PrepareSqlite(ctx, p, dec); err != nil {
+	undoSqlite, err := sqlite.PrepareSqlite(ctx, p, dec)
+	// Up to the promotion no rollback runs and the old app keeps serving: the
+	// volumes go back to it here. From then on executeSwap prepares them.
+	defer func() {
+		if promoted || st.Current == nil {
+			return
+		}
+		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer rcancel()
+		if rErr := undoSqlite(rctx); rErr != nil {
+			res.Detail = strings.TrimPrefix(res.Detail+"; volume owner not restored: "+rErr.Error(), "; ")
+		}
+	}()
+	if err != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 		var oe *output.Error
 		if errors.As(err, &oe) && oe.Code == backup.CodeSqliteUID {

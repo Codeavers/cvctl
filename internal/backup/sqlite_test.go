@@ -14,6 +14,7 @@ import (
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
+	"github.com/codeavers/cvctl/internal/sys/systest"
 	"github.com/codeavers/cvctl/kinds"
 )
 
@@ -53,6 +54,11 @@ func newSqliteRig(t *testing.T, probeOut string) *sqliteRig {
 	g.run.On("docker volume inspect "+sqliteVol, sys.Result{})
 	g.pipe.Result = sys.PipeResult{To: sys.Result{Stdout: resticSummary}}
 	return &sqliteRig{dumpRestoreRig: g, p: p, d: d}
+}
+
+// noHistory is a repository restic has not created yet.
+func (g *sqliteRig) noHistory() {
+	g.run.OnPrefix(listCmd, sys.Result{ExitCode: 10, Stderr: []byte("Fatal: repository does not exist")})
 }
 
 func (g *sqliteRig) fromArgs() string { return strings.Join(g.pipe.Calls[0].From.Args, " ") }
@@ -137,6 +143,7 @@ func TestSqliteBackupWithoutDatabaseIsANoop(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			g := newSqliteRig(t, "absent\n")
+			g.noHistory()
 			setup(g)
 			res, err := g.backup(t)
 			if err != nil || len(res) != 1 || !res[0].OK {
@@ -149,27 +156,109 @@ func TestSqliteBackupWithoutDatabaseIsANoop(t *testing.T) {
 				t.Fatalf("an empty stream would become a complete snapshot: %+v", g.pipe.Calls)
 			}
 			for _, c := range g.calls() {
-				if strings.Contains(c, "restic/restic") {
-					t.Fatalf("restic ran: %s", c)
+				if strings.Contains(c, "restic/restic") && !strings.HasPrefix(c, listCmd) {
+					t.Fatalf("restic stored something: %s", c)
 				}
 			}
 		})
 	}
 }
 
+// Snapshots prove there was a database, so its absence is a loss, not a new app.
+func TestSqliteLostDatabaseFailsTheBackup(t *testing.T) {
+	for name, setup := range map[string]func(*sqliteRig){
+		"file gone":   func(*sqliteRig) {},
+		"volume gone": func(g *sqliteRig) { g.run.On("docker volume inspect "+sqliteVol, sys.Result{ExitCode: 1}) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newSqliteRig(t, "absent\n")
+			setup(g)
+			res, err := g.backup(t)
+			if err == nil || len(res) != 1 || res[0].OK || !strings.Contains(res[0].Error, "E_SQLITE_LOST") {
+				t.Fatalf("res=%+v err=%v", res, err)
+			}
+			st, err := g.store.Load("app-prod")
+			if err != nil || !st.Backups["db"].LastOK.IsZero() {
+				t.Fatalf("LastOK advanced: %+v %v", st.Backups, err)
+			}
+			if len(g.note.msgs) != 1 || g.note.msgs[0].Level != "error" {
+				t.Fatalf("notify: %+v", g.note.msgs)
+			}
+		})
+	}
+}
+
+func TestSqliteLostDatabaseCountsOlderRepositories(t *testing.T) {
+	g := newSqliteRig(t, "absent\n")
+	g.r.Host.KeyGen = map[string]int{"db": 1}
+	g.r.Host.HostResticPassword = "host-pass-SECRET-777"
+	calls := 0
+	g.r.Run = countingList{Runner: g.run, onList: func() sys.Result {
+		calls++
+		if calls == 1 {
+			return sys.Result{ExitCode: 10}
+		}
+		return sys.Result{Stdout: dumpHistory}
+	}}
+	res, err := g.backup(t)
+	if err == nil || res[0].OK {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
+
+func TestSqliteLostDatabaseUnknownHistoryFails(t *testing.T) {
+	g := newSqliteRig(t, "absent\n")
+	g.run.OnPrefix(listCmd, sys.Result{ExitCode: 1, Stderr: []byte("connection refused")})
+	res, err := g.backup(t)
+	if err == nil || res[0].OK {
+		t.Fatalf("not knowing whether it was lost must not read as new: %+v %v", res, err)
+	}
+}
+
+func TestSqliteRestorePointOfLostDatabaseFails(t *testing.T) {
+	g := newSqliteRig(t, "absent\n")
+	rp := &backup.RestorePoint{Compose: g.r.Compose, Load: g.r.Load, Data: g.r}
+	err := rp.Create(context.Background(), "app-prod", "deploy-5")
+	if err == nil || errors.Is(err, backup.ErrFreshInstance) || !strings.Contains(err.Error(), "E_SQLITE_LOST") {
+		t.Fatalf("err: %v", err)
+	}
+}
+
+func TestDumpListWithoutRepositoryIsEmpty(t *testing.T) {
+	g := newSqliteRig(t, "absent\n")
+	g.noHistory()
+	snaps, err := g.r.List(context.Background(), "app-prod", "db")
+	if err != nil || snaps == nil || len(snaps) != 0 {
+		t.Fatalf("snaps=%+v err=%v", snaps, err)
+	}
+}
+
+func TestVolumeListWithoutRepositoryStaysAnError(t *testing.T) {
+	g := newRig(t)
+	g.okAll()
+	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-files.env restic/restic:0.19.1 snapshots", sys.Result{ExitCode: 10})
+	if _, err := g.r.List(context.Background(), "app-prod", "files"); err == nil {
+		t.Fatal("only a dump service is known to start without a repository")
+	}
+}
+
 func TestSqliteBackupNeverCreatesTheVolume(t *testing.T) {
 	g := newSqliteRig(t, "absent\n")
+	g.noHistory()
 	g.run.On("docker volume inspect "+sqliteVol, sys.Result{ExitCode: 1})
 	if _, err := g.backup(t); err != nil {
 		t.Fatal(err)
 	}
-	if g.index("docker run") >= 0 {
-		t.Fatalf("docker run -v would create the volume: %v", g.calls())
+	for _, c := range g.calls() {
+		if strings.Contains(c, sqliteVol+":/data") {
+			t.Fatalf("docker run -v would create the volume: %s", c)
+		}
 	}
 }
 
 func TestSqliteBackupServiceNoopIsNotAnError(t *testing.T) {
 	g := newSqliteRig(t, "absent\n")
+	g.noHistory()
 	if err := g.r.BackupService(context.Background(), "app-prod", "db"); err != nil {
 		t.Fatal(err)
 	}
@@ -231,6 +320,7 @@ func TestSqliteRestorePointNeedsNoContainer(t *testing.T) {
 
 func TestSqliteRestorePointWithoutDatabaseIsFresh(t *testing.T) {
 	g := newSqliteRig(t, "absent\n")
+	g.noHistory()
 	rp := &backup.RestorePoint{Compose: g.r.Compose, Load: g.r.Load, Data: g.r}
 	if err := rp.Create(context.Background(), "app-prod", "deploy-5"); !errors.Is(err, backup.ErrFreshInstance) {
 		t.Fatalf("err: %v", err)
@@ -521,7 +611,7 @@ func TestPrepareSqlite(t *testing.T) {
 			g.p.Data[0].UID = tc.label
 			g.run.On(inspectUser, sys.Result{Stdout: []byte(tc.imageUser + "\n")})
 			g.run.OnPrefix(stat(sqliteVol), sys.Result{Stdout: []byte(tc.owner + "\n")})
-			err := g.r.PrepareSqlite(context.Background(), g.p, g.d)
+			_, err := g.r.PrepareSqlite(context.Background(), g.p, g.d)
 			if tc.wantErr != "" {
 				var oe *output.Error
 				if !errors.As(err, &oe) || oe.Code != backup.CodeSqliteUID || !strings.Contains(oe.Message+oe.Hint, tc.wantErr) {
@@ -555,7 +645,7 @@ func TestPrepareSqlite(t *testing.T) {
 func TestPrepareSqliteChownsLastTheRootOfTheVolume(t *testing.T) {
 	g := newSqliteRig(t, "")
 	g.run.OnPrefix("docker run --rm "+hardening+" --user 0 -v "+sqliteVol+":/data:ro "+sqliteImage+" sh -c stat", sys.Result{Stdout: []byte("0\n")})
-	if err := g.r.PrepareSqlite(context.Background(), g.p, g.d); err != nil {
+	if _, err := g.r.PrepareSqlite(context.Background(), g.p, g.d); err != nil {
 		t.Fatal(err)
 	}
 	var script string
@@ -564,18 +654,84 @@ func TestPrepareSqliteChownsLastTheRootOfTheVolume(t *testing.T) {
 			script = c
 		}
 	}
-	if !strings.Contains(script, "find /data -depth") || !strings.Contains(script, "chown -h") {
-		t.Fatalf("the owner of the root is what says the volume is done: %s", script)
+	children := strings.Index(script, "find /data -mindepth 1 -depth")
+	root := strings.Index(script, `chown -h "$OWNER_UID" /data`)
+	if children < 0 || root < children || !strings.Contains(script, "set -e") {
+		t.Fatalf("the root marks the volume as done, so it goes alone and last: %s", script)
 	}
 }
 
 func TestPrepareSqliteSkipsOtherKinds(t *testing.T) {
 	g := newSqliteRig(t, "")
 	g.p.Data[0].Kind = "postgres"
-	if err := g.r.PrepareSqlite(context.Background(), g.p, g.d); err != nil {
+	if _, err := g.r.PrepareSqlite(context.Background(), g.p, g.d); err != nil {
 		t.Fatal(err)
 	}
 	if len(g.calls()) != 0 {
 		t.Fatalf("calls: %v", g.calls())
 	}
+}
+
+func TestPrepareSqliteUndoGivesBackThePreviousOwner(t *testing.T) {
+	g := newSqliteRig(t, "")
+	owner := "999"
+	g.r.Run = spyRunner{Runner: g.run, before: func(_ context.Context, c sys.Cmd) (sys.Result, bool) {
+		s := c.String()
+		if strings.Contains(s, "sh -c stat") {
+			return sys.Result{Stdout: []byte(owner + "\n")}, true
+		}
+		if strings.Contains(s, "OWNER_UID=1000") {
+			owner = "1000"
+		}
+		return sys.Result{}, false
+	}}
+	undo, err := g.r.PrepareSqlite(context.Background(), g.p, g.d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := undo(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want, then := "--cap-add CHOWN -e OWNER_UID=1000", "--cap-add CHOWN -e OWNER_UID=999"
+	first, second := -1, -1
+	for i, c := range g.calls() {
+		if strings.Contains(c, want) {
+			first = i
+		}
+		if strings.Contains(c, then) {
+			second = i
+		}
+	}
+	if first < 0 || second < first {
+		t.Fatalf("calls: %v", g.calls())
+	}
+}
+
+func TestPrepareSqliteUndoTouchesNothingUnchanged(t *testing.T) {
+	g := newSqliteRig(t, "")
+	g.run.OnPrefix("docker run --rm "+hardening+" --user 0 -v "+sqliteVol+":/data:ro "+sqliteImage+" sh -c stat", sys.Result{Stdout: []byte("1000\n")})
+	undo, err := g.r.PrepareSqlite(context.Background(), g.p, g.d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := undo(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if g.index("docker run --rm --cap-add CHOWN") >= 0 {
+		t.Fatalf("calls: %v", g.calls())
+	}
+}
+
+// countingList answers restic listings one by one, for repositories that differ
+// only in an env file the fake runner cannot see.
+type countingList struct {
+	*systest.Runner
+	onList func() sys.Result
+}
+
+func (c countingList) Run(ctx context.Context, cmd sys.Cmd) (sys.Result, error) {
+	if strings.HasSuffix(cmd.String(), "snapshots --json") {
+		return c.onList(), nil
+	}
+	return c.Runner.Run(ctx, cmd)
 }

@@ -66,12 +66,15 @@ const sqliteCheckScript = `sqlite3 -batch /data/app.db 'PRAGMA integrity_check'`
 
 const sqliteOwnerScript = `stat -c %u /data`
 
-// sqliteChownScript leaves the root for last: its owner is what marks the volume
-// as prepared, so an interrupted run is repeated. The check does not rely on
-// find passing on the exit code of a batched -exec.
+// sqliteChownScript touches the root only once everything below it is done: its
+// owner is what marks the volume as prepared, so a run that fails halfway is
+// repeated. chown goes on after an error, hence the root in a step of its own
+// and the check before it, which does not rely on find passing on the exit code
+// of a batched -exec.
 const sqliteChownScript = `set -e
-find /data -depth -exec chown -h "$OWNER_UID" {} +
-[ "$(stat -c %u /data)" = "$OWNER_UID" ]
+find /data -mindepth 1 -depth -exec chown -h "$OWNER_UID" {} +
+[ -z "$(find /data -mindepth 1 ! -user "$OWNER_UID")" ]
+chown -h "$OWNER_UID" /data
 `
 
 // errNoData marks a target with nothing to back up yet: not a failure, and no
@@ -108,16 +111,16 @@ func (r *Runner) helperExec(ctx context.Context, cmd sys.Cmd) (sys.Result, error
 
 // sqliteSource is the command that writes a consistent copy of the database to
 // stdout, and the name of its container. It runs beside the app, which keeps
-// serving, and returns errNoData when there is no database yet. The volume is
-// checked first because docker run would create it.
+// serving. Without a database it returns errNoData, or E_SQLITE_LOST when the
+// snapshots show there was one. The volume is checked first because docker run
+// would create it.
 func (r *Runner) sqliteSource(ctx context.Context, inst string, t Target, image string) (sys.Cmd, string, error) {
-	noData := fmt.Errorf("%w: %s has no database file yet", errNoData, t.Service)
 	exists, err := r.volumeExists(ctx, t.Volume)
 	if err != nil {
 		return sys.Cmd{}, "", err
 	}
 	if !exists {
-		return sys.Cmd{}, "", noData
+		return sys.Cmd{}, "", r.sqliteMissing(ctx, inst, t)
 	}
 	res, err := r.helperExec(ctx, r.helperCmd(image, "0", t.Volume+":/data:ro", sqliteProbeScript))
 	if err != nil {
@@ -125,7 +128,7 @@ func (r *Runner) sqliteSource(ctx context.Context, inst string, t Target, image 
 	}
 	f := strings.Fields(string(res.Stdout))
 	if len(f) == 1 && f[0] == "absent" {
-		return sys.Cmd{}, "", noData
+		return sys.Cmd{}, "", r.sqliteMissing(ctx, inst, t)
 	}
 	if len(f) != 2 || !slices.Contains([]string{"ro", "rw"}, f[1]) || !numeric(f[0]) {
 		return sys.Cmd{}, "", &output.Error{
@@ -140,6 +143,25 @@ func (r *Runner) sqliteSource(ctx context.Context, inst string, t Target, image 
 	}
 	name := r.tempName("sqlite", inst, t.Service)
 	return r.helperCmd(image, f[0], mount, sqliteDumpScript, "--name", name), name, nil
+}
+
+// sqliteMissing tells a database not created yet from a lost one: a complete
+// snapshot proves it existed, and reporting OK then would hide the loss behind a
+// fresh LastOK. History that cannot be read fails too, for the same reason.
+func (r *Runner) sqliteMissing(ctx context.Context, inst string, t Target) error {
+	_, id, err := r.completeDump(ctx, inst, t.Service, "latest")
+	var oe *output.Error
+	if errors.As(err, &oe) && oe.Code == "E_BACKUP_NO_SNAPSHOT" {
+		return fmt.Errorf("%w: %s has no database file yet", errNoData, t.Service)
+	}
+	if err != nil {
+		return err
+	}
+	return &output.Error{
+		Code:    "E_SQLITE_LOST",
+		Message: fmt.Sprintf("%s has no database file, but snapshot %s shows it had one", t.Service, id),
+		Hint:    fmt.Sprintf("restore it with cvctl db restore %s %s --to latest; if the app dropped it on purpose, backups resume once it creates the file again", inst, t.Service),
+	}
 }
 
 func numeric(s string) bool {
@@ -226,29 +248,45 @@ func uidErr(ds contract.DataService, msg string) *output.Error {
 	}
 }
 
-// sqliteOwn gives volume to uid. CHOWN is the only capability any helper gets,
-// and it is granted only here and only when the owner is not the right one.
-func (r *Runner) sqliteOwn(ctx context.Context, image, volume, uid string) error {
+// sqliteOwn gives volume to uid and returns the owner it took it from, empty
+// when nothing changed. CHOWN is the only capability any helper gets, and it is
+// granted only here and only when the owner is not the right one.
+func (r *Runner) sqliteOwn(ctx context.Context, image, volume, uid string) (string, error) {
 	res, err := r.helperExec(ctx, r.helperCmd(image, "0", volume+":/data:ro", sqliteOwnerScript))
 	if err != nil {
-		return err
+		return "", err
 	}
-	if strings.TrimSpace(string(res.Stdout)) == uid {
-		return nil
+	prev := strings.TrimSpace(string(res.Stdout))
+	if prev == uid {
+		return "", nil
 	}
 	_, err = r.helperExec(ctx, r.helperCmd(image, "0", volume+":/data", sqliteChownScript, "--cap-add", "CHOWN", "-e", "OWNER_UID="+uid))
-	return err
+	return prev, err
 }
 
 // PrepareSqlite gives every local volume of a kind without a container to the
 // user of its app. The deploy runs it before anything can open the volume, the
 // pre-deploy hooks included, and after the pull: the image says who that user
 // is. An error with code CodeSqliteUID will not go away by retrying.
-func (r *Runner) PrepareSqlite(ctx context.Context, p *contract.Project, d *instance.Decisions) error {
+//
+// The function it returns, also on error, gives the volumes it changed back to
+// their previous owners, for a deploy that ends with the old app still running.
+func (r *Runner) PrepareSqlite(ctx context.Context, p *contract.Project, d *instance.Decisions) (func(context.Context) error, error) {
 	r = r.withServiceSecrets(d)
+	type change struct{ image, volume, owner string }
+	var changes []change
+	undo := func(ctx context.Context) error {
+		var errs []error
+		for _, c := range changes {
+			if _, err := r.sqliteOwn(ctx, c.image, c.volume, c.owner); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	}
 	cat, err := r.catalog()
 	if err != nil {
-		return err
+		return undo, err
 	}
 	for _, ds := range p.Data {
 		k := cat[ds.Kind]
@@ -257,11 +295,16 @@ func (r *Runner) PrepareSqlite(ctx context.Context, p *contract.Project, d *inst
 		}
 		uid, err := r.sqliteUID(ctx, p, ds, d.Digests)
 		if err != nil {
-			return err
+			return undo, err
 		}
-		if err := r.sqliteOwn(ctx, k.Helper, render.VolumeName(d, ds.Name), uid); err != nil {
-			return err
+		volume := render.VolumeName(d, ds.Name)
+		prev, err := r.sqliteOwn(ctx, k.Helper, volume, uid)
+		if prev != "" {
+			changes = append(changes, change{k.Helper, volume, prev})
+		}
+		if err != nil {
+			return undo, err
 		}
 	}
-	return nil
+	return undo, nil
 }

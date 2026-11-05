@@ -181,7 +181,7 @@ func TestSqliteHelperOutputRedactsServiceCredentials(t *testing.T) {
 	t.Run("prepare", func(t *testing.T) {
 		g := sqliteRedactRig(t, "")
 		g.run.OnPrefix(sqliteProbe, sys.Result{ExitCode: 1, Stderr: leaky})
-		err := g.r.PrepareSqlite(context.Background(), g.p, g.d)
+		_, err := g.r.PrepareSqlite(context.Background(), g.p, g.d)
 		if err == nil {
 			t.Fatal("want error")
 		}

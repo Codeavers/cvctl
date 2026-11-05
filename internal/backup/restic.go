@@ -118,7 +118,8 @@ func (r *Runner) resticList(ctx context.Context, inst string, t Target) ([]Snaps
 	cur := r.Host.ResticRepoIndex(t.Service)
 	var out []Snapshot
 	for i := cur; i >= 0; i-- {
-		snaps, err := r.resticRepoList(ctx, inst, t, i, cur > 0)
+		// A dump service may have nothing to back up yet, so no repository either.
+		snaps, err := r.resticRepoList(ctx, inst, t, i, cur > 0 || t.Strategy == StrategyDump)
 		if err != nil {
 			return nil, err
 		}

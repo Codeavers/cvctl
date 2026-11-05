@@ -554,7 +554,7 @@ func (r *Runner) RestoreWith(ctx context.Context, inst, svc, to string, opts Res
 				return err
 			}
 			run.created = true
-			if err := r.sqliteOwn(ctx, helper, res.Volume, uid); err != nil {
+			if _, err := r.sqliteOwn(ctx, helper, res.Volume, uid); err != nil {
 				return err
 			}
 		} else if _, err := r.exec(ctx, r.Compose(inst).Cmd("stop", svc)); err != nil {
