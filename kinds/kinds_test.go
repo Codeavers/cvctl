@@ -404,6 +404,7 @@ func TestCatalogLoadsEngines(t *testing.T) {
 	}{
 		"mysql":   {"mysql:8.4", "8.4", "dump", "mysql://app:p%40ss@h:3306/appdb", []string{"8.4", "9"}},
 		"mariadb": {"mariadb:11.4", "11.4", "dump", "mysql://app:p%40ss@h:3306/appdb", []string{"10.11", "11.4"}},
+		"mongodb": {"mongo:8", "8", "dump", "mongodb://app:p%40ss@h:27017/appdb?authSource=admin", []string{"7", "8"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			k, ok := c[name]
@@ -458,6 +459,28 @@ func TestMySQLHealthWaitsForTCP(t *testing.T) {
 	for _, name := range []string{"mysql", "mariadb"} {
 		if s := strings.Join(c[name].Health, " "); !strings.Contains(s, "--protocol=tcp") {
 			t.Errorf("%s health: %q", name, s)
+		}
+	}
+}
+
+// The image's init runs a temporary mongod without --auth on the same loopback
+// port, so only the flag tells it from the real server.
+func TestMongoHealthRequiresAuthorization(t *testing.T) {
+	if s := strings.Join(mustLoad(t)["mongodb"].Health, " "); !strings.Contains(s, "authorization") {
+		t.Errorf("health: %q", s)
+	}
+}
+
+// mongodump has no password variable, so its secret goes through a file that
+// must not outlive the command.
+func TestMongoDumpPasswordStaysOutOfArgv(t *testing.T) {
+	k := mustLoad(t)["mongodb"]
+	for _, cmd := range [][]string{k.DumpCommand, k.RestoreCommand} {
+		s := strings.Join(cmd, " ")
+		for _, want := range []string{"umask 077", "--config", "rm -f"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("%q lacks %q", s, want)
+			}
 		}
 	}
 }

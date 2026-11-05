@@ -1,0 +1,31 @@
+name: mongodb
+image: mongo:{version}
+versions: ["7", "8"]
+default_version: "8"
+port: 27017
+volume_path: /data/db
+container_env:
+  MONGO_INITDB_ROOT_USERNAME: "{user}"
+  MONGO_INITDB_ROOT_PASSWORD: "{password}"
+  MONGO_INITDB_DATABASE: "{db}"
+env:
+  URL: "mongodb://{user}:{password}@{host}:{port}/{db}?authSource=admin"
+backup: dump
+external: [url]
+# mongosh takes its password from the script, read from the environment. HOME
+# leaves its logs out of the data directory, the image's default HOME.
+health: ["CMD-SHELL", "HOME=/tmp mongosh --nodb --quiet --norc --eval 'const e = process.env; const d = connect(\"mongodb://\" + encodeURIComponent(e.MONGO_INITDB_ROOT_USERNAME) + \":\" + encodeURIComponent(e.MONGO_INITDB_ROOT_PASSWORD) + \"@127.0.0.1:27017/admin?serverSelectionTimeoutMS=3000\"); if (d.adminCommand({getCmdLineOpts: 1}).parsed.security?.authorization !== \"enabled\") quit(1)'"]
+# The tools read a password only from argv or a --config file.
+dump_command:
+  - |
+    umask 077; f=$(mktemp) || exit 1; trap 'rm -f "$f"' EXIT
+    printf 'password: "%s"\n' "$(printf %s "$MONGO_INITDB_ROOT_PASSWORD" | sed 's/[\\"]/\\&/g')" > "$f"
+    mongodump --config "$f" --username "$MONGO_INITDB_ROOT_USERNAME" --authenticationDatabase admin --archive
+# admin holds the users: the engine keeps those it started with.
+restore_command:
+  - |
+    umask 077; f=$(mktemp) || exit 1; trap 'rm -f "$f"' EXIT
+    printf 'password: "%s"\n' "$(printf %s "$MONGO_INITDB_ROOT_PASSWORD" | sed 's/[\\"]/\\&/g')" > "$f"
+    mongorestore --config "$f" --username "$MONGO_INITDB_ROOT_USERNAME" --authenticationDatabase admin --archive --drop --nsExclude 'admin.*'
+restore_check: "HOME=/tmp mongosh --nodb --quiet --norc --eval 'const e = process.env; const d = connect(\"mongodb://\" + encodeURIComponent(e.MONGO_INITDB_ROOT_USERNAME) + \":\" + encodeURIComponent(e.MONGO_INITDB_ROOT_PASSWORD) + \"@127.0.0.1:27017/admin\"); print(d.getSiblingDB(e.MONGO_INITDB_DATABASE).getCollectionNames().length)'"
+cap_add: [SETUID, SETGID]

@@ -320,6 +320,14 @@ dump_cycle mariadb \
   "$maria_sql -e 'drop table items'" \
   "$maria_sql -e 'select name from items'"
 
+mongo_js() {
+  printf '%s' "HOME=/tmp mongosh --nodb --quiet --norc --eval 'const e = process.env; const d = connect(\"mongodb://\" + encodeURIComponent(e.MONGO_INITDB_ROOT_USERNAME) + \":\" + encodeURIComponent(e.MONGO_INITDB_ROOT_PASSWORD) + \"@127.0.0.1:27017/admin\").getSiblingDB(e.MONGO_INITDB_DATABASE); $1'"
+}
+dump_cycle mongodb \
+  "$(mongo_js 'd.items.insertOne({name: "A"}); print("written")')" \
+  "$(mongo_js 'd.dropDatabase(); print("dropped")')" \
+  "$(mongo_js 'print(d.items.findOne().name)')"
+
 echo "=== 9. No secret value in journal, status, history or this script's output ==="
 cvctl status --json > /tmp/leak-status.json
 cvctl history "$INST" --json > /tmp/leak-history.json

@@ -299,9 +299,13 @@ sudo cvctl secrets import --force secrets.age
 
 A service declares `cvctl.kind` to get a managed data service: `postgres` (15, 16, 17), `postgis`
 (Postgres with PostGIS, 16, 17; same WAL-G backups and PITR as `postgres`), `mysql` (8.4, 9),
-`mariadb` (10.11, 11.4), `redis`, `s3` and `sqlite`. `mysql` and `mariadb` are backed up with `dump`,
-so they have no point-in-time recovery; the dump covers the service's database, with its routines
-and events, not its users.
+`mariadb` (10.11, 11.4), `mongodb` (7, 8), `redis`, `s3` and `sqlite`. `mysql`, `mariadb` and
+`mongodb` are backed up with `dump`, so they have no point-in-time recovery; a restored engine keeps
+the users it started with, not those of the dump. `mysql` and `mariadb` dump the service's database
+with its routines and events; `mongodb` dumps every database but restores none of `admin`.
+
+`mongodb` runs without a replica set, so `mongodump` has no oplog to replay: a dump taken during
+writes is not a point-in-time copy, and documents written while it runs may or may not be in it.
 
 ## sqlite
 
