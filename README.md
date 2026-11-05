@@ -70,6 +70,58 @@ no docker) and prints its env, strategy, contract source, tracked tag, domains, 
 whether it is paused. An instance whose contract cannot be read is listed with the error.
 `cvctl status` shows the strategy too.
 
+## plan
+
+`cvctl plan [--json]` describes what this binary would do for each instance, from its `cvctl.env`,
+installed contract and embedded `kinds` catalog (read-only, no network, no docker). Per instance:
+`env`, `strategy`, `apps` (image without digest, exposed port, domain), `data` (`kind`, `version`,
+`mode`, `backup`, buckets), `health`, hook counts and `issues`, the sorted codes of the contract and
+decision checks a deploy would fail on (codes only, omitted when empty; app digests are not required,
+because a deploy gets them from the desired state). The document has a `schema` number, sorted
+keys and no secrets (no `app.env` values or `cvctl.env` credentials), so two runs of the same
+binary are byte-equal and two versions can be diffed. An unreadable instance appears with `error`.
+
+## upgrade
+
+`sudo cvctl upgrade [--version vX.Y.Z] [--check] [--yes] [--accept-changes]` replaces the installed
+`/usr/local/bin/cvctl` with the latest stable release, verifies its checksum, restarts `cvctl-agent`
+and watches it for 30 s; if it does not hold, the previous binary is put back (`E_UPGRADE_FAILED`).
+The previous binary stays in `/usr/local/bin/cvctl.previous`.
+
+It needs root, `--check` included (`E_UPGRADE_ROOT`). It refuses while any instance is `DEPLOYING` and
+while another `cvctl upgrade` runs (`E_UPGRADE_BUSY`). It replaces only the binary: it does not run
+`cvctl init` or `cvctl project update`, so systemd units and host config are not refreshed; run them
+yourself if the release notes ask for it.
+
+If `cvctl-agent` is not active (`inactive` or `failed`), the binary is installed and the agent is left
+as it was: no restart and no watch, so nothing has tested the new binary. The output and the notice say
+so, and `--json` reports `agent_stopped`. While the agent is starting or stopping, or if its state
+cannot be read, nothing is installed (`E_UPGRADE_INSTALL`).
+
+Before installing it shows both versions, the release notes and the differences between what the
+current and the new binary would do per instance (`cvctl plan`). To get them, the downloaded binary,
+once its checksum matches, runs as root before any confirmation, even with `--check`. The checksum
+catches a corrupt download, not a compromised release.
+
+- `--version vX.Y.Z` installs that release instead of the latest; it is the only way to go back to an
+  older version, and to upgrade a development build.
+- `--check` shows everything and exits without installing.
+- `--yes` answers the `y/N` question asked when there are no differences.
+- `--accept-changes`, together with `--yes`, also accepts differences. With differences, or when the
+  comparison failed, you must otherwise type the target version; `--yes` alone is not enough.
+
+Without a terminal and those options it fails with `E_UPGRADE_CONFIRM` and installs nothing. With
+`--json` there are no questions.
+
+Releases come from `Codeavers/cvctl`. For a fork, set `CVCTL_UPGRADE_REPO=owner/repo` in
+`/etc/cvctl/host.env` (`sudo` usually drops it from the environment, so a variable there is not
+reliable); a `CVCTL_UPGRADE_REPO` in the environment takes precedence. An invalid value in `host.env`
+makes the command fail instead of falling back. The review shows the repository the release comes
+from (`repo` in `--json`).
+
+The host notifier gets `upgraded vA -> vB` (`info`), with a note if the agent was not started, or an
+`error` notice if the install failed. A notifier failure is logged and does not fail the upgrade.
+
 ## Deploy strategy
 
 `recreate` (default for dev) replaces containers in place: a few seconds of downtime per deploy.

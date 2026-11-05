@@ -33,23 +33,29 @@ func Verify(infraDir string, p *contract.Project, d *Decisions, cat kinds.Catalo
 		return err
 	}
 	if !needDigests {
-		cp := *d
-		cp.Digests = make(map[string]string, len(p.Apps))
-		for k, v := range d.Digests {
-			cp.Digests[k] = v
-		}
-		for _, a := range p.Apps {
-			if cp.Digests[a.Name] == "" {
-				cp.Digests[a.Name] = placeholderDigest
-			}
-		}
-		d = &cp
+		d = WithPlaceholderDigests(d, p)
 	}
 	issues := append(contract.Validate(p, cat, spec), Check(d, p, cat)...)
 	if len(issues) == 0 {
 		return nil
 	}
 	return issuesErr(issues)
+}
+
+// WithPlaceholderDigests returns a copy of d where every app of p has a digest,
+// for Check callers that never deploy. Digests already in d are kept.
+func WithPlaceholderDigests(d *Decisions, p *contract.Project) *Decisions {
+	cp := *d
+	cp.Digests = make(map[string]string, len(p.Apps))
+	for k, v := range d.Digests {
+		cp.Digests[k] = v
+	}
+	for _, a := range p.Apps {
+		if cp.Digests[a.Name] == "" {
+			cp.Digests[a.Name] = placeholderDigest
+		}
+	}
+	return &cp
 }
 
 func issuesErr(issues []output.Issue) error {
