@@ -78,6 +78,10 @@ func TestSqliteLint(t *testing.T) {
 		{"uid not numeric", sqliteSvc("store", append(ok, "cvctl.uid: node")...), "E_CONTRACT_SQLITE_UID"},
 		{"uid root", sqliteSvc("store", append(ok, `cvctl.uid: "0"`)...), "E_CONTRACT_SQLITE_UID"},
 		{"two uids on one owner", sqliteSvc("a", ok[0], "cvctl.env: A", `cvctl.uid: "1000"`) + sqliteSvc("b", ok[0], "cvctl.env: B", `cvctl.uid: "1001"`), "E_CONTRACT_SQLITE_UID"},
+		{"same uid on one owner", sqliteSvc("a", ok[0], "cvctl.env: A", `cvctl.uid: "1000"`) + sqliteSvc("b", ok[0], "cvctl.env: B", `cvctl.uid: "1000"`), ""},
+		{"uid on the first service only", sqliteSvc("a", ok[0], "cvctl.env: A", `cvctl.uid: "1000"`) + sqliteSvc("b", ok[0], "cvctl.env: B"), "E_CONTRACT_SQLITE_UID"},
+		{"uid on the second service only", sqliteSvc("a", ok[0], "cvctl.env: A") + sqliteSvc("b", ok[0], "cvctl.env: B", `cvctl.uid: "1000"`), "E_CONTRACT_SQLITE_UID"},
+		{"uid with leading zero", sqliteSvc("store", append(ok, `cvctl.uid: "0100"`)...), "E_CONTRACT_SQLITE_UID"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, cat := loadSqlite(t, tc.services)
@@ -146,10 +150,29 @@ func TestSqliteSpecProvidesPath(t *testing.T) {
 func TestValidUID(t *testing.T) {
 	for v, want := range map[string]bool{
 		"1": true, "1000": true, "65534": true, "4294967294": true,
-		"": false, "0": false, "00": false, "-1": false, "+1": false, "node": false, "1000:1000": false, "4294967295": false, "1 ": false,
+		"": false, "0": false, "00": false, "0100": false, "007": false, "-1": false, "+1": false, "node": false, "1000:1000": false, "4294967295": false, "1 ": false,
 	} {
 		if got := ValidUID(v); got != want {
 			t.Errorf("ValidUID(%q) = %v", v, got)
 		}
+	}
+}
+
+func TestVerifyOnDumpServiceRejected(t *testing.T) {
+	p, cat := loadSqlite(t, sqliteSvc("store", "cvctl.owner: api", "cvctl.env: STORE"))
+	for name, tc := range map[string]struct {
+		service string
+		want    bool
+	}{"dump": {"store", true}, "wal-g": {"db", false}} {
+		t.Run(name, func(t *testing.T) {
+			p.X.Verify = &VerifySpec{Service: tc.service, SQL: "select 1"}
+			found := false
+			for _, is := range Validate(p, cat, nil) {
+				found = found || is.Code == "E_CONTRACT_VERIFY_DUMP"
+			}
+			if found != tc.want {
+				t.Fatalf("E_CONTRACT_VERIFY_DUMP = %v", found)
+			}
+		})
 	}
 }

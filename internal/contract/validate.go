@@ -37,11 +37,13 @@ func exposedApp(p *Project, name string) bool {
 // MaxHookTimeout caps x-cvctl.hooks[].timeout.
 const MaxHookTimeout = 2 * time.Hour
 
-// ValidUID reports whether v is the numeric id of an unprivileged user. Root is
-// out: apps run with every capability dropped. 2^32-1 is the kernel's "no user".
+// ValidUID reports whether v is the numeric id of an unprivileged user, written
+// the one way the volume's owner is reported back: "0100" would never compare
+// equal to 100. Root is out: apps run with every capability dropped. 2^32-1 is
+// the kernel's "no user".
 func ValidUID(v string) bool {
 	n, err := strconv.ParseUint(v, 10, 32)
-	return err == nil && n > 0 && n < math.MaxUint32
+	return err == nil && n > 0 && n < math.MaxUint32 && strconv.FormatUint(n, 10) == v
 }
 
 // Validate checks the contract rules. A nil spec skips the env checks (the
@@ -175,17 +177,17 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 						fmt.Sprintf("give each service its own %s", LabelEnv))
 				}
 				sqliteEnvs[d.EnvPrefix] = d.Name
-				if d.UID != "" {
-					if !ValidUID(d.UID) {
-						add("E_CONTRACT_SQLITE_UID", d.Name, fmt.Sprintf("%s %q is not the numeric id of an unprivileged user", LabelUID, d.UID),
-							fmt.Sprintf("set %s to the numeric uid the app runs as, above 0", LabelUID))
-					}
-					if prev, seen := ownerUIDs[d.Owner]; seen && prev != d.UID {
-						add("E_CONTRACT_SQLITE_UID", d.Name, fmt.Sprintf("app %s cannot run as both uid %s and uid %s", d.Owner, prev, d.UID),
-							fmt.Sprintf("use one %s on every service of %s", LabelUID, d.Owner))
-					}
-					ownerUIDs[d.Owner] = d.UID
+				if d.UID != "" && !ValidUID(d.UID) {
+					add("E_CONTRACT_SQLITE_UID", d.Name, fmt.Sprintf("%s %q is not the numeric id of an unprivileged user", LabelUID, d.UID),
+						fmt.Sprintf("set %s to the numeric uid the app runs as, without leading zeros and above 0", LabelUID))
 				}
+				// One service with the label sets the app's user, so one without
+				// it would follow the image and could end up with another owner.
+				if prev, seen := ownerUIDs[d.Owner]; seen && prev != d.UID {
+					add("E_CONTRACT_SQLITE_UID", d.Name, fmt.Sprintf("the sqlite services of %s disagree on %s: %q and %q", d.Owner, LabelUID, prev, d.UID),
+						fmt.Sprintf("set the same %s on every sqlite service of %s, or on none", LabelUID, d.Owner))
+				}
+				ownerUIDs[d.Owner] = d.UID
 			}
 			svc := p.Compose.Services[d.Name]
 			if k.Buckets {
@@ -288,6 +290,10 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 	if p.X.Verify != nil && !isData[p.X.Verify.Service] {
 		add("E_CONTRACT_VERIFY_SERVICE", p.X.Verify.Service, fmt.Sprintf("x-cvctl.verify.service %q is not a data service", p.X.Verify.Service),
 			"point verify.service at a service labelled cvctl.kind")
+	}
+	if p.X.Verify != nil && dataByName[p.X.Verify.Service].Backup == "dump" {
+		add("E_CONTRACT_VERIFY_DUMP", p.X.Verify.Service, fmt.Sprintf("x-cvctl.verify cannot run on %s: its backups are dumps, checked by the kind", p.X.Verify.Service),
+			"remove x-cvctl.verify; it runs SQL on a restored wal-g service only")
 	}
 
 	if spec != nil {

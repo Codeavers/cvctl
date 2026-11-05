@@ -3583,6 +3583,10 @@ func TestResticEnvOfDumpServiceSurvivesPromote(t *testing.T) {
 	k := rig.deployer.Catalog["postgres"]
 	k.Backup = "dump"
 	rig.deployer.Catalog["postgres"] = k
+	noVerify := strings.Replace(sampleComposeYAML, "  verify: { service: main-db, sql: \"select count(*) from users\" }\n", "", 1)
+	if err := os.WriteFile(filepath.Join(rig.infraDir, "compose.yml"), []byte(noVerify), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	keep := filepath.Join(rig.instDir, "restic-main-db.env")
 	if err := os.WriteFile(keep, []byte("X=1\n"), 0o640); err != nil {
 		t.Fatal(err)
