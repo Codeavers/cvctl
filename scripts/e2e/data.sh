@@ -328,6 +328,30 @@ dump_cycle mongodb \
   "$(mongo_js 'd.dropDatabase(); print("dropped")')" \
   "$(mongo_js 'print(d.items.findOne().name)')"
 
+echo "=== 8d. cache and queue engines: start, health, connect ==="
+# service_cycle <kind> <url scheme> <connect>: connect runs inside the service and
+# prints PONG or OK only with the right credentials.
+service_cycle() {
+  local kind=$1 scheme=$2 connect=$3 inst=$1-dev c api
+  engine_project "$kind" "$kind"
+  c=$(docker ps --filter "label=com.docker.compose.project=$inst" --filter label=com.docker.compose.service=store --filter status=running --format '{{.Names}}' | head -n1)
+  for i in $(seq 1 45); do
+    [ "$(docker inspect -f '{{.State.Health.Status}}' "$c")" = "healthy" ] && break
+    sleep 2
+  done
+  test "$(docker inspect -f '{{.State.Health.Status}}' "$c")" = "healthy"
+  api=$(docker ps --filter "label=com.docker.compose.project=$inst" --filter label=com.docker.compose.service=api --filter status=running --format '{{.Names}}' | head -n1)
+  docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$api" | grep -q "^STORE_URL=$scheme://"
+  store_sh "$inst" "$connect" | grep -qE 'PONG|^OK$'
+  echo "Assert: $kind is healthy and takes its credentials"
+}
+service_cycle valkey redis \
+  'printf "AUTH %s\r\nPING\r\n" "$VALKEY_PASSWORD" | nc -w 2 127.0.0.1 6379'
+service_cycle nats nats \
+  'printf "CONNECT {\"auth_token\":\"%s\"}\r\nPING\r\n" "$NATS_TOKEN" | nc -w 2 127.0.0.1 4222'
+service_cycle rabbitmq amqp \
+  'su-exec rabbitmq rabbitmqctl -q authenticate_user "$RABBITMQ_DEFAULT_USER" "$RABBITMQ_DEFAULT_PASS" >/dev/null && echo OK'
+
 echo "=== 9. No secret value in journal, status, history or this script's output ==="
 cvctl status --json > /tmp/leak-status.json
 cvctl history "$INST" --json > /tmp/leak-history.json

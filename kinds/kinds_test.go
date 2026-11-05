@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -402,9 +403,12 @@ func TestCatalogLoadsEngines(t *testing.T) {
 		image, defaultVersion, backup, url string
 		versions                           []string
 	}{
-		"mysql":   {"mysql:8.4", "8.4", "dump", "mysql://app:p%40ss@h:3306/appdb", []string{"8.4", "9"}},
-		"mariadb": {"mariadb:11.4", "11.4", "dump", "mysql://app:p%40ss@h:3306/appdb", []string{"10.11", "11.4"}},
-		"mongodb": {"mongo:8", "8", "dump", "mongodb://app:p%40ss@h:27017/appdb?authSource=admin", []string{"7", "8"}},
+		"mysql":    {"mysql:8.4", "8.4", "dump", "mysql://app:p%40ss@h:3306/appdb", []string{"8.4", "9"}},
+		"mariadb":  {"mariadb:11.4", "11.4", "dump", "mysql://app:p%40ss@h:3306/appdb", []string{"10.11", "11.4"}},
+		"mongodb":  {"mongo:8", "8", "dump", "mongodb://app:p%40ss@h:27017/appdb?authSource=admin", []string{"7", "8"}},
+		"valkey":   {"valkey/valkey:8-alpine", "8", "none", "redis://:p%40ss@h:6379/0", []string{"8", "9"}},
+		"rabbitmq": {"rabbitmq:4-management-alpine", "4", "none", "amqp://app:p%40ss@h:5672/", []string{"4"}},
+		"nats":     {"nats:2-alpine", "2", "none", "nats://p%40ss@h:4222", []string{"2"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			k, ok := c[name]
@@ -481,6 +485,30 @@ func TestMongoDumpPasswordStaysOutOfArgv(t *testing.T) {
 			if !strings.Contains(s, want) {
 				t.Errorf("%q lacks %q", s, want)
 			}
+		}
+	}
+}
+
+// These kinds pass a CMD health straight to docker, which would put a secret in
+// the container's config; they read it from their environment instead.
+func TestQueueKindsKeepSecretsOutOfArgv(t *testing.T) {
+	c := mustLoad(t)
+	for _, name := range []string{"valkey", "rabbitmq", "nats"} {
+		k := c[name]
+		if s := strings.Join(append(slices.Clone(k.Command), k.Health...), " "); strings.Contains(s, "{password}") {
+			t.Errorf("%s: password in %q", name, s)
+		}
+		if len(k.ContainerEnv) == 0 {
+			t.Errorf("%s: no credentials in the environment", name)
+		}
+	}
+}
+
+func TestRabbitmqManagementStaysOnLoopback(t *testing.T) {
+	args := mustLoad(t)["rabbitmq"].ContainerEnv["RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS"]
+	for _, want := range []string{"rabbitmq_management", "rabbitmq_prometheus"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("%s is not bound: %q", want, args)
 		}
 	}
 }
