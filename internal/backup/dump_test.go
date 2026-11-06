@@ -28,7 +28,6 @@ const (
 	unmark      = "tag --json --add complete --remove partial " + snapID
 	resticImage = "restic/restic:0.19.1"
 	purge       = "forget --tag partial --keep-within 2d --prune"
-	tagCmd      = "docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 --retry-lock 10m tag"
 	listCmd     = "docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 snapshots --json"
 )
 
@@ -38,6 +37,21 @@ var snapshotsWithPartial = []byte(`[
 {"short_id":"bbbb2222","time":"2026-11-04T03:00:00Z","tags":["app-prod","partial"]}]`)
 
 var dumpContainer = fmt.Sprintf("cvctl-dump-app-prod-db-%d-0a0b0c0d", time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).Unix())
+
+// dumpEnvAt is the env file of a dump started at now; the rig's fixed suffix
+// makes it predictable.
+func dumpEnvAt(now time.Time) string {
+	return fmt.Sprintf("/srv/deploy/app-prod/cvctl-restic-app-prod-db-%d-0a0b0c0d.env", now.Unix())
+}
+
+func tagCmdAt(now time.Time) string {
+	return "docker run --rm --network app-prod_backup --env-file " + dumpEnvAt(now) + " restic/restic:0.19.1 --retry-lock 10m tag"
+}
+
+var (
+	dumpEnv = dumpEnvAt(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
+	tagCmd  = tagCmdAt(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
+)
 
 var resticSummary = []byte(`{"message_type":"status","percent_done":1}
 {"message_type":"summary","files_new":1,"snapshot_id":"` + snapID + `"}
@@ -117,7 +131,7 @@ func TestDumpPipesServiceIntoRestic(t *testing.T) {
 	if !slices.Equal(from.Args, []string{"exec", "c0ffee", "sh", "-c", dumpScript}) || from.Name != "docker" {
 		t.Fatalf("producer: %v", from)
 	}
-	want := "run -i --rm --name " + dumpContainer + " --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 --retry-lock 10m backup --stdin --stdin-filename db.dump --host h1 --tag app-prod --tag partial --json --quiet"
+	want := "run -i --rm --name " + dumpContainer + " --network app-prod_backup --env-file " + dumpEnv + " restic/restic:0.19.1 --retry-lock 10m backup --stdin --stdin-filename db.dump --host h1 --tag app-prod --tag partial --json --quiet"
 	if got := strings.Join(to.Args, " "); got != want {
 		t.Fatalf("consumer:\n got %s\nwant %s", got, want)
 	}
@@ -212,7 +226,7 @@ func TestDumpResticIncompleteForgetsSnapshot(t *testing.T) {
 func TestDumpForgetFailureIsReported(t *testing.T) {
 	g := newDumpRig(t)
 	g.pipe.Result.From = sys.Result{ExitCode: 1, Stderr: []byte("dump broke")}
-	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file /srv/deploy/app-prod/restic-db.env restic/restic:0.19.1 --retry-lock 10m forget "+snapID,
+	g.run.OnPrefix("docker run --rm --network app-prod_backup --env-file "+dumpEnv+" restic/restic:0.19.1 --retry-lock 10m forget "+snapID,
 		sys.Result{ExitCode: 1, Stderr: []byte("repo locked")})
 	res, err := g.backup(t)
 	if err == nil {
@@ -463,6 +477,13 @@ func (f pipeFunc) Pipe(ctx context.Context, from, to sys.Cmd) (sys.PipeResult, e
 
 func TestDumpNoSecretsInArgv(t *testing.T) {
 	g := newDumpRig(t)
+	var raw []byte
+	g.r.Pipe = racingPiper{Piper: g.pipe, during: func(sys.Cmd) {
+		var err error
+		if raw, err = g.fs.ReadFile(dumpEnv); err != nil {
+			t.Fatal(err)
+		}
+	}}
 	if _, err := g.backup(t); err != nil {
 		t.Fatal(err)
 	}
@@ -485,9 +506,184 @@ func TestDumpNoSecretsInArgv(t *testing.T) {
 			}
 		}
 	}
-	raw, err := g.fs.ReadFile("/srv/deploy/app-prod/restic-db.env")
-	if err != nil || !strings.Contains(string(raw), resticPass) {
-		t.Fatalf("restic env file: %v", err)
+	if !strings.Contains(string(raw), resticPass) {
+		t.Fatal("restic env file holds no password")
+	}
+}
+
+// repoSpy notes the repository each restic command of a dump would read from
+// its env file at the moment it runs.
+type repoSpy struct {
+	g     *dumpRig
+	repos map[string]string
+}
+
+func (s *repoSpy) note(c sys.Cmd) {
+	i := slices.Index(c.Args, "--env-file")
+	if i < 0 {
+		return
+	}
+	raw, err := s.g.fs.ReadFile(c.Args[i+1])
+	if err != nil {
+		s.repos[c.String()] = "missing: " + c.Args[i+1]
+		return
+	}
+	for line := range strings.Lines(string(raw)) {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "RESTIC_REPOSITORY="); ok {
+			s.repos[c.String()] = strings.Trim(v, `"'`)
+		}
+	}
+}
+
+func spyRepos(g *dumpRig) *repoSpy {
+	s := &repoSpy{g: g, repos: map[string]string{}}
+	g.r.Run = spyRunner{Runner: g.run, before: func(_ context.Context, c sys.Cmd) (sys.Result, bool) {
+		s.note(c)
+		return sys.Result{}, false
+	}}
+	return s
+}
+
+// racingPiper runs during the dump whatever else touches the instance then.
+type racingPiper struct {
+	*systest.Piper
+	during func(to sys.Cmd)
+}
+
+func (p racingPiper) Pipe(ctx context.Context, from, to sys.Cmd) (sys.PipeResult, error) {
+	p.during(to)
+	return p.Piper.Pipe(ctx, from, to)
+}
+
+func (g *dumpRig) leftoverEnvs(t *testing.T) []string {
+	t.Helper()
+	entries, err := g.fs.ReadDir("/srv/deploy/app-prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "cvctl-restic-") {
+			out = append(out, e.Name())
+		}
+	}
+	return out
+}
+
+// backup list and a restore point write restic-<svc>.env for whichever
+// repository they read last, and neither waits for the data lock. A dump that
+// shared the file would tag and prune repository 0 instead of its own.
+func TestDumpKeepsItsRepositoryWhileTheSharedEnvIsRewritten(t *testing.T) {
+	g := newDumpRig(t)
+	g.r.Host.KeyGen = map[string]int{"db": 2}
+	g.r.Host.HostResticPassword = "host-pass-SECRET-777"
+	spy := spyRepos(g)
+	g.r.Pipe = racingPiper{Piper: g.pipe, during: func(to sys.Cmd) {
+		spy.note(to)
+		if _, err := g.r.List(context.Background(), "app-prod", "db"); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	if _, err := g.backup(t); err != nil {
+		t.Fatal(err)
+	}
+	shared, err := g.fs.ReadFile("/srv/deploy/app-prod/restic-db.env")
+	if err != nil || strings.Contains(string(shared), "/db/r2") {
+		t.Fatalf("the race did not happen: %v %s", err, shared)
+	}
+	seen := map[string]bool{}
+	for cmd, repo := range spy.repos {
+		if strings.Contains(cmd, "restic-db.env") {
+			continue
+		}
+		if !strings.HasSuffix(repo, "/db/r2") {
+			t.Fatalf("%s ran against %q", cmd, repo)
+		}
+		for _, step := range []string{"snapshots --json", "backup --stdin", "tag --json", purge, retention} {
+			if strings.Contains(cmd, step) {
+				seen[step] = true
+			}
+		}
+	}
+	if len(seen) != 5 {
+		t.Fatalf("steps checked: %v in %v", seen, g.calls())
+	}
+}
+
+func TestDumpEnvFileIsUniquePerRun(t *testing.T) {
+	g := newDumpRig(t)
+	n := 0
+	g.r.Suffix = func() string { n++; return fmt.Sprintf("%08x", n) }
+	g.r.Run = spyRunner{Runner: g.run, before: func(_ context.Context, c sys.Cmd) (sys.Result, bool) {
+		if strings.Contains(c.String(), " tag --json ") {
+			return sys.Result{Stdout: tagSummary(1)}, true
+		}
+		return sys.Result{}, false
+	}}
+	seen := map[string]bool{}
+	for range 2 {
+		if _, err := g.backup(t); err != nil {
+			t.Fatal(err)
+		}
+		to := g.pipe.Calls[len(g.pipe.Calls)-1].To.Args
+		seen[to[slices.Index(to, "--env-file")+1]] = true
+	}
+	if len(seen) != 2 || seen["/srv/deploy/app-prod/restic-db.env"] {
+		t.Fatalf("env files: %v", seen)
+	}
+}
+
+func TestDumpRemovesItsEnvFileOnEveryPath(t *testing.T) {
+	resticCmd := "docker run --rm --network app-prod_backup --env-file " + dumpEnv + " restic/restic:0.19.1 --retry-lock 10m "
+	for name, tc := range map[string]struct {
+		breakIt func(*dumpRig)
+		ok      bool
+	}{
+		"success":  {breakIt: func(*dumpRig) {}, ok: true},
+		"init":     {breakIt: func(g *dumpRig) { g.run.OnPrefix(resticCmd+"snapshots", sys.Result{ExitCode: 1}) }},
+		"network":  {breakIt: func(g *dumpRig) { g.run.OnErrorPrefix("docker network", errors.New("no docker")) }},
+		"restic":   {breakIt: func(g *dumpRig) { g.pipe.Result.To.ExitCode = 1 }},
+		"no id":    {breakIt: func(g *dumpRig) { g.pipe.Result.To.Stdout = nil }},
+		"producer": {breakIt: func(g *dumpRig) { g.pipe.Result.From.ExitCode = 1 }},
+		"tag":      {breakIt: func(g *dumpRig) { g.run.OnPrefix(tagCmd, sys.Result{ExitCode: 1}) }},
+		"forget": {breakIt: func(g *dumpRig) {
+			g.pipe.Result.From.ExitCode = 1
+			g.run.OnPrefix(resticCmd+"forget "+snapID, sys.Result{ExitCode: 1})
+		}},
+		"purge":        {breakIt: func(g *dumpRig) { g.run.OnPrefix(resticCmd+purge, sys.Result{ExitCode: 1}) }},
+		"retention":    {breakIt: func(g *dumpRig) { g.run.OnPrefix(resticCmd+retention, sys.Result{ExitCode: 1}) }},
+		"pipe crashes": {breakIt: func(g *dumpRig) { g.pipe.Err = errors.New("broken") }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newDumpRig(t)
+			tc.breakIt(g)
+			spy := spyRepos(g)
+			_, err := g.backup(t)
+			if tc.ok != (err == nil) {
+				t.Fatalf("err: %v", err)
+			}
+			for cmd, repo := range spy.repos {
+				if strings.HasPrefix(repo, "missing") {
+					t.Fatalf("%s ran without its file", cmd)
+				}
+			}
+			if left := g.leftoverEnvs(t); len(left) != 0 {
+				t.Fatalf("left behind: %v", left)
+			}
+		})
+	}
+}
+
+func TestDumpRemovesItsEnvFileWhenCancelled(t *testing.T) {
+	g := newDumpRig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	g.r.Pipe = racingPiper{Piper: g.pipe, during: func(sys.Cmd) { cancel() }}
+	g.pipe.Err = context.Canceled
+	if _, err := g.r.BackupNow(ctx, "app-prod", "db"); err == nil {
+		t.Fatal("want error")
+	}
+	if left := g.leftoverEnvs(t); len(left) != 0 {
+		t.Fatalf("left behind: %v", left)
 	}
 }
 
@@ -612,6 +808,7 @@ func newDumpRestoreRig(t *testing.T) *dumpRestoreRig {
 	g := &dumpRestoreRig{dumpRig: newDumpRig(t)}
 	g.r.Clock = func() time.Time { return dumpNow }
 	g.r.Sleep = func(time.Duration) {}
+	g.run.OnPrefix(tagCmdAt(dumpNow), sys.Result{Stdout: tagSummary(1)})
 	if err := g.fs.WriteFile(envPath, []byte(dumpEnvBefore), 0o640, sys.Owner{}); err != nil {
 		t.Fatal(err)
 	}

@@ -88,7 +88,7 @@ func TestSqliteHelperBackup(t *testing.T) {
 	if to := strings.Join(g.pipe.Calls[0].To.Args, " "); !strings.Contains(to, "backup --stdin --stdin-filename db.dump") {
 		t.Fatalf("restic: %s", to)
 	}
-	if g.index(tagCmd) < 0 {
+	if g.index(tagCmdAt(dumpNow)) < 0 {
 		t.Fatalf("snapshot not marked complete: %v", g.calls())
 	}
 	for _, c := range g.calls() {
@@ -270,7 +270,7 @@ func TestSqliteBackupFailureForgetsSnapshot(t *testing.T) {
 	if _, err := g.backup(t); err == nil {
 		t.Fatal("a failed .backup must fail the backup")
 	}
-	if g.index(tagCmd) >= 0 {
+	if g.index(tagCmdAt(dumpNow)) >= 0 {
 		t.Fatalf("marked complete: %v", g.calls())
 	}
 }
