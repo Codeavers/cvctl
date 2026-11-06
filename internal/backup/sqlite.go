@@ -248,15 +248,23 @@ func uidErr(ds contract.DataService, msg string) *output.Error {
 	}
 }
 
-// sqliteOwn gives volume to uid and returns the owner it took it from, empty
-// when nothing changed. CHOWN is the only capability any helper gets, and it is
-// granted only here and only when the owner is not the right one.
-func (r *Runner) sqliteOwn(ctx context.Context, image, volume, uid string) (string, error) {
+// sqliteOwner is the user the root of volume belongs to.
+func (r *Runner) sqliteOwner(ctx context.Context, image, volume string) (string, error) {
 	res, err := r.helperExec(ctx, r.helperCmd(image, "0", volume+":/data:ro", sqliteOwnerScript))
 	if err != nil {
 		return "", err
 	}
-	prev := strings.TrimSpace(string(res.Stdout))
+	return strings.TrimSpace(string(res.Stdout)), nil
+}
+
+// sqliteOwn gives volume to uid and returns the owner it took it from, empty
+// when nothing changed. CHOWN is the only capability any helper gets, and it is
+// granted only here and only when the owner is not the right one.
+func (r *Runner) sqliteOwn(ctx context.Context, image, volume, uid string) (string, error) {
+	prev, err := r.sqliteOwner(ctx, image, volume)
+	if err != nil {
+		return "", err
+	}
 	if prev == uid {
 		return "", nil
 	}
@@ -268,13 +276,95 @@ func (r *Runner) sqliteChown(ctx context.Context, image, volume, uid string) err
 	return err
 }
 
+// sqliteVolume is a local volume of a kind without a container and the user it
+// must belong to.
+type sqliteVolume struct{ image, volume, uid string }
+
+func (r *Runner) sqliteVolumes(ctx context.Context, p *contract.Project, d *instance.Decisions) ([]sqliteVolume, error) {
+	cat, err := r.catalog()
+	if err != nil {
+		return nil, err
+	}
+	var out []sqliteVolume
+	for _, ds := range p.Data {
+		k := cat[ds.Kind]
+		if !k.NoContainer || d.Services[ds.Name].Mode != "local" {
+			continue
+		}
+		uid, err := r.sqliteUID(ctx, p, ds, d.Digests)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sqliteVolume{k.Helper, render.VolumeName(d, ds.Name), uid})
+	}
+	return out, nil
+}
+
+// StopSqliteApps stops the containers using a volume that PrepareSqlite is about
+// to give to another user: they would go on serving without write access to
+// their database. The volume picks them, not the contract, whose owner may be a
+// service the running release does not have. A volume of root is new or just
+// restored, and no app runs as root, so there is nothing to stop.
+//
+// The function it returns, also on error, starts again what is still stopped: a
+// container that compose replaced in the meantime is not touched.
+func (r *Runner) StopSqliteApps(ctx context.Context, p *contract.Project, d *instance.Decisions) (func(context.Context) error, error) {
+	r = r.withServiceSecrets(d)
+	var ids []string
+	start := func(ctx context.Context) error {
+		if len(ids) == 0 {
+			return nil
+		}
+		args := []string{"ps", "-aq", "--filter", "status=exited"}
+		for _, id := range ids {
+			args = append(args, "--filter", "id="+id)
+		}
+		res, err := r.helperExec(ctx, r.docker(args...))
+		if err != nil {
+			return err
+		}
+		stopped := strings.Fields(string(res.Stdout))
+		if len(stopped) == 0 {
+			return nil
+		}
+		_, err = r.helperExec(ctx, r.docker(append([]string{"start"}, stopped...)...))
+		return err
+	}
+	vols, err := r.sqliteVolumes(ctx, p, d)
+	if err != nil {
+		return start, err
+	}
+	for _, v := range vols {
+		owner, err := r.sqliteOwner(ctx, v.image, v.volume)
+		if err != nil {
+			return start, err
+		}
+		if owner == v.uid || owner == "0" {
+			continue
+		}
+		res, err := r.helperExec(ctx, r.docker("ps", "-q", "--filter", "label=com.docker.compose.project="+d.Instance, "--filter", "volume="+v.volume))
+		if err != nil {
+			return start, err
+		}
+		found := strings.Fields(string(res.Stdout))
+		if len(found) == 0 {
+			continue
+		}
+		ids = append(ids, found...)
+		if _, err := r.helperExec(ctx, r.docker(append([]string{"stop"}, found...)...)); err != nil {
+			return start, err
+		}
+	}
+	return start, nil
+}
+
 // PrepareSqlite gives every local volume of a kind without a container to the
 // user of its app. The deploy runs it before anything can open the volume, the
 // pre-deploy hooks included, and after the pull: the image says who that user
 // is. An error with code CodeSqliteUID will not go away by retrying.
 //
 // The function it returns, also on error, gives the volumes it changed back to
-// their previous owners, for a deploy that ends with the old app still running.
+// their previous owners, for a deploy that ends with the old app still in place.
 func (r *Runner) PrepareSqlite(ctx context.Context, p *contract.Project, d *instance.Decisions) (func(context.Context) error, error) {
 	r = r.withServiceSecrets(d)
 	type change struct{ image, volume, owner string }
@@ -290,23 +380,14 @@ func (r *Runner) PrepareSqlite(ctx context.Context, p *contract.Project, d *inst
 		}
 		return errors.Join(errs...)
 	}
-	cat, err := r.catalog()
+	vols, err := r.sqliteVolumes(ctx, p, d)
 	if err != nil {
 		return undo, err
 	}
-	for _, ds := range p.Data {
-		k := cat[ds.Kind]
-		if !k.NoContainer || d.Services[ds.Name].Mode != "local" {
-			continue
-		}
-		uid, err := r.sqliteUID(ctx, p, ds, d.Digests)
-		if err != nil {
-			return undo, err
-		}
-		volume := render.VolumeName(d, ds.Name)
-		prev, err := r.sqliteOwn(ctx, k.Helper, volume, uid)
+	for _, v := range vols {
+		prev, err := r.sqliteOwn(ctx, v.image, v.volume, v.uid)
 		if prev != "" {
-			changes = append(changes, change{k.Helper, volume, prev})
+			changes = append(changes, change{v.image, v.volume, prev})
 		}
 		if err != nil {
 			return undo, err

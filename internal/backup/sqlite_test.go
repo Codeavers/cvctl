@@ -642,6 +642,109 @@ func TestPrepareSqlite(t *testing.T) {
 	}
 }
 
+const (
+	appPS     = "docker ps -q --filter label=com.docker.compose.project=app-prod --filter volume=" + sqliteVol
+	appExited = "docker ps -aq --filter status=exited --filter id=c0ffee"
+)
+
+func TestStopSqliteApps(t *testing.T) {
+	for _, tc := range []struct {
+		name, owner string
+		stops       bool
+	}{
+		{name: "new uid", owner: "999", stops: true},
+		{name: "same uid", owner: "1000"},
+		// No app runs as root: the volume is new or was just restored.
+		{name: "no user yet", owner: "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newSqliteRig(t, tc.owner+"\n")
+			g.run.On(appPS, sys.Result{Stdout: []byte("c0ffee\n")})
+			start, err := g.r.StopSqliteApps(context.Background(), g.p, g.d)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stopped := g.index("docker stop c0ffee") >= 0; stopped != tc.stops {
+				t.Fatalf("calls: %v", g.calls())
+			}
+			if g.index("docker run --rm --cap-add CHOWN") >= 0 {
+				t.Fatalf("stopping changes no owner: %v", g.calls())
+			}
+			g.run.On(appExited, sys.Result{Stdout: []byte("c0ffee\n")})
+			if err := start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if started := g.index("docker start c0ffee") >= 0; started != tc.stops {
+				t.Fatalf("calls: %v", g.calls())
+			}
+		})
+	}
+}
+
+func TestStopSqliteAppsWithNothingRunning(t *testing.T) {
+	g := newSqliteRig(t, "999\n")
+	g.run.On(appPS, sys.Result{})
+	start, err := g.r.StopSqliteApps(context.Background(), g.p, g.d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if g.index("docker stop") >= 0 || g.index("docker start") >= 0 {
+		t.Fatalf("calls: %v", g.calls())
+	}
+}
+
+// A failed promotion goes back through compose up, which may already have
+// replaced the stopped container.
+func TestStopSqliteAppsStartsOnlyWhatIsStillStopped(t *testing.T) {
+	g := newSqliteRig(t, "999\n")
+	g.run.On(appPS, sys.Result{Stdout: []byte("c0ffee\n")})
+	start, err := g.r.StopSqliteApps(context.Background(), g.p, g.d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.run.On(appExited, sys.Result{})
+	if err := start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if g.index("docker start") >= 0 {
+		t.Fatalf("calls: %v", g.calls())
+	}
+}
+
+func TestStopSqliteAppsFailedStopStillStarts(t *testing.T) {
+	g := newSqliteRig(t, "999\n")
+	g.run.On(appPS, sys.Result{Stdout: []byte("c0ffee\n")})
+	g.run.On("docker stop c0ffee", sys.Result{ExitCode: 1, Stderr: []byte("cannot stop")})
+	g.run.On(appExited, sys.Result{Stdout: []byte("c0ffee\n")})
+	start, err := g.r.StopSqliteApps(context.Background(), g.p, g.d)
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if err := start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if g.index("docker start c0ffee") < 0 {
+		t.Fatalf("calls: %v", g.calls())
+	}
+}
+
+func TestStopSqliteAppsUnusableUIDStopsNothing(t *testing.T) {
+	g := newSqliteRig(t, "999\n")
+	g.p.Data[0].UID = ""
+	g.run.On(inspectUser, sys.Result{Stdout: []byte("root\n")})
+	_, err := g.r.StopSqliteApps(context.Background(), g.p, g.d)
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != backup.CodeSqliteUID {
+		t.Fatalf("err: %v", err)
+	}
+	if g.index("docker stop") >= 0 {
+		t.Fatalf("calls: %v", g.calls())
+	}
+}
+
 func TestPrepareSqliteChownsLastTheRootOfTheVolume(t *testing.T) {
 	g := newSqliteRig(t, "")
 	g.run.OnPrefix("docker run --rm "+hardening+" --user 0 -v "+sqliteVol+":/data:ro "+sqliteImage+" sh -c stat", sys.Result{Stdout: []byte("0\n")})
