@@ -399,10 +399,17 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 		if sd.Mode == "external" {
 			continue
 		}
+		k := cat[ds.Kind]
+		if k.NoContainer {
+			if err := mountOnOwner(services, ds, k); err != nil {
+				return nil, err
+			}
+			volumes[ds.Name+"-data"] = map[string]any{"name": VolumeName(d, ds.Name)}
+			continue
+		}
 		if err := validateCreds(ds.Name, sd.Creds); err != nil {
 			return nil, err
 		}
-		k := cat[ds.Kind]
 		version := sd.Version
 		if version == "" {
 			version = ds.Version
@@ -412,7 +419,7 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 			return nil, err
 		}
 		isExposedBucket := k.Buckets && ds.ExposePort > 0
-		isBackedUp := o.Backup != nil && (ds.Backup == "wal-g" || ds.Backup == "volume")
+		isBackedUp := o.Backup != nil && (ds.Backup == "wal-g" || ds.Backup == "volume" || ds.Backup == "dump")
 		if isBackedUp {
 			usesBackupNet = true
 		}
@@ -485,6 +492,26 @@ func Override(p *contract.Project, d *instance.Decisions, cat kinds.Catalog, o O
 		doc["volumes"] = volumes
 	}
 	return marshalEscaped(doc, owned)
+}
+
+// mountOnOwner gives the owner app the volume of a kind without a container.
+// cvctl.uid is the user of the app too: with every capability dropped, an image
+// that defaults to root could not write to a volume owned by anyone else.
+func mountOnOwner(services map[string]any, ds contract.DataService, k kinds.Kind) error {
+	svc, ok := services[ds.Owner].(map[string]any)
+	if !ok {
+		return &output.Error{
+			Code:    "E_CONTRACT_SQLITE_OWNER",
+			Message: fmt.Sprintf("%s %q of %s is not an app service", contract.LabelOwner, ds.Owner, ds.Name),
+			Hint:    "run cvctl lint and fix the contract",
+		}
+	}
+	vols, _ := svc["volumes"].([]string)
+	svc["volumes"] = append(vols, ds.Name+"-data:"+k.VolumePath+"/"+ds.Name)
+	if ds.UID != "" {
+		svc["user"] = ds.UID
+	}
+	return nil
 }
 
 var safeIdent = regexp.MustCompile(`^[A-Za-z0-9_]+$`)

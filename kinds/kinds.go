@@ -19,7 +19,7 @@ import (
 //go:embed *.yml
 var embedded embed.FS
 
-var backups = []string{"wal-g", "volume", "none"}
+var backups = []string{"wal-g", "dump", "volume", "none"}
 
 // ValidBackup reports whether b is an accepted backup strategy.
 func ValidBackup(b string) bool { return slices.Contains(backups, b) }
@@ -39,10 +39,27 @@ type Kind struct {
 	Backup            string            `yaml:"backup"`
 	External          []string          `yaml:"external"`
 	Health            []string          `yaml:"health"`
-	RestoreCheck      string            `yaml:"restore_check"`
-	Buckets           bool              `yaml:"buckets"`
+	// RestoreCheck is SQL on the restored cluster for a wal-g kind. For a dump
+	// kind it is a shell script run like DumpCommand; for both, the result is a
+	// count that must be above zero.
+	RestoreCheck string `yaml:"restore_check"`
+	Buckets      bool   `yaml:"buckets"`
 	// CapAdd are the capabilities a service needs back after cap_drop: [ALL].
 	CapAdd []string `yaml:"cap_add"`
+	// DumpCommand and RestoreCommand are joined with spaces into one sh -c
+	// script run inside the service, so $VAR reads its credentials from the
+	// container's own environment and they never reach docker's argv. Pass them
+	// to the tool by environment too (MYSQL_PWD="$X" mysqldump), never as
+	// -p"$X": the shell expands that into the tool's argv, visible in ps.
+	DumpCommand    []string `yaml:"dump_command"`
+	RestoreCommand []string `yaml:"restore_command"`
+	// Helper names an auxiliary image that takes the dump instead of the
+	// service; such a kind declares no commands.
+	Helper string `yaml:"helper"`
+	// NoContainer marks a kind that runs no service container of its own: a
+	// volume mounted in one app under VolumePath/<service>. It needs a Helper and
+	// has no external mode, so its env describes a local value only.
+	NoContainer bool `yaml:"no_container"`
 }
 
 type Catalog map[string]Kind
@@ -84,6 +101,9 @@ func validate(k Kind) error {
 	if !slices.Contains(backups, k.Backup) {
 		return invalid(k.Name, fmt.Sprintf("backup %q must be one of %v", k.Backup, backups))
 	}
+	if k.Backup == "dump" && k.Helper == "" && (blank(k.DumpCommand) || blank(k.RestoreCommand)) {
+		return invalid(k.Name, "backup dump requires dump_command and restore_command, or helper")
+	}
 	if !slices.Contains(k.Versions, k.DefaultVersion) {
 		return invalid(k.Name, fmt.Sprintf("default_version %q is not in versions", k.DefaultVersion))
 	}
@@ -99,22 +119,29 @@ func validate(k Kind) error {
 	for _, f := range k.External {
 		extKeys[strings.ToUpper(f)] = true
 	}
-	if !maps.Equal(envKeys, extKeys) {
+	if k.NoContainer {
+		if k.Helper == "" || len(k.External) > 0 {
+			return invalid(k.Name, "no_container requires helper and no external fields")
+		}
+	} else if !maps.Equal(envKeys, extKeys) {
 		return invalid(k.Name, "env keys and external fields must name the same variables")
 	}
 	// A password inside a CMD-SHELL line is parsed by a shell, so it would need
-	// quoting; kinds with shell health checks must not put it there.
-	if len(k.Health) > 0 && k.Health[0] == "CMD-SHELL" {
+	// quoting; kinds with shell health checks must not put it there. A dump
+	// kind's command and health run from docker argv during a restore.
+	if k.Backup == "dump" || len(k.Health) > 0 && k.Health[0] == "CMD-SHELL" {
 		for _, e := range append(slices.Clone(k.Health), k.Command...) {
 			for _, placeholder := range []string{"{password}", "{app_password}"} {
 				if strings.Contains(e, placeholder) {
-					return invalid(k.Name, fmt.Sprintf("%s must not appear in command or health when health uses CMD-SHELL", placeholder))
+					return invalid(k.Name, fmt.Sprintf("%s must not appear in command or health of a dump kind or when health uses CMD-SHELL", placeholder))
 				}
 			}
 		}
 	}
 	return nil
 }
+
+func blank(cmd []string) bool { return strings.TrimSpace(strings.Join(cmd, "")) == "" }
 
 func invalid(name, msg string) *output.Error {
 	return &output.Error{

@@ -287,3 +287,108 @@ func TestPostgisKind(t *testing.T) {
 		t.Errorf("postgis 15 accepted")
 	}
 }
+
+func TestValidBackupAcceptsDump(t *testing.T) {
+	if !ValidBackup("dump") {
+		t.Fatal("dump must be a valid backup strategy")
+	}
+}
+
+func TestKindDumpNeedsCommands(t *testing.T) {
+	const base = "image: x:{version}\nversions: [\"1\"]\ndefault_version: \"1\"\nbackup: dump\n"
+	cases := map[string]struct {
+		extra string
+		ok    bool
+	}{
+		"none":         {"", false},
+		"only dump":    {"dump_command: [d]\n", false},
+		"only restore": {"restore_command: [r]\n", false},
+		"both":         {"dump_command: [d]\nrestore_command: [r]\n", true},
+		"helper":       {"helper: cvctl-sqlite\nno_container: true\n", true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			c, err := LoadFS(fstest.MapFS{"x.yml": {Data: []byte(base + tc.extra)}})
+			if !tc.ok {
+				if err == nil || code(t, err) != "E_KIND_INVALID" {
+					t.Fatalf("want E_KIND_INVALID, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name == "helper" && (c["x"].Helper != "cvctl-sqlite" || !c["x"].NoContainer) {
+				t.Fatalf("kind: %+v", c["x"])
+			}
+			if name == "both" && (!reflect.DeepEqual(c["x"].DumpCommand, []string{"d"}) || !reflect.DeepEqual(c["x"].RestoreCommand, []string{"r"})) {
+				t.Fatalf("kind: %+v", c["x"])
+			}
+		})
+	}
+}
+
+// A dump kind's command and health also reach docker argv, in the temporary
+// engine of a restore.
+func TestDumpKindKeepsPasswordOutOfCommandAndHealth(t *testing.T) {
+	const base = "image: x:{version}\nversions: [\"1\"]\ndefault_version: \"1\"\nbackup: dump\ndump_command: [d]\nrestore_command: [r]\n"
+	for name, tc := range map[string]struct {
+		extra string
+		ok    bool
+	}{
+		"clean":   {"command: [run]\nhealth: [CMD, ping]\n", true},
+		"command": {"command: [run, \"{password}\"]\n", false},
+		"health":  {"health: [CMD, ping, \"{password}\"]\n", false},
+		"app":     {"health: [CMD, ping, \"{app_password}\"]\n", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadFS(fstest.MapFS{"k.yml": {Data: []byte(base + tc.extra)}})
+			if (err == nil) != tc.ok {
+				t.Fatalf("err: %v", err)
+			}
+		})
+	}
+}
+
+// sh -c " " exits 0 with no output, which would store an empty dump as a success.
+func TestKindRejectsBlankDumpCommand(t *testing.T) {
+	const base = "image: x:{version}\nversions: [\"1\"]\ndefault_version: \"1\"\nbackup: dump\n"
+	for name, extra := range map[string]string{
+		"blank dump":    "dump_command: [\"  \"]\nrestore_command: [r]\n",
+		"blank restore": "dump_command: [d]\nrestore_command: [\"\\t\", \" \"]\n",
+		"empty string":  "dump_command: [\"\"]\nrestore_command: [r]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadFS(fstest.MapFS{"k.yml": {Data: []byte(base + extra)}}); err == nil {
+				t.Fatal("want error")
+			}
+		})
+	}
+}
+
+func TestSqliteKind(t *testing.T) {
+	k := mustLoad(t)["sqlite"]
+	if !k.NoContainer || k.Helper == "" || k.Backup != "dump" {
+		t.Fatalf("kind: %+v", k)
+	}
+	if k.Port != 0 || len(k.Health) != 0 || len(k.External) != 0 || len(k.ContainerEnv) != 0 || len(k.CapAdd) != 0 {
+		t.Fatalf("a kind without a container has no port, health, external mode, env or capabilities: %+v", k)
+	}
+	got := k.LocalVars("STORE", "store", Credentials{})
+	if len(got) != 1 || got["STORE_PATH"] != "/data/store/app.db" {
+		t.Fatalf("vars: %v", got)
+	}
+}
+
+func TestNoContainerRequiresHelperAndNoExternal(t *testing.T) {
+	base := "name: a\nimage: x:{version}\nversions: [\"1\"]\ndefault_version: \"1\"\nbackup: dump\nno_container: true\n"
+	for _, y := range []string{base, base + "helper: h:1\nexternal: [url]\n"} {
+		_, err := LoadFS(fstest.MapFS{"a.yml": {Data: []byte(y)}})
+		if got := code(t, err); got != "E_KIND_INVALID" {
+			t.Errorf("code = %s", got)
+		}
+	}
+	if _, err := LoadFS(fstest.MapFS{"a.yml": {Data: []byte(base + "helper: h:1\nenv:\n  PATH: /data/{host}/x\n")}}); err != nil {
+		t.Fatal(err)
+	}
+}

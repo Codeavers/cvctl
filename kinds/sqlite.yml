@@ -1,0 +1,10 @@
+name: sqlite
+image: ghcr.io/codeavers/cvctl-sqlite:{version}
+versions: ["3"]
+default_version: "3"
+no_container: true
+helper: ghcr.io/codeavers/cvctl-sqlite:3
+volume_path: /data
+env:
+  PATH: "/data/{host}/app.db"
+backup: dump

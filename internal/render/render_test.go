@@ -873,3 +873,25 @@ func TestTraefikPinNilAndEmptyMatchAlias(t *testing.T) {
 		}
 	}
 }
+
+func TestDumpServiceJoinsBackupNetworkWithoutWalgEnv(t *testing.T) {
+	p, d, cat := setup(t)
+	k := cat["postgres"]
+	k.Backup = "dump"
+	cat["postgres"] = k
+	for i := range p.Data {
+		if p.Data[i].Name == "main-db" {
+			p.Data[i].Backup = "dump"
+		}
+	}
+	out, err := Override(p, d, cat, Options{InstanceDir: "/x", Edge: "edge", Backup: &BackupTarget{Host: "h1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "- backup\n") {
+		t.Fatalf("backup network missing:\n%s", out)
+	}
+	if strings.Contains(string(out), "backup-main-db.env") {
+		t.Fatalf("a dump service has no wal-g env:\n%s", out)
+	}
+}

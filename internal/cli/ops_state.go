@@ -293,7 +293,7 @@ func newLogsCmd() *cobra.Command {
 }
 
 // backupsNeeded reports whether any instance has a local data service whose
-// backup (cvctl.backup label, else the kind default) is wal-g or volume.
+// backup (cvctl.backup label, else the kind default) is wal-g, volume or dump.
 func (e *OpsEnv) backupsNeeded(instances []string) bool {
 	cat := e.Catalog
 	if cat == nil {
@@ -321,7 +321,7 @@ func (e *OpsEnv) backupsNeeded(instances []string) bool {
 			continue
 		}
 		for _, ds := range p.Data {
-			if b := ds.Backup; d.Services[ds.Name].Mode == "local" && (b == "wal-g" || b == "volume") {
+			if b := ds.Backup; d.Services[ds.Name].Mode == "local" && (b == "wal-g" || b == "volume" || b == "dump") {
 				return true
 			}
 		}

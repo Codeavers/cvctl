@@ -103,6 +103,9 @@ func (r *Runner) Verify(ctx context.Context, inst, only string) ([]Result, error
 			if t.Strategy == StrategyWalG {
 				return r.walgVerify(tctx, inst, p, d, cat, t)
 			}
+			if t.Strategy == StrategyDump {
+				return r.dumpVerify(tctx, inst, t)
+			}
 			return r.resticVerify(tctx, inst, t)
 		}()
 		res := Result{Instance: inst, Service: t.Service, Strategy: t.Strategy, OK: runErr == nil}

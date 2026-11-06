@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -8,6 +9,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/spf13/cobra"
+
+	"github.com/codeavers/cvctl/internal/backup"
 	"github.com/codeavers/cvctl/internal/notify"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
@@ -67,5 +71,16 @@ func TestBackupRunNotifiesTopLevelFailure(t *testing.T) {
 		if len(note.msgs) != 1 || note.msgs[0].Level != "error" || !strings.Contains(note.msgs[0].Text, "E_STATE_IO") {
 			t.Fatalf("%s: notify: %+v", sub, note.msgs)
 		}
+	}
+}
+
+func TestBackupResultsShowNote(t *testing.T) {
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetContext(context.Background())
+	printBackupResults(cmd, []backup.Result{{Instance: "a-dev", Service: "store", Strategy: "dump", OK: true, Note: "nothing to back up: store has no database file yet"}}, nil)
+	if !strings.Contains(out.String(), "ok: nothing to back up") {
+		t.Fatalf("out: %s", out.String())
 	}
 }

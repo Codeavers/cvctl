@@ -7,16 +7,21 @@ import (
 	"regexp"
 
 	"github.com/codeavers/cvctl/internal/compose"
+	"github.com/codeavers/cvctl/internal/contract"
+	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/sys"
 )
 
 var restorePointID = regexp.MustCompile(`^deploy-[0-9]+$`)
 
-// RestorePoint implements deploy.RestorePointer for wal-g postgres services.
+// RestorePoint implements deploy.RestorePointer for wal-g and dump services.
 type RestorePoint struct {
 	Compose func(inst string) *compose.Project
 	Load    Loader
+	// Data takes the dump of dump services; without it or its Host there is
+	// no backup destination and those services get no restore point.
+	Data *Runner
 }
 
 // ErrFreshInstance is returned by Create, after creating the points that could
@@ -31,8 +36,9 @@ func serviceState(ctx context.Context, proj *compose.Project, svc string) (exist
 }
 
 // Create names a restore point in every wal-g postgres service of inst and
-// forces the current WAL segment out so the point is archived promptly. The
-// id is validated because it is interpolated into SQL.
+// forces the current WAL segment out so the point is archived promptly; a dump
+// service has no WAL to mark, so it gets a dump tagged with the id. The id is
+// validated because it is interpolated into SQL.
 func (rp *RestorePoint) Create(ctx context.Context, inst, id string) error {
 	if !restorePointID.MatchString(id) {
 		return &output.Error{
@@ -47,16 +53,38 @@ func (rp *RestorePoint) Create(ctx context.Context, inst, id string) error {
 	}
 	fresh := false
 	for _, t := range Targets(p, d) {
-		if t.Strategy != StrategyWalG {
+		dump := t.Strategy == StrategyDump
+		if !dump && t.Strategy != StrategyWalG {
+			continue
+		}
+		if dump && (rp.Data == nil || rp.Data.Host == nil) {
 			continue
 		}
 		proj := rp.Compose(inst)
-		exists, _, err := serviceState(ctx, proj, t.Service)
-		if err != nil {
-			return err
+		// A helper reads the volume, so no service container says whether there
+		// is data to protect: the dump itself does.
+		helper := ""
+		if dump {
+			if helper, err = rp.Data.helperImage(t); err != nil {
+				return err
+			}
 		}
-		if !exists {
-			fresh = true
+		if helper == "" {
+			exists, _, err := serviceState(ctx, proj, t.Service)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				fresh = true
+				continue
+			}
+		}
+		if dump {
+			if err := rp.dumpPoint(ctx, inst, p, d, t, id); errors.Is(err, errNoData) {
+				fresh = true
+			} else if err != nil {
+				return err
+			}
 			continue
 		}
 		for _, sql := range []string{
@@ -74,4 +102,14 @@ func (rp *RestorePoint) Create(ctx context.Context, inst, id string) error {
 		return ErrFreshInstance
 	}
 	return nil
+}
+
+func (rp *RestorePoint) dumpPoint(ctx context.Context, inst string, p *contract.Project, d *instance.Decisions, t Target, id string) error {
+	r, err := rp.Data.forInstance(ctx, inst, p, d)
+	if err != nil {
+		return err
+	}
+	tctx, cancel := context.WithTimeout(ctx, backupTimeout)
+	defer cancel()
+	return r.dump(tctx, inst, t, id)
 }

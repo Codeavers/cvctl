@@ -73,12 +73,24 @@ func Wire(d *Deployer, run sys.Runner) {
 	}
 
 	if d.Restore == nil {
+		project := func(inst string) *compose.Project {
+			return d.ComposeProject(run, inst)
+		}
+		load := func(inst string) (*contract.Project, *instance.Decisions, error) {
+			return backup.LoadInstance(d.deployRoot(), d.Catalog)(inst)
+		}
 		d.Restore = &backup.RestorePoint{
-			Compose: func(inst string) *compose.Project {
-				return d.ComposeProject(run, inst)
-			},
-			Load: func(inst string) (*contract.Project, *instance.Decisions, error) {
-				return backup.LoadInstance(d.deployRoot(), d.Catalog)(inst)
+			Compose: project,
+			Load:    load,
+			Data: &backup.Runner{
+				Run:        run,
+				Pipe:       sys.NewExecPiper(),
+				FS:         d.fs(),
+				Compose:    project,
+				Load:       load,
+				Catalog:    d.Catalog,
+				Host:       d.Backup,
+				DeployRoot: d.deployRoot(),
 			},
 		}
 	}

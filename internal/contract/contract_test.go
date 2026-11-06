@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/compose-spec/compose-go/v2/types"
+
 	"github.com/codeavers/cvctl/internal/envspec"
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/kinds"
@@ -409,5 +411,41 @@ func TestReservedServiceNameEnv(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("want E_CONTRACT_NAME_RESERVED for data service named env")
+	}
+}
+
+func TestValidateDumpBackupLabel(t *testing.T) {
+	kind := func(backup string) kinds.Kind {
+		return kinds.Kind{Image: "x:{version}", Versions: []string{"1"}, DefaultVersion: "1", Backup: backup}
+	}
+	cat := kinds.Catalog{"walg": kind("wal-g"), "dumpy": kind("dump"), "plain": kind("none")}
+	cases := []struct {
+		name, kind, label, hint string
+	}{
+		{"dump on a dump kind", "dumpy", "dump", ""},
+		{"dump on a wal-g kind", "walg", "dump", "wal-g or none"},
+		{"dump on a kind without commands", "plain", "dump", "volume or none"},
+		{"volume on a dump kind", "dumpy", "volume", "dump or none"},
+		{"wal-g on a dump kind", "dumpy", "wal-g", "dump or none"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Project{Compose: &types.Project{}, Data: []DataService{{Name: "db", Kind: tc.kind, Version: "1", Backup: tc.label}}}
+			var got *output.Issue
+			for _, i := range Validate(p, cat, nil) {
+				if i.Code == "E_CONTRACT_BACKUP_UNSUPPORTED" {
+					got = &i
+				}
+			}
+			if tc.hint == "" {
+				if got != nil {
+					t.Fatalf("unexpected issue: %+v", got)
+				}
+				return
+			}
+			if got == nil || !strings.Contains(got.Hint, tc.hint) {
+				t.Fatalf("want hint %q, got %+v", tc.hint, got)
+			}
+		})
 	}
 }

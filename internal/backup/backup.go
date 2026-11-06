@@ -1,5 +1,5 @@
-// Package backup runs and records WAL-G and restic backups of local data
-// services, and creates postgres restore points.
+// Package backup runs and records WAL-G, restic and dump backups of local data
+// services, and creates restore points before a deploy.
 package backup
 
 import (
@@ -27,6 +27,7 @@ import (
 const (
 	StrategyWalG   = "wal-g"
 	StrategyVolume = "volume"
+	StrategyDump   = "dump"
 	StrategyEnv    = "env"
 
 	// pgData is the image default; the render step keeps PGDATA at the volume root.
@@ -45,8 +46,9 @@ var deployOwner = sys.Owner{User: "deployer", Group: "deploy"}
 // Target is one local data service that has a backup strategy.
 type Target struct {
 	Service  string `json:"service"`
-	Strategy string `json:"strategy"` // wal-g | volume
+	Strategy string `json:"strategy"` // wal-g | volume | dump
 	Volume   string `json:"volume,omitempty"`
+	Kind     string `json:"-"`
 }
 
 // Targets lists the local data services of an instance with backup != none.
@@ -56,10 +58,10 @@ func Targets(p *contract.Project, d *instance.Decisions) []Target {
 		if d.Services[ds.Name].Mode != "local" {
 			continue
 		}
-		if ds.Backup != StrategyWalG && ds.Backup != StrategyVolume {
+		if ds.Backup != StrategyWalG && ds.Backup != StrategyVolume && ds.Backup != StrategyDump {
 			continue
 		}
-		out = append(out, Target{Service: ds.Name, Strategy: ds.Backup, Volume: render.VolumeName(d, ds.Name)})
+		out = append(out, Target{Service: ds.Name, Strategy: ds.Backup, Volume: render.VolumeName(d, ds.Name), Kind: ds.Kind})
 	}
 	return out
 }
@@ -114,6 +116,8 @@ type Result struct {
 	Strategy string `json:"strategy"`
 	OK       bool   `json:"ok"`
 	Error    string `json:"error,omitempty"`
+	// Note says why an OK target stored nothing.
+	Note string `json:"note,omitempty"`
 }
 
 // Snapshot is one backup as listed by the backup tool.
@@ -125,10 +129,13 @@ type Snapshot struct {
 	// Repo names an older restic repository (r<index>) the snapshot lives in;
 	// empty is the current one.
 	Repo string `json:"repo,omitempty"`
+	// Tags finds a dump's restore point; it stays out of the listing.
+	Tags []string `json:"-"`
 }
 
 type Runner struct {
 	Run     sys.Runner
+	Pipe    sys.Piper
 	FS      sys.FS
 	Compose func(inst string) *compose.Project
 	Load    Loader
@@ -147,12 +154,17 @@ type Runner struct {
 	// ArchiveTimeout bounds the wait for the last WAL segment to be archived
 	// before a restore; zero means 120s.
 	ArchiveTimeout time.Duration
-	Apply          func(ctx context.Context, inst string, target *state.Desired) error
+	// EngineProbeTimeout bounds one look at a temporary engine; zero means 30s.
+	EngineProbeTimeout time.Duration
+	Apply              func(ctx context.Context, inst string, target *state.Desired) error
 	// Lock retry: deploys hold the instance lock for minutes, so a status
 	// write waits for them instead of losing the record.
 	LockInterval time.Duration
 	LockTimeout  time.Duration
 	Sleep        func(time.Duration)
+	// serviceSecrets are the passwords of the instance's services: an engine can
+	// print them in the output that ends up in errors and notifications.
+	serviceSecrets []string
 }
 
 const (
@@ -256,11 +268,12 @@ func (r *Runner) secretsRoot() (string, error) {
 }
 
 func (r *Runner) secrets() []string {
-	if r.Host == nil {
-		return nil
+	candidates := r.serviceSecrets
+	if r.Host != nil {
+		candidates = append(slices.Clone(candidates), r.Host.AccessKey, r.Host.SecretKey, r.Host.LibsodiumKey, r.Host.ResticPassword, r.Host.HostLibsodiumKey, r.Host.HostResticPassword)
 	}
 	var out []string
-	for _, s := range []string{r.Host.AccessKey, r.Host.SecretKey, r.Host.LibsodiumKey, r.Host.ResticPassword, r.Host.HostLibsodiumKey, r.Host.HostResticPassword} {
+	for _, s := range candidates {
 		if len(s) >= 4 {
 			out = append(out, s)
 		}
@@ -269,7 +282,20 @@ func (r *Runner) secrets() []string {
 	return out
 }
 
-// redact removes every known secret from text and caps its size.
+// withServiceSecrets is a copy of r that also redacts the passwords in d. User
+// and database names stay: they are not secret, and short ones would blank
+// unrelated words of the message.
+func (r *Runner) withServiceSecrets(d *instance.Decisions) *Runner {
+	rr := *r
+	rr.serviceSecrets = nil
+	for _, s := range d.Services {
+		rr.serviceSecrets = append(rr.serviceSecrets, s.Creds.Password, s.Creds.AppPassword)
+	}
+	return &rr
+}
+
+// redact removes every known secret from text and caps its size. Anything that
+// shortens text goes after it: a password cut in two no longer matches.
 func (r *Runner) redact(text string) string {
 	for _, s := range r.secrets() {
 		text = strings.ReplaceAll(text, s, "***")
@@ -309,10 +335,10 @@ func (r *Runner) exec(ctx context.Context, cmd sys.Cmd) (sys.Result, error) {
 // and makes sure the instance's backup user exists, so a backup or verify works
 // before the instance's first deploy with its own keys.
 func (r *Runner) forInstance(ctx context.Context, inst string, p *contract.Project, d *instance.Decisions) (*Runner, error) {
-	rr := *r
+	rr := r.withServiceSecrets(d)
 	rr.Host = render.BackupTargetFor(r.Host, d)
 	if rr.Host == nil || !rr.Host.Local || len(Targets(p, d)) == 0 {
-		return &rr, nil
+		return rr, nil
 	}
 	if _, err := rr.backupNet(ctx, inst); err != nil {
 		return nil, err
@@ -327,7 +353,7 @@ func (r *Runner) forInstance(ctx context.Context, inst string, p *contract.Proje
 		}
 		return nil, err
 	}
-	return &rr, nil
+	return rr, nil
 }
 
 func (r *Runner) targets(ctx context.Context, inst, only string) (*Runner, []Target, error) {
@@ -394,12 +420,13 @@ func (r *Runner) BackupNow(ctx context.Context, inst, only string) ([]Result, er
 					// a hung wal-g or restic must not hold the remaining services
 					tctx, cancel := context.WithTimeout(ctx, backupTimeout)
 					defer cancel()
-					if t.Strategy == StrategyWalG {
-						return dataRunner.walgBackup(tctx, inst, t)
-					}
-					return dataRunner.resticBackup(tctx, inst, t)
+					return dataRunner.backupTarget(tctx, inst, t)
 				}()
-				res := Result{Instance: inst, Service: t.Service, Strategy: t.Strategy, OK: runErr == nil}
+				note := ""
+				if errors.Is(runErr, errNoData) {
+					note, runErr = runErr.Error(), nil
+				}
+				res := Result{Instance: inst, Service: t.Service, Strategy: t.Strategy, OK: runErr == nil, Note: note}
 				if runErr != nil {
 					res.Error = dataRunner.redact(runErr.Error())
 					failed = append(failed, t.Service)
@@ -469,9 +496,6 @@ func (r *Runner) BackupService(ctx context.Context, inst, svc string) error {
 	}
 	tctx, cancel := context.WithTimeout(ctx, backupTimeout)
 	defer cancel()
-	if ts[0].Strategy == StrategyWalG {
-		return dataRunner.walgBackup(tctx, inst, ts[0])
-	}
 	if ts[0].Strategy == StrategyEnv {
 		if err := hostRunner.envBackup(tctx, inst); err != nil {
 			var oe *output.Error
@@ -483,7 +507,20 @@ func (r *Runner) BackupService(ctx context.Context, inst, svc string) error {
 		}
 		return nil
 	}
-	return dataRunner.resticBackup(tctx, inst, ts[0])
+	if err := dataRunner.backupTarget(tctx, inst, ts[0]); !errors.Is(err, errNoData) {
+		return err
+	}
+	return nil
+}
+
+func (r *Runner) backupTarget(ctx context.Context, inst string, t Target) error {
+	switch t.Strategy {
+	case StrategyWalG:
+		return r.walgBackup(ctx, inst, t)
+	case StrategyDump:
+		return r.dumpBackup(ctx, inst, t)
+	}
+	return r.resticBackup(ctx, inst, t)
 }
 
 // List returns the backups of one service, or of every target when svc is empty.

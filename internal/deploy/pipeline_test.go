@@ -3549,3 +3549,71 @@ func TestDeployNoticeGitInstanceWithoutDigests(t *testing.T) {
 		t.Fatalf("registry reads = %d, want 0", fl.callCount())
 	}
 }
+
+func dumpProject() (*contract.Project, *instance.Decisions) {
+	p := &contract.Project{Data: []contract.DataService{
+		{Name: "cache", Kind: "redis", Backup: "none"},
+		{Name: "db", Kind: "fakedb", Backup: "dump"},
+	}}
+	d := &instance.Decisions{Instance: "demo-dev", Services: map[string]instance.ServiceDecision{
+		"cache": {Mode: "local"}, "db": {Mode: "local"},
+	}}
+	return p, d
+}
+
+func TestEnsureNetworksIncludesBackupNetworkForDump(t *testing.T) {
+	run := &systest.Runner{}
+	run.OnPrefix("docker", sys.Result{})
+	d := &Deployer{Run: run, Backup: testBackupTarget()}
+	p, dec := dumpProject()
+	if err := d.ensureNetworks(context.Background(), "demo-dev", p, dec); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range run.Calls {
+		if strings.HasSuffix(c.String(), "demo-dev_backup") {
+			return
+		}
+	}
+	t.Fatalf("backup network not ensured: %v", run.Calls)
+}
+
+func TestResticEnvOfDumpServiceSurvivesPromote(t *testing.T) {
+	rig := setupTestRig(t, "dev", "demo-dev")
+	rig.deployer.Backup = testBackupTarget()
+	k := rig.deployer.Catalog["postgres"]
+	k.Backup = "dump"
+	rig.deployer.Catalog["postgres"] = k
+	noVerify := strings.Replace(sampleComposeYAML, "  verify: { service: main-db, sql: \"select count(*) from users\" }\n", "", 1)
+	if err := os.WriteFile(filepath.Join(rig.infraDir, "compose.yml"), []byte(noVerify), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(rig.instDir, "restic-main-db.env")
+	if err := os.WriteFile(keep, []byte("X=1\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"}); err != nil || res.Status != state.StatusOK {
+		t.Fatalf("deploy: %v %+v", err, res)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("restic env of a dump target removed: %v", err)
+	}
+}
+
+func TestRestoreHintServicePrefersDump(t *testing.T) {
+	p, _ := dumpProject()
+	if got := restoreHintService(p); got != "db" {
+		t.Fatalf("service: %q", got)
+	}
+}
+
+func TestWireGivesRestorePointADumpRunner(t *testing.T) {
+	d := &Deployer{Backup: testBackupTarget(), FS: systest.NewFS()}
+	Wire(d, &systest.Runner{})
+	rp, ok := d.Restore.(*backup.RestorePoint)
+	if !ok {
+		t.Fatalf("restore: %T", d.Restore)
+	}
+	if rp.Data == nil || rp.Data.Pipe == nil || rp.Data.Host != d.Backup || rp.Data.Run == nil || rp.Data.FS == nil {
+		t.Fatalf("data runner: %+v", rp.Data)
+	}
+}

@@ -409,6 +409,29 @@ func kindUses(k kinds.Kind, placeholder string) bool {
 	return false
 }
 
+// RecreateOnly lists the data services of p that rule out blue-green: a volume
+// mounted in one app cannot be open in two generations of it at once.
+func RecreateOnly(p *contract.Project, cat kinds.Catalog) []string {
+	var out []string
+	for _, ds := range p.Data {
+		if cat[ds.Kind].NoContainer {
+			out = append(out, ds.Name)
+		}
+	}
+	return out
+}
+
+const recreateHint = "use the recreate strategy: cvctl set-strategy <instance> recreate, or project add --strategy recreate"
+
+func recreateMsg(services []string) string {
+	return fmt.Sprintf("blue-green cannot run with %s: the app holds the database file open, so two versions of it cannot overlap", strings.Join(services, ", "))
+}
+
+// RecreateErr is the refusal of blue-green for services (see RecreateOnly).
+func RecreateErr(services []string) *output.Error {
+	return &output.Error{Code: "E_SQLITE_RECREATE", Message: recreateMsg(services), Hint: recreateHint}
+}
+
 func contains(list []string, v string) bool {
 	for _, x := range list {
 		if x == v {
@@ -517,6 +540,9 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 	case "recreate", "blue-green":
 	default:
 		add("E_DECISION_INVALID", "", fmt.Sprintf("strategy %q is not valid", d.Strategy), "use recreate or blue-green")
+	}
+	if svcs := RecreateOnly(p, cat); d.Strategy == "blue-green" && len(svcs) > 0 {
+		add("E_SQLITE_RECREATE", "", recreateMsg(svcs), recreateHint)
 	}
 	for _, a := range p.Apps {
 		n := contract.Normalize(a.Name)

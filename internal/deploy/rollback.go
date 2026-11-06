@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/codeavers/cvctl/internal/backup"
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/notify"
@@ -179,6 +180,11 @@ func (d *Deployer) executeSwap(ctx context.Context, inst string, target *state.D
 		return err
 	}
 	if err := d.provisionBackupUser(ctx, inst, p, dec, backupTarget); err != nil {
+		return err
+	}
+	// The target may run as another user than the release it replaces.
+	sqlite := backup.Runner{Run: d.Run, Catalog: cat}
+	if _, err := sqlite.PrepareSqlite(ctx, p, dec); err != nil {
 		return err
 	}
 	if err := finalCompose.Up(ctx); err != nil {

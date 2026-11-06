@@ -80,6 +80,7 @@ var newProjectEnv = func(o projectOpts) (*project.Env, error) {
 
 	data := &backup.Runner{
 		Run:        run,
+		Pipe:       sys.NewExecPiper(),
 		FS:         fsys,
 		Compose:    func(inst string) *compose.Project { return deployer.ComposeProject(run, inst) },
 		Load:       backup.LoadInstance("/srv/deploy", cat),
@@ -283,7 +284,7 @@ func newProjectAddCmd() *cobra.Command {
 	cmd.Flags().StringP("env", "e", "dev", "target environment (dev|prod)")
 	cmd.Flags().StringP("branch", "b", "", "infra git branch to clone")
 	cmd.Flags().StringP("tag", "t", "", "image tag to track (dev only)")
-	cmd.Flags().String("strategy", "", "deployment strategy (recreate|blue-green); default blue-green for prod, recreate otherwise")
+	cmd.Flags().String("strategy", "", "deployment strategy (recreate|blue-green); default blue-green for prod, recreate otherwise or when a sqlite service requires it")
 	cmd.Flags().String("infra-path", "", "contract directory inside the infra git repo (monorepos)")
 	cmd.Flags().Bool("non-interactive", false, "never prompt; use defaults and --set values")
 	cmd.Flags().StringArray("set", nil, "pre-seed app.env values (KEY=VALUE, repeatable)")

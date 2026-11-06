@@ -1,0 +1,75 @@
+networks:
+  app: {}
+  data:
+    internal: true
+  edge:
+    external: true
+    name: proj-prod_edge
+services:
+  api:
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    env_file:
+      - /srv/deploy/proj-prod/app.env
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+    image: ghcr.io/org/project-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    labels:
+      cvctl.expose: "3000"
+      cvctl.role: app
+    networks:
+      app: {}
+      data: {}
+      edge:
+        aliases:
+          - proj-prod--api
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+  geo-db:
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
+    cap_drop:
+      - ALL
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    environment:
+      PGDATABASE: dbname
+      PGHOST: /var/run/postgresql
+      PGUSER: u
+      POSTGRES_DB: dbname
+      POSTGRES_PASSWORD: p$$w
+      POSTGRES_USER: u
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U u -d dbname
+    image: ghcr.io/codeavers/cvctl-postgis:16
+    labels:
+      cvctl.env: DATABASE
+      cvctl.kind: postgis
+      cvctl.version: "16"
+    networks:
+      - data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - geo-db-data:/var/lib/postgresql/data
+volumes:
+  geo-db-data:
+    name: proj-prod_geo-db-data

@@ -153,6 +153,114 @@ cmp "$SECRETS_DIR/walg_libsodium_key" "/tmp/secroot$SECRETS_DIR/walg_libsodium_k
 cmp "$SECRETS_DIR/restic_password" "/tmp/secroot$SECRETS_DIR/restic_password"
 echo "Assert 5: exported bundle imports to identical files"
 
+echo "=== 8b. sqlite: create, write, backup, delete, restore, check ==="
+SQ=sq-dev
+SQ_IMAGE=ghcr.io/codeavers/cvctl-sqlite:3
+sq_helper() {
+  local vol=$1
+  shift
+  docker run --rm --user 1000 -v "$vol:/data" "$SQ_IMAGE" "$@"
+}
+# A failed run leaves the instance behind. project add refuses it, and its
+# repository in the silo stays encrypted with keys the next add replaces. The
+# directories go first so the agent stops seeing the instance; the volumes of a
+# restore and the leftovers of a killed helper carry no compose label.
+sq_reset() {
+  rm -rf "/srv/deploy/${SQ}" "/var/lib/cvctl/${SQ}" "/etc/traefik/dynamic/${SQ}.yml"
+  docker compose -p "$SQ" down -v --remove-orphans || true
+  {
+    docker ps -aq --filter "label=com.docker.compose.project=${SQ}"
+    docker ps -aq --filter "name=${SQ}"
+  } | sort -u | xargs -r docker rm -f
+  {
+    docker volume ls -q --filter "label=com.docker.compose.project=${SQ}"
+    docker volume ls -q --filter "name=${SQ}"
+  } | sort -u | xargs -r docker volume rm -f
+  test -z "$(docker volume ls -q --filter "name=${SQ}")"
+  local silo
+  silo=$(docker ps -q --filter label=com.docker.compose.project=cvctl-storage --filter label=com.docker.compose.service=s3)
+  test -n "$silo"
+  docker exec -i "$silo" sh -s <<SH
+set -eu
+export MC_HOST_local="http://\${MINIO_ROOT_USER}:\${MINIO_ROOT_PASSWORD}@localhost:9000"
+if [ -n "\$(mc ls local/cvctl/${HOST_NAME}/${SQ}/ 2>/dev/null)" ]; then
+  mc rm --recursive --force local/cvctl/${HOST_NAME}/${SQ}/
+fi
+SH
+}
+sq_reset
+rm -rf /tmp/sq-work /tmp/sq.git
+mkdir -p /tmp/sq-work
+git -C /tmp/sq-work init -b develop
+cat > /tmp/sq-work/compose.yml <<'YML'
+x-cvctl:
+  health: { service: api, http: /health, timeout: 60s }
+
+services:
+  api:
+    image: localhost:5000/e2e/api
+    labels:
+      cvctl.role: app
+      cvctl.expose: "8080"
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    environment:
+      STORE_PATH: ${STORE_PATH}
+  store:
+    labels:
+      cvctl.kind: sqlite
+      cvctl.owner: api
+      cvctl.env: STORE
+      cvctl.uid: "1000"
+YML
+cat > /tmp/sq-work/env.spec.yml <<'YML'
+vars:
+  STORE_PATH: { source: service, service: store }
+YML
+git -C /tmp/sq-work config user.name "cvctl-test"
+git -C /tmp/sq-work config user.email "test@example.com"
+git -C /tmp/sq-work add compose.yml env.spec.yml
+git -C /tmp/sq-work commit -m "sqlite infra"
+git clone --bare /tmp/sq-work /tmp/sq.git
+chmod -R a+rX /tmp/sq.git
+(cd /tmp && sudo -u deployer env HOME=/srv/deploy git config --global --replace-all safe.directory /tmp/sq.git '^/tmp/sq\.git$')
+
+add_res=$(cvctl project add file:///tmp/sq.git --name sq --env dev --non-interactive --domain api=sq.e2e.local --json)
+echo "$add_res"
+test "$(echo "$add_res" | jq -r '.data.status')" = "OK"
+sq_vol="${SQ}_store-data"
+test "$(sq_helper "$sq_vol" stat -c %u /data)" = "1000"
+
+res=$(cvctl set-strategy "$SQ" blue-green --json) && { echo "$res"; false; }
+echo "$res" | grep -q E_SQLITE_RECREATE
+
+res=$(cvctl backup now "$SQ" store --json)
+echo "$res"
+echo "$res" | jq -e '.ok == true and (.data.results[0].note | test("no database"))'
+cvctl backup list "$SQ" store --json | jq -e '.data.snapshots | length == 0'
+
+sq_helper "$sq_vol" sqlite3 /data/app.db "pragma journal_mode=wal; create table items (name text); insert into items values ('A')"
+res=$(cvctl backup now "$SQ" store --json)
+echo "$res"
+echo "$res" | jq -e '.ok == true and ([.data.results[] | select(.ok != true)] | length == 0)'
+cvctl backup list "$SQ" store --json | jq -e '.data.snapshots | length == 1'
+
+sq_helper "$sq_vol" rm -f /data/app.db /data/app.db-wal /data/app.db-shm
+res=$(cvctl db restore "$SQ" store --to latest --json) || { echo "$res"; false; }
+echo "$res"
+sq_new=$(echo "$res" | jq -r '.data.volume')
+test "$sq_new" != "$sq_vol"
+test "$(sq_helper "$sq_new" sqlite3 /data/app.db "select name from items")" = "A"
+test "$(sq_helper "$sq_new" stat -c %u /data/app.db)" = "1000"
+test "$(cvctl status --json | jq -r --arg i "$SQ" '.data.instances[] | select(.instance==$i) | .status')" = "OK"
+docker ps --no-trunc --filter "label=com.docker.compose.project=${SQ}" --filter status=running --format '{{.Mounts}}' | grep -q "$sq_new"
+ver=$(cvctl backup verify "$SQ" --json) || { echo "$ver"; false; }
+echo "$ver"
+echo "$ver" | jq -e '.ok == true and ([.data.results[] | select(.ok != true)] | length == 0)'
+echo "Assert 7: sqlite survives a backup, a delete and a restore"
+
 echo "=== 9. No secret value in journal, status, history or this script's output ==="
 cvctl status --json > /tmp/leak-status.json
 cvctl history "$INST" --json > /tmp/leak-history.json
@@ -179,4 +287,4 @@ PY
 done
 echo "Assert 6: no secret in journal, status, history or script output"
 
-echo "ALL 6 DATA ASSERTS PASSED"
+echo "ALL 7 DATA ASSERTS PASSED"

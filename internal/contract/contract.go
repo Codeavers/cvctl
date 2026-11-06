@@ -27,6 +27,8 @@ const (
 	LabelEnv      = "cvctl.env"
 	LabelBackup   = "cvctl.backup"
 	LabelExternal = "cvctl.external"
+	LabelOwner    = "cvctl.owner"
+	LabelUID      = "cvctl.uid"
 )
 
 type HealthSpec struct {
@@ -87,6 +89,10 @@ type DataService struct {
 	ExternalAllowed bool
 	Backup          string
 	ExposePort      int
+	// Owner is the app that mounts a kind without a container; UID, when set, is
+	// the user that app runs as and that owns the volume.
+	Owner string
+	UID   string
 }
 
 type Project struct {
@@ -250,6 +256,8 @@ func Load(dir string, cat kinds.Catalog) (*Project, error) {
 				Version:         svc.Labels[LabelVersion],
 				EnvPrefix:       svc.Labels[LabelEnv],
 				ExternalAllowed: svc.Labels[LabelExternal] == "allowed",
+				Owner:           svc.Labels[LabelOwner],
+				UID:             svc.Labels[LabelUID],
 			}
 			if k, ok := cat[kind]; ok {
 				if d.Version == "" {

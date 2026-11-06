@@ -2,6 +2,7 @@ package contract
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"slices"
 	"sort"
@@ -35,6 +36,15 @@ func exposedApp(p *Project, name string) bool {
 
 // MaxHookTimeout caps x-cvctl.hooks[].timeout.
 const MaxHookTimeout = 2 * time.Hour
+
+// ValidUID reports whether v is the numeric id of an unprivileged user, written
+// the one way the volume's owner is reported back: "0100" would never compare
+// equal to 100. Root is out: apps run with every capability dropped. 2^32-1 is
+// the kernel's "no user".
+func ValidUID(v string) bool {
+	n, err := strconv.ParseUint(v, 10, 32)
+	return err == nil && n > 0 && n < math.MaxUint32 && strconv.FormatUint(n, 10) == v
+}
 
 // Validate checks the contract rules. A nil spec skips the env checks (the
 // caller reports the missing or invalid spec itself). The result is sorted by
@@ -92,7 +102,7 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 		}
 		if b, ok := svc.Labels[LabelBackup]; ok && !kinds.ValidBackup(b) {
 			add("E_CONTRACT_BACKUP_INVALID", name, fmt.Sprintf("%s %q is not valid", LabelBackup, b),
-				fmt.Sprintf("set %s to wal-g, volume or none", LabelBackup))
+				fmt.Sprintf("set %s to wal-g, dump, volume or none", LabelBackup))
 		}
 		if svc.Labels[LabelRole] == "" && svc.Labels[LabelKind] == "" {
 			add("E_CONTRACT_NO_ROLE", name, "service has neither cvctl.role nor cvctl.kind",
@@ -122,6 +132,7 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 		}
 	}
 
+	sqliteEnvs, ownerUIDs := map[string]string{}, map[string]string{}
 	for _, d := range p.Data {
 		k, ok := cat[d.Kind]
 		if !ok {
@@ -137,15 +148,46 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 				add("E_CONTRACT_KIND_VERSION", d.Name, fmt.Sprintf("kind %s has no version %q", d.Kind, d.Version),
 					"use one of: "+strings.Join(k.Versions, ", "))
 			}
-			// wal-g runs postgres tools inside the service; a file-level copy
-			// of a live postgres volume is torn.
+			// wal-g and dump run the engine's tools inside the service; a
+			// file-level copy of a live database volume is torn.
+			supported := k.Backup
+			if supported == "none" {
+				supported = "volume"
+			}
+			hint := fmt.Sprintf("set %s to %s or none for this service", LabelBackup, supported)
 			switch {
-			case d.Backup == "wal-g" && k.Backup != "wal-g":
-				add("E_CONTRACT_BACKUP_UNSUPPORTED", d.Name, fmt.Sprintf("kind %s does not support %s wal-g", d.Kind, LabelBackup),
-					fmt.Sprintf("set %s to volume or none for this service", LabelBackup))
-			case d.Backup == "volume" && k.Backup == "wal-g":
-				add("E_CONTRACT_BACKUP_UNSUPPORTED", d.Name, fmt.Sprintf("kind %s cannot be backed up as a volume while it runs", d.Kind),
-					fmt.Sprintf("set %s to wal-g or none for this service", LabelBackup))
+			case (d.Backup == "wal-g" || d.Backup == "dump") && k.Backup != d.Backup:
+				add("E_CONTRACT_BACKUP_UNSUPPORTED", d.Name, fmt.Sprintf("kind %s does not support %s %s", d.Kind, LabelBackup, d.Backup), hint)
+			case d.Backup == "volume" && (k.Backup == "wal-g" || k.Backup == "dump"):
+				add("E_CONTRACT_BACKUP_UNSUPPORTED", d.Name, fmt.Sprintf("kind %s cannot be backed up as a volume while it runs", d.Kind), hint)
+			}
+			if k.NoContainer {
+				if !isApp[d.Owner] {
+					add("E_CONTRACT_SQLITE_OWNER", d.Name, fmt.Sprintf("%s %q is not an app service", LabelOwner, d.Owner),
+						fmt.Sprintf("set %s to the one app that uses this database", LabelOwner))
+				}
+				if d.ExternalAllowed {
+					add("E_CONTRACT_SQLITE_EXTERNAL", d.Name, fmt.Sprintf("kind %s has no external mode", d.Kind),
+						fmt.Sprintf("remove %s", LabelExternal))
+				}
+				// Every database has its own directory, so two can only clash on
+				// the variable that tells the app where it is.
+				if prev, dup := sqliteEnvs[d.EnvPrefix]; dup && d.EnvPrefix != "" {
+					add("E_CONTRACT_SQLITE_PATH", d.Name, fmt.Sprintf("%s and %s both set the path in %s_PATH", prev, d.Name, d.EnvPrefix),
+						fmt.Sprintf("give each service its own %s", LabelEnv))
+				}
+				sqliteEnvs[d.EnvPrefix] = d.Name
+				if d.UID != "" && !ValidUID(d.UID) {
+					add("E_CONTRACT_SQLITE_UID", d.Name, fmt.Sprintf("%s %q is not the numeric id of an unprivileged user", LabelUID, d.UID),
+						fmt.Sprintf("set %s to the numeric uid the app runs as, without leading zeros and above 0", LabelUID))
+				}
+				// One service with the label sets the app's user, so one without
+				// it would follow the image and could end up with another owner.
+				if prev, seen := ownerUIDs[d.Owner]; seen && prev != d.UID {
+					add("E_CONTRACT_SQLITE_UID", d.Name, fmt.Sprintf("the sqlite services of %s disagree on %s: %q and %q", d.Owner, LabelUID, prev, d.UID),
+						fmt.Sprintf("set the same %s on every sqlite service of %s, or on none", LabelUID, d.Owner))
+				}
+				ownerUIDs[d.Owner] = d.UID
 			}
 			svc := p.Compose.Services[d.Name]
 			if k.Buckets {
@@ -248,6 +290,10 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 	if p.X.Verify != nil && !isData[p.X.Verify.Service] {
 		add("E_CONTRACT_VERIFY_SERVICE", p.X.Verify.Service, fmt.Sprintf("x-cvctl.verify.service %q is not a data service", p.X.Verify.Service),
 			"point verify.service at a service labelled cvctl.kind")
+	}
+	if p.X.Verify != nil && dataByName[p.X.Verify.Service].Backup == "dump" {
+		add("E_CONTRACT_VERIFY_DUMP", p.X.Verify.Service, fmt.Sprintf("x-cvctl.verify cannot run on %s: its backups are dumps, checked by the kind", p.X.Verify.Service),
+			"remove x-cvctl.verify; it runs SQL on a restored wal-g service only")
 	}
 
 	if spec != nil {

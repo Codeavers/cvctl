@@ -92,6 +92,21 @@ func (r *Runner) run(_ context.Context, c sys.Cmd) (sys.Result, error) {
 	return sys.Result{ExitCode: 127, Stderr: []byte(c.Name + ": command not found")}, nil
 }
 
+// PipeCall is one recorded Piper.Pipe invocation.
+type PipeCall struct{ From, To sys.Cmd }
+
+// Piper records calls and returns the scripted Result, the same for every call.
+type Piper struct {
+	Calls  []PipeCall
+	Result sys.PipeResult
+	Err    error
+}
+
+func (p *Piper) Pipe(_ context.Context, from, to sys.Cmd) (sys.PipeResult, error) {
+	p.Calls = append(p.Calls, PipeCall{From: from, To: to})
+	return p.Result, p.Err
+}
+
 type entry struct {
 	data []byte
 	info sys.FileInfo

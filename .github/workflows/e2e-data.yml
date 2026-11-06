@@ -8,6 +8,7 @@ on:
       - 'internal/**'
       - 'examples/e2e/**'
       - 'images/postgres/**'
+      - 'images/cvctl-sqlite/**'
       - 'kinds/**'
       - 'scripts/e2e/**'
       - '.github/workflows/e2e-data.yml'
@@ -37,6 +38,9 @@ jobs:
         run: |
           docker build -t cvctl-postgres:16 --build-arg PG_MAJOR=16 images/postgres
           docker tag cvctl-postgres:16 ghcr.io/codeavers/cvctl-postgres:16
+
+      - name: Build cvctl-sqlite
+        run: docker build -t ghcr.io/codeavers/cvctl-sqlite:3 images/cvctl-sqlite
 
       - name: Configure /etc/cvctl
         run: |

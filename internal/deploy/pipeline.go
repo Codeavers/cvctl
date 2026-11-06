@@ -135,13 +135,29 @@ func (d *Deployer) ensureNetworks(ctx context.Context, inst string, p *contract.
 		return nil
 	}
 	for _, ds := range p.Data {
-		if dec.Services[ds.Name].Mode == "local" && (ds.Backup == "wal-g" || ds.Backup == "volume") {
+		if dec.Services[ds.Name].Mode == "local" && (ds.Backup == "wal-g" || ds.Backup == "volume" || ds.Backup == "dump") {
 			// Internal only with the host silo: external storage (R2, S3) is
 			// reached over the internet, so the network needs egress.
 			return sys.EnsureNetwork(ctx, d.Run, render.NetworkBackup(inst), d.Backup.Local)
 		}
 	}
 	return nil
+}
+
+// restoreHintService picks the service a failed migration most likely damaged.
+func restoreHintService(p *contract.Project) string {
+	for _, ds := range p.Data {
+		if ds.Backup == "wal-g" || ds.Backup == "dump" || ds.Kind == "postgres" {
+			return ds.Name
+		}
+	}
+	if len(p.Data) > 0 {
+		return p.Data[0].Name
+	}
+	if len(p.X.Hooks.PreDeploy) > 0 {
+		return p.X.Hooks.PreDeploy[0].Service
+	}
+	return ""
 }
 
 func errNoRunner() error {
@@ -978,7 +994,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 	var localDataServices []string
 	for _, ds := range p.Data {
-		if dec.Services[ds.Name].Mode == "local" {
+		if dec.Services[ds.Name].Mode == "local" && !cat[ds.Kind].NoContainer {
 			localDataServices = append(localDataServices, ds.Name)
 		}
 	}
@@ -1005,6 +1021,45 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	if err := d.provisionBackupUser(ctx, inst, p, dec, backupTarget); err != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 		return d.failTransient(ctx, inst, st, want, deployID, actor, now, stepErrText(ctx, err), secrets)
+	}
+	// Before the first thing that can open a volume: pre-deploy hooks run in the
+	// app's container, as its user. A chown under the old app would leave it
+	// serving without write access, so it stops first; compose cannot do this,
+	// since the staging files are gone by the time a failure starts it again.
+	sqlite := backup.Runner{Run: d.Run, Catalog: cat}
+	startOldApp := func(context.Context) error { return nil }
+	undoSqlite := func(context.Context) error { return nil }
+	var prepErr error
+	if st.Current != nil {
+		startOldApp, prepErr = sqlite.StopSqliteApps(ctx, p, dec)
+	}
+	if prepErr == nil {
+		undoSqlite, prepErr = sqlite.PrepareSqlite(ctx, p, dec)
+	}
+	// Up to the promotion no rollback runs and the old app stays: the volumes go
+	// back to it here and it starts again. From then on executeSwap prepares them.
+	defer func() {
+		if promoted || st.Current == nil {
+			return
+		}
+		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer rcancel()
+		if rErr := undoSqlite(rctx); rErr != nil {
+			res.Detail = strings.TrimPrefix(res.Detail+"; volume owner not restored: "+rErr.Error(), "; ")
+		}
+		sctx, scancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer scancel()
+		if rErr := startOldApp(sctx); rErr != nil {
+			res.Detail = strings.TrimPrefix(res.Detail+"; old app not restarted: "+rErr.Error(), "; ")
+		}
+	}()
+	if prepErr != nil {
+		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
+		var oe *output.Error
+		if errors.As(prepErr, &oe) && oe.Code == backup.CodeSqliteUID {
+			return d.failPermanent(ctx, inst, st, want, deployID, actor, now, oe.Error()+"; "+oe.Hint, secrets)
+		}
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, stepErrText(ctx, prepErr), secrets)
 	}
 	if err := stagingCompose.UpData(ctx, localDataServices, waitTimeout(p)); err != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
@@ -1103,7 +1158,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	}
 	resticKeep := map[string]bool{}
 	for _, t := range backup.Targets(p, dec) {
-		if t.Strategy == backup.StrategyVolume {
+		if t.Strategy == backup.StrategyVolume || t.Strategy == backup.StrategyDump {
 			resticKeep[t.Service] = true
 		}
 	}
@@ -1367,20 +1422,7 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 	errText := redactedLogs
 	next := ""
 	if preHooksRan && dec.Env == "prod" {
-		dataSvc := ""
-		for _, ds := range p.Data {
-			if ds.Backup == "wal-g" || ds.Kind == "postgres" {
-				dataSvc = ds.Name
-				break
-			}
-		}
-		if dataSvc == "" && len(p.Data) > 0 {
-			dataSvc = p.Data[0].Name
-		}
-		if dataSvc == "" && len(p.X.Hooks.PreDeploy) > 0 {
-			dataSvc = p.X.Hooks.PreDeploy[0].Service
-		}
-		next = fmt.Sprintf("cvctl db restore %s %s --to %s", inst, dataSvc, deployID)
+		next = fmt.Sprintf("cvctl db restore %s %s --to %s", inst, restoreHintService(p), deployID)
 		errText += fmt.Sprintf("\nmigrations ran; restore point %s: %s", deployID, next)
 	}
 
