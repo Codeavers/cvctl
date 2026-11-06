@@ -304,6 +304,11 @@ YML
   echo "$add_res"
   test "$(echo "$add_res" | jq -r '.data.status')" = "OK"
 }
+# A second boot on a populated volume is what crashes an engine short of capabilities.
+restart_store() {
+  docker restart "$(docker ps -q --filter "label=com.docker.compose.project=$1" --filter "label=com.docker.compose.service=store")" >/dev/null
+}
+
 store_sh() {
   local c
   c=$(docker ps --filter "label=com.docker.compose.project=$1" --filter label=com.docker.compose.service=store --filter status=running --format '{{.Names}}' | head -n1)
@@ -330,7 +335,14 @@ dump_cycle() {
   done
   test "$got" = "A"
   test "$(cvctl status --json | jq -r --arg i "$inst" '.data.instances[] | select(.instance==$i) | .status')" = "OK"
-  ver=$(cvctl backup verify "$inst" store --json) || { echo "$ver"; false; }
+  restart_store "$inst"
+  for i in $(seq 1 30); do
+    got=$(store_sh "$inst" "$read" 2>/dev/null || true)
+    [ "$got" = "A" ] && break
+    sleep 2
+  done
+  test "$got" = "A"
+  ver=$(cvctl backup verify "$inst" --json) || { echo "$ver"; false; }
   echo "$ver"
   echo "$ver" | jq -e '.ok == true and ([.data.results[] | select(.ok != true)] | length == 0)'
   echo "Assert: $kind survives a backup, a delete and a restore"
@@ -374,7 +386,14 @@ service_cycle() {
   grep -q "^STORE_URL=$scheme://" <<<"$api_env"
   reply=$(store_sh "$inst" "$connect")
   grep -qE 'PONG|^OK$' <<<"$reply"
-  echo "Assert: $kind is healthy and takes its credentials"
+  restart_store "$inst"
+  sleep 3
+  for i in $(seq 1 45); do
+    [ "$(docker inspect -f '{{.State.Health.Status}}' "$c")" = "healthy" ] && break
+    sleep 2
+  done
+  test "$(docker inspect -f '{{.State.Health.Status}}' "$c")" = "healthy"
+  echo "Assert: $kind is healthy, takes its credentials and survives a restart"
 }
 service_cycle valkey redis \
   'printf "AUTH %s\r\nPING\r\n" "$VALKEY_PASSWORD" | nc -w 2 127.0.0.1 6379'
