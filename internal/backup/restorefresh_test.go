@@ -93,7 +93,7 @@ func TestRestoreFreshRemovesOnlyItsOwnVolumeOnFailure(t *testing.T) {
 	if err := g.r.RestoreFresh(context.Background(), "app-prod", "db", p, d, freshVol); err == nil {
 		t.Fatal("expected failure")
 	}
-	if g.index("docker volume rm -f "+freshVol) < 0 || g.index("docker rm -f "+recName) > g.index("docker volume rm -f "+freshVol) {
+	if g.index("docker volume rm -f "+freshVol) < 0 || g.index("docker rm -f -v "+recName) > g.index("docker volume rm -f "+freshVol) {
 		t.Fatalf("the created volume is removed after its container: %v", g.calls())
 	}
 

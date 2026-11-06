@@ -449,3 +449,22 @@ func TestValidateDumpBackupLabel(t *testing.T) {
 		})
 	}
 }
+
+func TestVolumeBackupOnQueueKinds(t *testing.T) {
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"valkey", "rabbitmq", "nats"} {
+		k := cat[name]
+		if k.Backup != "none" {
+			t.Errorf("%s: default backup %q", name, k.Backup)
+		}
+		p := &Project{Compose: &types.Project{}, Data: []DataService{{Name: "q", Kind: name, Version: k.DefaultVersion, Backup: "volume"}}}
+		for _, i := range Validate(p, cat, nil) {
+			if i.Code == "E_CONTRACT_BACKUP_UNSUPPORTED" {
+				t.Errorf("%s: %+v", name, i)
+			}
+		}
+	}
+}

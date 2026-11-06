@@ -139,11 +139,13 @@ func (r *Runner) docker(args ...string) sys.Cmd {
 	return sys.Cmd{Name: "docker", Args: args, Env: []string{dockerConfig}}
 }
 
-// cleanup must outlive a cancelled ctx or the volume and container leak.
+// cleanup must outlive a cancelled ctx or the volume and container leak. -v
+// takes the anonymous volumes of the image's VOLUME lines (mongo's
+// /data/configdb); named volumes stay, so volume is removed on its own.
 func (r *Runner) cleanup(ctx context.Context, name, volume string) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 	defer cancel()
-	_, _ = r.Run.Run(cctx, r.docker("rm", "-f", name))
+	_, _ = r.Run.Run(cctx, r.docker("rm", "-f", "-v", name))
 	if volume != "" {
 		_, _ = r.Run.Run(cctx, r.docker("volume", "rm", "-f", volume))
 	}

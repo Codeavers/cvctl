@@ -95,7 +95,7 @@ func TestRestoreHappyPathOrder(t *testing.T) {
 		"docker volume create " + newVol,
 		"docker run -d --name " + recName,
 		"docker stop -t 120 " + recName,
-		"docker rm -f " + recName,
+		"docker rm -f -v " + recName,
 		"APPLY",
 		cp + "up -d --wait --wait-timeout 150 db",
 		cp + "exec -T -u postgres db pg_isready -U app -d appdb",

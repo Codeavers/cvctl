@@ -69,7 +69,7 @@ func TestVerifyWalgSequenceAndCleanup(t *testing.T) {
 		}
 	}
 	n := len(calls)
-	if calls[n-2] != "docker rm -f "+name || calls[n-1] != "docker volume rm -f "+name {
+	if calls[n-2] != "docker rm -f -v "+name || calls[n-1] != "docker volume rm -f "+name {
 		t.Fatalf("cleanup: %v", calls[n-2:])
 	}
 	for _, c := range g.run.Calls {
