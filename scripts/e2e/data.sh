@@ -332,7 +332,7 @@ echo "=== 8d. cache and queue engines: start, health, connect ==="
 # service_cycle <kind> <url scheme> <connect>: connect runs inside the service and
 # prints PONG or OK only with the right credentials.
 service_cycle() {
-  local kind=$1 scheme=$2 connect=$3 inst=$1-dev c api
+  local kind=$1 scheme=$2 connect=$3 inst=$1-dev c api api_env reply
   engine_project "$kind" "$kind"
   c=$(docker ps --filter "label=com.docker.compose.project=$inst" --filter label=com.docker.compose.service=store --filter status=running --format '{{.Names}}' | head -n1)
   for i in $(seq 1 45); do
@@ -341,8 +341,11 @@ service_cycle() {
   done
   test "$(docker inspect -f '{{.State.Health.Status}}' "$c")" = "healthy"
   api=$(docker ps --filter "label=com.docker.compose.project=$inst" --filter label=com.docker.compose.service=api --filter status=running --format '{{.Names}}' | head -n1)
-  docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$api" | grep -q "^STORE_URL=$scheme://"
-  store_sh "$inst" "$connect" | grep -qE 'PONG|^OK$'
+  # grep -q closes the pipe on its first match, and pipefail would fail on the SIGPIPE.
+  api_env=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$api")
+  grep -q "^STORE_URL=$scheme://" <<<"$api_env"
+  reply=$(store_sh "$inst" "$connect")
+  grep -qE 'PONG|^OK$' <<<"$reply"
   echo "Assert: $kind is healthy and takes its credentials"
 }
 service_cycle valkey redis \
