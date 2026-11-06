@@ -161,6 +161,34 @@ sq_helper() {
   shift
   docker run --rm --user 1000 -v "$vol:/data" "$SQ_IMAGE" "$@"
 }
+# A failed run leaves the instance behind. project add refuses it, and its
+# repository in the silo stays encrypted with keys the next add replaces. The
+# directories go first so the agent stops seeing the instance; the volumes of a
+# restore and the leftovers of a killed helper carry no compose label.
+sq_reset() {
+  rm -rf "/srv/deploy/${SQ}" "/var/lib/cvctl/${SQ}" "/etc/traefik/dynamic/${SQ}.yml"
+  docker compose -p "$SQ" down -v --remove-orphans || true
+  {
+    docker ps -aq --filter "label=com.docker.compose.project=${SQ}"
+    docker ps -aq --filter "name=${SQ}"
+  } | sort -u | xargs -r docker rm -f
+  {
+    docker volume ls -q --filter "label=com.docker.compose.project=${SQ}"
+    docker volume ls -q --filter "name=${SQ}"
+  } | sort -u | xargs -r docker volume rm -f
+  test -z "$(docker volume ls -q --filter "name=${SQ}")"
+  local silo
+  silo=$(docker ps -q --filter label=com.docker.compose.project=cvctl-storage --filter label=com.docker.compose.service=s3)
+  test -n "$silo"
+  docker exec -i "$silo" sh -s <<SH
+set -eu
+export MC_HOST_local="http://\${MINIO_ROOT_USER}:\${MINIO_ROOT_PASSWORD}@localhost:9000"
+if [ -n "\$(mc ls local/cvctl/${HOST_NAME}/${SQ}/ 2>/dev/null)" ]; then
+  mc rm --recursive --force local/cvctl/${HOST_NAME}/${SQ}/
+fi
+SH
+}
+sq_reset
 rm -rf /tmp/sq-work /tmp/sq.git
 mkdir -p /tmp/sq-work
 git -C /tmp/sq-work init -b develop
@@ -197,7 +225,7 @@ git -C /tmp/sq-work add compose.yml env.spec.yml
 git -C /tmp/sq-work commit -m "sqlite infra"
 git clone --bare /tmp/sq-work /tmp/sq.git
 chmod -R a+rX /tmp/sq.git
-(cd /tmp && sudo -u deployer env HOME=/srv/deploy git config --global --add safe.directory /tmp/sq.git)
+(cd /tmp && sudo -u deployer env HOME=/srv/deploy git config --global --replace-all safe.directory /tmp/sq.git '^/tmp/sq\.git$')
 
 add_res=$(cvctl project add file:///tmp/sq.git --name sq --env dev --non-interactive --domain api=sq.e2e.local --json)
 echo "$add_res"
@@ -228,7 +256,7 @@ test "$(sq_helper "$sq_new" sqlite3 /data/app.db "select name from items")" = "A
 test "$(sq_helper "$sq_new" stat -c %u /data/app.db)" = "1000"
 test "$(cvctl status --json | jq -r --arg i "$SQ" '.data.instances[] | select(.instance==$i) | .status')" = "OK"
 docker ps --no-trunc --filter "label=com.docker.compose.project=${SQ}" --filter status=running --format '{{.Mounts}}' | grep -q "$sq_new"
-ver=$(cvctl backup verify "$SQ" store --json) || { echo "$ver"; false; }
+ver=$(cvctl backup verify "$SQ" --json) || { echo "$ver"; false; }
 echo "$ver"
 echo "$ver" | jq -e '.ok == true and ([.data.results[] | select(.ok != true)] | length == 0)'
 echo "Assert 7: sqlite survives a backup, a delete and a restore"

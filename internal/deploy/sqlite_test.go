@@ -55,15 +55,24 @@ type orderedRunner struct {
 	*systest.Runner
 	comp *fakeCompose
 	// owner, when set, makes the volume answer with the last uid it was given.
-	owner string
+	owner   string
+	onChown func()
 }
 
 func (r *orderedRunner) Run(ctx context.Context, c sys.Cmd) (sys.Result, error) {
 	s := c.String()
+	if strings.HasPrefix(s, "docker stop ") || strings.HasPrefix(s, "docker start ") {
+		r.comp.mu.Lock()
+		r.comp.calls = append(r.comp.calls, s)
+		r.comp.mu.Unlock()
+	}
 	if strings.Contains(s, "--cap-add CHOWN") {
 		r.comp.mu.Lock()
 		r.comp.calls = append(r.comp.calls, "CHOWN "+s)
 		r.comp.mu.Unlock()
+		if r.onChown != nil {
+			r.onChown()
+		}
 		for _, f := range c.Args {
 			if v, ok := strings.CutPrefix(f, "OWNER_UID="); ok && r.owner != "" {
 				r.owner = v
@@ -239,6 +248,142 @@ func TestSqliteFailureBeforePromotionGivesTheVolumeBack(t *testing.T) {
 	}
 	if got := chowns(rig); !slices.Equal(got, []string{"2000", "1000"}) {
 		t.Fatalf("chowns %v in %v", got, rig.compose.calls)
+	}
+}
+
+const (
+	oldAppPS     = "docker ps -q --filter label=com.docker.compose.project=demo-dev --filter volume=demo-dev_store-data"
+	oldAppExited = "docker ps -aq --filter status=exited --filter id=0ldapp"
+	oldAppStop   = "docker stop 0ldapp"
+	oldAppStart  = "docker start 0ldapp"
+)
+
+// oldAppRig is uidChangeRig with the old app mounting the volume.
+func oldAppRig(t *testing.T) (*testRig, *systest.Runner, state.Desired) {
+	t.Helper()
+	rig, _, next := uidChangeRig(t)
+	run := rig.deployer.Run.(*orderedRunner).Runner
+	run.On(oldAppPS, sys.Result{Stdout: []byte("0ldapp\n")})
+	run.On(oldAppExited, sys.Result{Stdout: []byte("0ldapp\n")})
+	return rig, run, next
+}
+
+func callIndex(rig *testRig, prefix string) int {
+	return slices.IndexFunc(rig.compose.calls, func(c string) bool { return strings.HasPrefix(c, prefix) })
+}
+
+func TestSqliteUIDChangeStopsTheOwnerBeforeTheChown(t *testing.T) {
+	rig, _, next := oldAppRig(t)
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", next, Options{Actor: "agent"})
+	if err != nil || res.Status != state.StatusOK {
+		t.Fatalf("deploy: %v %+v", err, res)
+	}
+	stop, chown := callIndex(rig, oldAppStop), callIndex(rig, "CHOWN ")
+	if stop < 0 || chown < stop {
+		t.Fatalf("the old app must stop before its volume changes hands: %v", rig.compose.calls)
+	}
+	hook := callIndex(rig, "runhook")
+	if hook < 0 || hook < chown {
+		t.Fatalf("a hook needing the volume runs after the chown: %v", rig.compose.calls)
+	}
+	if callIndex(rig, "docker start") >= 0 {
+		t.Fatalf("the new release replaces it: %v", rig.compose.calls)
+	}
+	if got := chowns(rig); !slices.Equal(got, []string{"2000"}) {
+		t.Fatalf("chowns %v", got)
+	}
+}
+
+func TestSqliteSameUIDLeavesTheOwnerRunning(t *testing.T) {
+	rig, run, next := oldAppRig(t)
+	run.On("docker image inspect --format {{.Config.User}} ghcr.io/org/project-api@"+newDigest, sys.Result{Stdout: []byte("1000\n")})
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", next, Options{Actor: "agent"})
+	if err != nil || res.Status != state.StatusOK {
+		t.Fatalf("deploy: %v %+v", err, res)
+	}
+	if callIndex(rig, "docker stop") >= 0 || len(chowns(rig)) != 0 {
+		t.Fatalf("nothing changes hands: %v", rig.compose.calls)
+	}
+}
+
+func TestSqliteFirstDeployStopsNothing(t *testing.T) {
+	rig, run := sqliteRig(t, sqliteCvctlEnv)
+	run.On(oldAppPS, sys.Result{Stdout: []byte("0ldapp\n")})
+	if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	if callIndex(rig, "docker stop") >= 0 {
+		t.Fatalf("no old app: %v", rig.compose.calls)
+	}
+}
+
+func TestSqliteFailureBeforePromotionRestartsTheOwner(t *testing.T) {
+	for name, breakIt := range map[string]func(*testRig, *systest.Runner){
+		"hook": func(rig *testRig, _ *systest.Runner) {
+			rig.compose.failHook["api:node dist/migrate.js"] = struct {
+				res sys.Result
+				err error
+			}{sys.Result{ExitCode: 1, Stderr: []byte("migration failed")}, nil}
+		},
+		"data services": func(rig *testRig, _ *systest.Runner) { rig.compose.failUpData = errors.New("no data") },
+		"chown": func(_ *testRig, run *systest.Runner) {
+			run.OnPrefix("docker run --rm --cap-add CHOWN -e OWNER_UID=2000", sys.Result{ExitCode: 1, Stderr: []byte("broken")})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig, run, next := oldAppRig(t)
+			breakIt(rig, run)
+			if _, err := rig.deployer.Deploy(context.Background(), "demo-dev", next, Options{Actor: "agent"}); err != nil {
+				t.Fatal(err)
+			}
+			if got := chowns(rig); !slices.Equal(got, []string{"2000", "1000"}) {
+				t.Fatalf("chowns %v in %v", got, rig.compose.calls)
+			}
+			back := slices.IndexFunc(rig.compose.calls, func(c string) bool { return strings.Contains(c, "OWNER_UID=1000") })
+			start := callIndex(rig, oldAppStart)
+			if start < back {
+				t.Fatalf("the old app starts once the volume is back: %v", rig.compose.calls)
+			}
+		})
+	}
+}
+
+func TestSqliteCancelledDeployRestartsTheOwner(t *testing.T) {
+	rig, _, next := oldAppRig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rig.deployer.Run.(*orderedRunner).onChown = cancel
+	_, _ = rig.deployer.Deploy(ctx, "demo-dev", next, Options{Actor: "agent"})
+	if callIndex(rig, oldAppStart) < 0 {
+		t.Fatalf("a cancelled deploy leaves the old app down: %v", rig.compose.calls)
+	}
+}
+
+func TestSqliteStopFailureTouchesNoVolume(t *testing.T) {
+	rig, run, next := oldAppRig(t)
+	run.On(oldAppStop, sys.Result{ExitCode: 1, Stderr: []byte("cannot stop")})
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", next, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status == state.StatusOK || len(chowns(rig)) != 0 {
+		t.Fatalf("res %+v calls %v", res, rig.compose.calls)
+	}
+	if callIndex(rig, oldAppStart) < 0 {
+		t.Fatalf("a stop that half worked must be undone: %v", rig.compose.calls)
+	}
+}
+
+func TestSqliteOwnerNotRestartedReachesTheResult(t *testing.T) {
+	rig, run, next := oldAppRig(t)
+	rig.compose.failUpData = errors.New("no data")
+	run.On(oldAppStart, sys.Result{ExitCode: 1, Stderr: []byte("cannot start")})
+	res, err := rig.deployer.Deploy(context.Background(), "demo-dev", next, Options{Actor: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Detail, "old app not restarted") {
+		t.Fatalf("detail: %q", res.Detail)
 	}
 }
 

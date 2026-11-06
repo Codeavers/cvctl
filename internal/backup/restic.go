@@ -36,33 +36,42 @@ func (r *Runner) resticEnvPath(inst, svc string) string {
 }
 
 // writeResticEnv keeps the secrets out of argv: docker reads them from the file.
+// The file says nothing about idx afterwards: the next caller rewrites it, so it
+// serves one command at once, not a run that goes back to it later.
 func (r *Runner) writeResticEnv(inst, svc string, idx int) (string, error) {
+	path := r.resticEnvPath(inst, svc)
+	if err := r.writeResticEnvAt(path, inst, svc, idx); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func (r *Runner) writeResticEnvAt(path, inst, svc string, idx int) error {
 	env := r.Host.ResticEnv(inst, svc, idx)
 	if env["RESTIC_PASSWORD"] == "" {
-		return "", &output.Error{
+		return &output.Error{
 			Code:    "E_BACKUP_NOT_CONFIGURED",
 			Message: "restic_password is not set",
 			Hint:    "create /etc/cvctl/secrets/restic_password (run cvctl init)",
 		}
 	}
 	body := envFileBody(env)
-	path := r.resticEnvPath(inst, svc)
 	// A new host has no instance directory yet (project restore from the host bundle).
 	if err := r.FS.MkdirAll(r.instanceDir(inst), 0o2775, deployOwner); err != nil {
-		return "", &output.Error{
+		return &output.Error{
 			Code:    "E_BACKUP_FAILED",
 			Message: fmt.Sprintf("cannot create %s: %v", r.instanceDir(inst), err),
 			Hint:    "check permissions on the deploy root",
 		}
 	}
 	if err := r.FS.WriteFile(path, body, 0o640, deployOwner); err != nil {
-		return "", &output.Error{
+		return &output.Error{
 			Code:    "E_BACKUP_FAILED",
 			Message: fmt.Sprintf("cannot write %s: %v", path, err),
 			Hint:    "check permissions on the instance directory",
 		}
 	}
-	return path, nil
+	return nil
 }
 
 func (r *Runner) resticCmd(inst, envFile, volume string, args ...string) sys.Cmd {

@@ -58,10 +58,14 @@ func (r *Runner) dump(ctx context.Context, inst string, t Target, tags ...string
 	if err != nil {
 		return err
 	}
-	envFile, err := r.writeResticEnv(inst, t.Service, r.Host.ResticRepoIndex(t.Service))
-	if err != nil {
+	// Its own file: backup list and restore points rewrite restic-<svc>.env
+	// without the data lock, and tag and forget must reach this repository. The
+	// name stays clear of the patterns that sweep and export restic-*.env.
+	envFile := filepath.Join(r.instanceDir(inst), r.tempName("restic", inst, t.Service)+".env")
+	if err := r.writeResticEnvAt(envFile, inst, t.Service, r.Host.ResticRepoIndex(t.Service)); err != nil {
 		return err
 	}
+	defer func() { _ = r.FS.Remove(envFile) }()
 	if _, err := r.backupNet(ctx, inst); err != nil {
 		return err
 	}

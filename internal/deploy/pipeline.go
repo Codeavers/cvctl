@@ -1023,11 +1023,21 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		return d.failTransient(ctx, inst, st, want, deployID, actor, now, stepErrText(ctx, err), secrets)
 	}
 	// Before the first thing that can open a volume: pre-deploy hooks run in the
-	// app's container, as its user.
+	// app's container, as its user. A chown under the old app would leave it
+	// serving without write access, so it stops first; compose cannot do this,
+	// since the staging files are gone by the time a failure starts it again.
 	sqlite := backup.Runner{Run: d.Run, Catalog: cat}
-	undoSqlite, err := sqlite.PrepareSqlite(ctx, p, dec)
-	// Up to the promotion no rollback runs and the old app keeps serving: the
-	// volumes go back to it here. From then on executeSwap prepares them.
+	startOldApp := func(context.Context) error { return nil }
+	undoSqlite := func(context.Context) error { return nil }
+	var prepErr error
+	if st.Current != nil {
+		startOldApp, prepErr = sqlite.StopSqliteApps(ctx, p, dec)
+	}
+	if prepErr == nil {
+		undoSqlite, prepErr = sqlite.PrepareSqlite(ctx, p, dec)
+	}
+	// Up to the promotion no rollback runs and the old app stays: the volumes go
+	// back to it here and it starts again. From then on executeSwap prepares them.
 	defer func() {
 		if promoted || st.Current == nil {
 			return
@@ -1037,14 +1047,19 @@ func (d *Deployer) DeployLocked(ctx context.Context, inst string, want state.Des
 		if rErr := undoSqlite(rctx); rErr != nil {
 			res.Detail = strings.TrimPrefix(res.Detail+"; volume owner not restored: "+rErr.Error(), "; ")
 		}
+		sctx, scancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer scancel()
+		if rErr := startOldApp(sctx); rErr != nil {
+			res.Detail = strings.TrimPrefix(res.Detail+"; old app not restarted: "+rErr.Error(), "; ")
+		}
 	}()
-	if err != nil {
+	if prepErr != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
 		var oe *output.Error
-		if errors.As(err, &oe) && oe.Code == backup.CodeSqliteUID {
+		if errors.As(prepErr, &oe) && oe.Code == backup.CodeSqliteUID {
 			return d.failPermanent(ctx, inst, st, want, deployID, actor, now, oe.Error()+"; "+oe.Hint, secrets)
 		}
-		return d.failTransient(ctx, inst, st, want, deployID, actor, now, stepErrText(ctx, err), secrets)
+		return d.failTransient(ctx, inst, st, want, deployID, actor, now, stepErrText(ctx, prepErr), secrets)
 	}
 	if err := stagingCompose.UpData(ctx, localDataServices, waitTimeout(p)); err != nil {
 		d.cleanupStaging(stagingDir, stagingOverridePath, stagingAppEnvPath, stagingRoutePath)
