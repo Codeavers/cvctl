@@ -302,7 +302,7 @@ func TestSqliteBackupCancelRemovesHelper(t *testing.T) {
 		return g.pipe.Pipe(c, from, to)
 	})
 	_, _ = g.r.BackupNow(ctx, "app-prod", "db")
-	if g.index("docker rm -f cvctl-sqlite-app-prod-db-") < 0 {
+	if g.index("docker rm -f -v cvctl-sqlite-app-prod-db-") < 0 {
 		t.Fatalf("killing the docker client leaves the helper running: %v", g.calls())
 	}
 }

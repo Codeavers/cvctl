@@ -261,7 +261,7 @@ func TestDumpCancelledRunStillForgetsSnapshot(t *testing.T) {
 
 func TestDumpCancelRemovesContainer(t *testing.T) {
 	g := newDumpRig(t)
-	rec := &ctxRecorder{Runner: g.run, match: "docker rm -f " + dumpContainer, err: errors.New("rm never ran")}
+	rec := &ctxRecorder{Runner: g.run, match: "docker rm -f -v " + dumpContainer, err: errors.New("rm never ran")}
 	g.r.Run = rec
 	ctx, cancel := context.WithCancel(context.Background())
 	g.r.Pipe = cancellingPipe(cancel, sys.PipeResult{})
@@ -681,7 +681,7 @@ func TestDumpRestoreUsesNewVolume(t *testing.T) {
 		"docker exec " + dumpTemp + " sh -c fakeping",
 		"PIPE",
 		"docker stop -t 120 " + dumpTemp,
-		"docker rm -f " + dumpTemp,
+		"docker rm -f -v " + dumpTemp,
 		cp + "stop db",
 		"APPLY",
 		cp + "up -d --wait --wait-timeout 150 db",
@@ -731,7 +731,7 @@ func TestDumpRestoreFailureKeepsCurrentVolume(t *testing.T) {
 				t.Fatalf("res=%+v err=%v", res, err)
 			}
 			g.assertUntouched(t)
-			rm, rmVol := g.index("docker rm -f "+dumpTemp), g.index("docker volume rm -f "+dumpNewVol)
+			rm, rmVol := g.index("docker rm -f -v "+dumpTemp), g.index("docker volume rm -f "+dumpNewVol)
 			if rm < 0 || rmVol < rm {
 				t.Fatalf("temporary container and volume must go, in that order: %v", g.calls())
 			}
@@ -760,7 +760,7 @@ func TestDumpRestoreBothSidesFailedReportsBoth(t *testing.T) {
 
 func TestDumpRestoreCancelRemovesEverything(t *testing.T) {
 	g := newDumpRestoreRig(t)
-	rec := &ctxRecorder{Runner: g.run, match: "docker rm -f " + dumpReader, err: errors.New("rm never ran")}
+	rec := &ctxRecorder{Runner: g.run, match: "docker rm -f -v " + dumpReader, err: errors.New("rm never ran")}
 	g.r.Run = rec
 	ctx, cancel := context.WithCancel(context.Background())
 	g.r.Pipe = cancellingPipe(cancel, sys.PipeResult{})
@@ -770,7 +770,7 @@ func TestDumpRestoreCancelRemovesEverything(t *testing.T) {
 	if rec.err != nil {
 		t.Fatalf("rm context: %v", rec.err)
 	}
-	if g.index("docker rm -f "+dumpTemp) < 0 || g.index("docker volume rm -f "+dumpNewVol) < 0 {
+	if g.index("docker rm -f -v "+dumpTemp) < 0 || g.index("docker volume rm -f "+dumpNewVol) < 0 {
 		t.Fatalf("calls: %v", g.calls())
 	}
 }
@@ -1036,7 +1036,7 @@ func TestDumpVerifyRunsRestoreCheck(t *testing.T) {
 		"docker run -d --name " + name,
 		"docker exec " + name + " sh -c fakeping",
 		"docker exec " + name + " sh -c fakecount",
-		"docker rm -f " + name,
+		"docker rm -f -v " + name,
 		"docker volume rm -f " + name,
 	} {
 		i := g.index(want)
@@ -1085,7 +1085,7 @@ func TestDumpVerifyCleansUp(t *testing.T) {
 			if err == nil || res[0].OK || !strings.Contains(res[0].Error, tc.wantText) {
 				t.Fatalf("res=%+v err=%v", res, err)
 			}
-			if g.has("docker rm -f "+temp) != 1 || g.has("docker volume rm -f "+temp) != 1 {
+			if g.has("docker rm -f -v "+temp) != 1 || g.has("docker volume rm -f "+temp) != 1 {
 				t.Fatalf("cleanup: %v", g.calls())
 			}
 			st, err := g.store.Load("app-prod")
