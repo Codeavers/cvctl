@@ -1,7 +1,8 @@
 name: mongodb
 image: mongo:{version}
+# 8 refuses to start on Linux 6.19 and newer: https://jira.mongodb.org/browse/SERVER-121912
 versions: ["7", "8"]
-default_version: "8"
+default_version: "7"
 port: 27017
 volume_path: /data/db
 container_env:

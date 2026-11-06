@@ -305,7 +305,7 @@ JetStream in its volume), `s3` and `sqlite`. `mysql`, `mariadb` and
 the users it started with, not those of the dump. `mysql` and `mariadb` dump the service's database
 with its routines and events; `mongodb` dumps every database but restores none of `admin`.
 
-`mongodb` runs without a replica set, so `mongodump` has no oplog to replay: a dump taken during
+`mongodb` defaults to 7 because 8 refuses to start on Linux 6.19 and newer ([SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912)). `mongodb` runs without a replica set, so `mongodump` has no oplog to replay: a dump taken during
 writes is not a point-in-time copy, and documents written while it runs may or may not be in it.
 
 `valkey`, `rabbitmq` and `nats` are not backed up unless the service sets `cvctl.backup: volume`.

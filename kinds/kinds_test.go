@@ -405,7 +405,7 @@ func TestCatalogLoadsEngines(t *testing.T) {
 	}{
 		"mysql":    {"mysql:8.4", "8.4", "dump", "mysql://app:p%40ss@h:3306/appdb", []string{"8.4", "9"}},
 		"mariadb":  {"mariadb:11.4", "11.4", "dump", "mysql://app:p%40ss@h:3306/appdb", []string{"10.11", "11.4"}},
-		"mongodb":  {"mongo:8", "8", "dump", "mongodb://app:p%40ss@h:27017/appdb?authSource=admin", []string{"7", "8"}},
+		"mongodb":  {"mongo:7", "7", "dump", "mongodb://app:p%40ss@h:27017/appdb?authSource=admin", []string{"7", "8"}},
 		"valkey":   {"valkey/valkey:8-alpine", "8", "none", "redis://:p%40ss@h:6379/0", []string{"8", "9"}},
 		"rabbitmq": {"rabbitmq:4-management-alpine", "4", "none", "amqp://app:p%40ss@h:5672/", []string{"4"}},
 		"nats":     {"nats:2-alpine", "2", "none", "nats://p%40ss@h:4222", []string{"2"}},
