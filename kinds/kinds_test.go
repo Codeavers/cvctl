@@ -525,3 +525,11 @@ func TestEngineCapsCoverPopulatedVolume(t *testing.T) {
 		}
 	}
 }
+
+// The default node name holds the hostname, a container id, and names the data
+// directory: a recreated container would start empty beside the old data.
+func TestRabbitmqNodeNameIsFixed(t *testing.T) {
+	if got := mustLoad(t)["rabbitmq"].ContainerEnv["RABBITMQ_NODENAME"]; got != "rabbit@localhost" {
+		t.Errorf("RABBITMQ_NODENAME = %q", got)
+	}
+}

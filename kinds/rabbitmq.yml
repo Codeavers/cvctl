@@ -7,6 +7,9 @@ volume_path: /var/lib/rabbitmq
 container_env:
   RABBITMQ_DEFAULT_USER: "{user}"
   RABBITMQ_DEFAULT_PASS: "{password}"
+  # The data directory is named after the node, and the default node after the
+  # hostname: a recreated container would start empty.
+  RABBITMQ_NODENAME: rabbit@localhost
   # Other containers of the instance share the network, so unpublished is not
   # enough: the management UI and the metrics listen on loopback only.
   RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: '-rabbitmq_management tcp_config [{ip,"127.0.0.1"},{port,15672}] -rabbitmq_prometheus tcp_config [{ip,"127.0.0.1"},{port,15692}]'
