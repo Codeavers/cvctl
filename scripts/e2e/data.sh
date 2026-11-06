@@ -300,7 +300,7 @@ YML
   git clone --bare "$work" "$repo"
   chmod -R a+rX "$repo"
   (cd /tmp && sudo -u deployer env HOME=/srv/deploy git config --global --add safe.directory "$repo")
-  add_res=$(cvctl project add "file://$repo" --name "$name" --env dev --non-interactive --domain "api=$name.e2e.local" --json)
+  add_res=$(cvctl project add "file://$repo" --name "$name" --env dev --non-interactive --domain "api=$name.e2e.local" --json) || { echo "$add_res"; docker ps -a --filter "label=com.docker.compose.project=$name-dev" --format "{{.Names}}" | while read -r n; do docker logs --tail 40 "$n" 2>&1; done; false; }
   echo "$add_res"
   test "$(echo "$add_res" | jq -r '.data.status')" = "OK"
 }
