@@ -512,3 +512,16 @@ func TestRabbitmqManagementStaysOnLoopback(t *testing.T) {
 		}
 	}
 }
+
+// The entrypoints walk the volume as root under set -e before dropping to the
+// engine's user, and a populated volume has 0700 directories: without these the
+// second boot dies, though the first, on an empty volume, passes.
+func TestEngineCapsCoverPopulatedVolume(t *testing.T) {
+	c := mustLoad(t)
+	want := c["postgres"].CapAdd
+	for _, name := range []string{"mysql", "mariadb", "mongodb", "valkey", "rabbitmq"} {
+		if !reflect.DeepEqual(c[name].CapAdd, want) {
+			t.Errorf("%s cap_add = %v, want %v", name, c[name].CapAdd, want)
+		}
+	}
+}

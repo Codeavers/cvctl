@@ -17,4 +17,4 @@ health: ["CMD-SHELL", "MYSQL_PWD=\"$MARIADB_ROOT_PASSWORD\" mariadb --protocol=t
 dump_command: ["MYSQL_PWD=\"$MARIADB_ROOT_PASSWORD\"", "mariadb-dump", "-uroot", "--single-transaction", "--routines", "--events", "--databases", "\"$MARIADB_DATABASE\""]
 restore_command: ["MYSQL_PWD=\"$MARIADB_ROOT_PASSWORD\"", "mariadb", "-uroot"]
 restore_check: "MYSQL_PWD=\"$MARIADB_ROOT_PASSWORD\" mariadb -uroot -N -B -D \"$MARIADB_DATABASE\" -e 'select count(*) from information_schema.tables where table_schema = database()'"
-cap_add: [SETUID, SETGID]
+cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]

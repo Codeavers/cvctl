@@ -28,4 +28,4 @@ restore_command:
     printf 'password: "%s"\n' "$(printf %s "$MONGO_INITDB_ROOT_PASSWORD" | sed 's/[\\"]/\\&/g')" > "$f"
     mongorestore --config "$f" --username "$MONGO_INITDB_ROOT_USERNAME" --authenticationDatabase admin --archive --drop --nsExclude 'admin.*'
 restore_check: "HOME=/tmp mongosh --nodb --quiet --norc --eval 'const e = process.env; const d = connect(\"mongodb://\" + encodeURIComponent(e.MONGO_INITDB_ROOT_USERNAME) + \":\" + encodeURIComponent(e.MONGO_INITDB_ROOT_PASSWORD) + \"@127.0.0.1:27017/admin\"); print(d.getSiblingDB(e.MONGO_INITDB_DATABASE).getCollectionNames().length)'"
-cap_add: [SETUID, SETGID]
+cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]

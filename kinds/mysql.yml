@@ -17,4 +17,4 @@ health: ["CMD-SHELL", "MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD\" mysql --protocol=tcp -
 dump_command: ["MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD\"", "mysqldump", "-uroot", "--single-transaction", "--set-gtid-purged=OFF", "--routines", "--events", "--databases", "\"$MYSQL_DATABASE\""]
 restore_command: ["MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD\"", "mysql", "-uroot"]
 restore_check: "MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD\" mysql -uroot -N -B -D \"$MYSQL_DATABASE\" -e 'select count(*) from information_schema.tables where table_schema = database()'"
-cap_add: [SETUID, SETGID, DAC_READ_SEARCH]
+cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]

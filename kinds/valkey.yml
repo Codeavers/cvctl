@@ -21,4 +21,4 @@ backup: none
 external: [url]
 # valkey-cli exits 0 on an error reply, so only the reply proves the password.
 health: ["CMD-SHELL", "REDISCLI_AUTH=\"$VALKEY_PASSWORD\" valkey-cli ping | grep -q PONG"]
-cap_add: [SETUID, SETGID]
+cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]

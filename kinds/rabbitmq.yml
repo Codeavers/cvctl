@@ -17,4 +17,4 @@ external: [url]
 # rabbitmq-diagnostics runs as root under docker exec: early in the boot it
 # creates the Erlang cookie the server then cannot read, and the server dies.
 health: ["CMD", "nc", "-z", "127.0.0.1", "5672"]
-cap_add: [SETUID, SETGID]
+cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]
