@@ -281,3 +281,57 @@ func TestAdoptList(t *testing.T) {
 		t.Fatalf("got %s", out)
 	}
 }
+
+func TestStatusShowsAdopted(t *testing.T) {
+	setupAdopt(t, false)
+	if code, out, _ := run(t, addCockpit...); code != 0 {
+		t.Fatalf("code %d: %s", code, out)
+	}
+	_, out, _ := run(t, "status")
+	found := false
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); len(f) == 6 && f[0] == "cockpit" {
+			found = f[1] == "-" && f[2] == "-" && f[3] == "ADOPTED" && f[4] == "-" && f[5] == "-"
+		}
+	}
+	if !found {
+		t.Fatalf("no adopted row in %s", out)
+	}
+}
+
+func TestStatusJSONMarksAdopted(t *testing.T) {
+	setupAdopt(t, false)
+	if code, out, _ := run(t, addCockpit...); code != 0 {
+		t.Fatalf("code %d: %s", code, out)
+	}
+	_, out, _ := run(t, "status", "--json")
+	var env struct {
+		Data struct {
+			Instances []map[string]any `json:"instances"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]any{}
+	for _, it := range env.Data.Instances {
+		kinds[it["instance"].(string)] = it["kind"]
+	}
+	if kinds["cockpit"] != "adopted" {
+		t.Fatalf("kinds %v", kinds)
+	}
+	if v, ok := kinds["myapp-dev"]; !ok || v != nil {
+		t.Fatalf("instance kind %v in %v", v, kinds)
+	}
+}
+
+func TestStatusByNameIgnoresAdopted(t *testing.T) {
+	setupAdopt(t, false)
+	if code, out, _ := run(t, addCockpit...); code != 0 {
+		t.Fatalf("code %d: %s", code, out)
+	}
+	code, out, _ := run(t, "status", "cockpit", "--json")
+	if code == 0 || errorCode(t, out) != "E_INSTANCE_NOT_FOUND" {
+		t.Fatalf("code %d: %s", code, out)
+	}
+}

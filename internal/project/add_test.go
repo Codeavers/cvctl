@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/codeavers/cvctl/internal/adopt"
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/deploy"
 	"github.com/codeavers/cvctl/internal/gitrepo"
@@ -2773,4 +2774,53 @@ func TestUpdateRejectsInvalidDomain(t *testing.T) {
 	if !strings.Contains(string(raw), "CVCTL_DOMAIN_WEB=web.example.com") {
 		t.Fatalf("cvctl.env must be untouched on error:\n%s", raw)
 	}
+}
+
+func adoptedDir(t *testing.T, domain string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "adopted")
+	if err := adopt.Save(sys.NewOSFS(), dir, adopt.Service{Name: "panel", Domain: domain, Target: "http://host:9090"}); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func requireCode(t *testing.T, err error, code string) {
+	t.Helper()
+	var oe *output.Error
+	if !errors.As(err, &oe) || oe.Code != code {
+		t.Fatalf("expected %s, got %v", code, err)
+	}
+}
+
+func TestAddRejectsAdoptedDomain(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra-source")
+	writeTestInfra(t, infraDir, validCompose, validSpec)
+	stub := &stubRepo{infraSource: infraDir}
+	e := &Env{
+		FS:         sys.NewOSFS(),
+		DeployRoot: tmp,
+		StateRoot:  filepath.Join(tmp, "state"),
+		AdoptDir:   adoptedDir(t, "web.example.com"),
+		Catalog:    testCatalog(t),
+		RepoFactory: func(dir, _ string) RepoLike {
+			r := *stub
+			r.dir = dir
+			return &r
+		},
+	}
+	_, err := Add(context.Background(), e, "git@github.com:myorg/my-service-infra.git", AddOptions{
+		Domains: map[string]string{"web": "web.example.com"},
+	})
+	requireCode(t, err, "E_ADOPT_DOMAIN_IN_USE")
+}
+
+func TestUpdateRejectsAdoptedDomain(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+	rig.env.AdoptDir = adoptedDir(t, "panel.example.com")
+	_, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{
+		Domains: map[string]string{"web": "panel.example.com"},
+	})
+	requireCode(t, err, "E_ADOPT_DOMAIN_IN_USE")
 }

@@ -104,6 +104,9 @@ func newAdoptCmd() *cobra.Command {
 		Short: "Expose services cvctl does not deploy through Traefik",
 		Long: `Adopted services only get a route and TLS. cvctl does not start, update,
 notify about or back up what it adopts.`,
+		Example: `  cvctl adopt add panel --domain panel.example.com --target https://host:9090 --insecure-tls
+  cvctl adopt list
+  cvctl adopt rm panel`,
 	}
 	cmd.AddCommand(newAdoptAddCmd(), newAdoptListCmd(), newAdoptRmCmd())
 	return cmd
@@ -178,7 +181,9 @@ func newAdoptListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List adopted services",
-		Args:  cobra.NoArgs,
+		Example: `  cvctl adopt list
+  cvctl adopt list --json`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			asJSON, _ := cmd.Flags().GetBool("json")
 			e, err := newOpsEnv(opsOpts{NonInteractive: asJSON, In: cmd.InOrStdin(), Out: cmd.ErrOrStderr()})
@@ -205,9 +210,10 @@ func newAdoptListCmd() *cobra.Command {
 
 func newAdoptRmCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "rm <name>",
-		Short: "Stop exposing an adopted service; the service itself keeps running",
-		Args:  cobra.ExactArgs(1),
+		Use:     "rm <name>",
+		Short:   "Stop exposing an adopted service; the service itself keeps running",
+		Example: `  cvctl adopt rm panel`,
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			asJSON, _ := cmd.Flags().GetBool("json")
 			e, err := newOpsEnv(opsOpts{NonInteractive: asJSON, In: cmd.InOrStdin(), Out: cmd.ErrOrStderr()})

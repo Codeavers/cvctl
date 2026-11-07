@@ -15,6 +15,7 @@ import (
 
 	"github.com/joho/godotenv"
 
+	"github.com/codeavers/cvctl/internal/adopt"
 	"github.com/codeavers/cvctl/internal/backup"
 	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/deploy"
@@ -73,6 +74,7 @@ type Env struct {
 	Data         DataRestorer
 	DeployRoot   string
 	StateRoot    string
+	AdoptDir     string
 	RepoFactory  func(dir, keyPath string) RepoLike
 	Resolver     registry.Resolver
 	PollInterval time.Duration
@@ -592,6 +594,31 @@ func checkDomainServices(p *contract.Project, domains map[string]string) error {
 					Message: fmt.Sprintf("unknown service %q for --domain", svc),
 					Hint:    "specify an app service defined in compose.yml",
 				},
+			}
+		}
+	}
+	return nil
+}
+
+// checkAdoptedDomains keeps an instance from taking a domain an adopted service
+// already serves: two Traefik routers on one host would fight over its traffic.
+func checkAdoptedDomains(e *Env, d *instance.Decisions) error {
+	dir := e.AdoptDir
+	if dir == "" {
+		dir = adopt.Dir
+	}
+	svcs, err := adopt.Load(e.fs(), dir)
+	if err != nil {
+		return err
+	}
+	for _, s := range svcs {
+		for svc, host := range d.Domains {
+			if host == s.Domain {
+				return &output.UsageError{Err: &output.Error{
+					Code:    "E_ADOPT_DOMAIN_IN_USE",
+					Message: fmt.Sprintf("domain %s for %s is used by adopted service %s", host, svc, s.Name),
+					Hint:    "remove it with cvctl adopt rm or choose another domain",
+				}}
 			}
 		}
 	}
@@ -1131,6 +1158,10 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		cleanupInst()
 		return nil, err
 	}
+	if err := checkAdoptedDomains(e, d); err != nil {
+		cleanupInst()
+		return nil, err
+	}
 
 	appEnvValues := make(map[string]string)
 	var envFileRep *EnvFileReport
@@ -1366,6 +1397,9 @@ func Update(ctx context.Context, e *Env, inst string, opts UpdateOptions) (*AddR
 	}
 
 	if err := promptDomains(ctx, e, p, d); err != nil {
+		return nil, err
+	}
+	if err := checkAdoptedDomains(e, d); err != nil {
 		return nil, err
 	}
 
