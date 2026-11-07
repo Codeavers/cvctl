@@ -39,6 +39,10 @@ func (e *OpsEnv) syncAdopted() error {
 	return adopt.Sync(e.fs(), e.adoptDir(), e.Deployer.TraefikDir, e.edgeMode(), e.Host.EdgeGateway())
 }
 
+func portShared(svcs []adopt.Service, s adopt.Service) bool {
+	return slices.ContainsFunc(svcs, func(o adopt.Service) bool { return o.Name != s.Name && o.Port() == s.Port() })
+}
+
 func (e *OpsEnv) edgeMode() string {
 	if e.Host != nil && e.Host.EdgeMode != "" {
 		return e.Host.EdgeMode
@@ -50,6 +54,11 @@ func (e *OpsEnv) edgeMode() string {
 // adopting is that nothing else reaches the service.
 func (e *OpsEnv) ufwAdopted(cmd *cobra.Command, port int, verb ...string) error {
 	if !e.Host.FirewallManage {
+		return nil
+	}
+	which, err := e.runner().Run(cmd.Context(), sys.Cmd{Name: "sh", Args: []string{"-c", "command -v ufw"}})
+	if err != nil || which.ExitCode != 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: ufw not installed; firewall not managed for port %d\n", port)
 		return nil
 	}
 	args := append(verb, "from", e.Host.EdgeSubnetOrDefault(), "to", "any", "port", strconv.Itoa(port), "proto", "tcp")
@@ -89,7 +98,13 @@ func (e *OpsEnv) adoptConflict(s adopt.Service, existing []adopt.Service) error 
 		}
 	}
 	for _, inst := range instances {
-		for _, host := range e.projectListItem(inst).Domains {
+		it := e.projectListItem(inst)
+		if it.Error != "" {
+			return &output.Error{Code: "E_ADOPT_INSTANCE_UNREADABLE",
+				Message: fmt.Sprintf("cannot read the domains of %s: %s", inst, it.Error),
+				Hint:    "fix the instance first: its domain could clash with this one"}
+		}
+		for _, host := range it.Domains {
 			if host == s.Domain {
 				return inUse(inst)
 			}
@@ -161,7 +176,9 @@ func newAdoptAddCmd() *cobra.Command {
 			}
 			if err := e.syncAdopted(); err != nil {
 				_ = adopt.Remove(e.fs(), e.adoptDir(), s.Name)
-				_ = e.ufwAdopted(cmd, s.Port(), "delete", "allow")
+				if !portShared(existing, s) {
+					_ = e.ufwAdopted(cmd, s.Port(), "delete", "allow")
+				}
 				return err
 			}
 			printerFrom(cmd).Result(s, func(w io.Writer) {
@@ -233,17 +250,18 @@ func newAdoptRmCmd() *cobra.Command {
 					Hint: "check the name with cvctl adopt list"}
 			}
 			s := svcs[i]
-			if err := adopt.Remove(e.fs(), e.adoptDir(), s.Name); err != nil {
+			// The registry entry goes last: it is what lets a failed rm be retried.
+			rest := slices.Delete(slices.Clone(svcs), i, i+1)
+			if err := adopt.WriteRoutes(e.fs(), e.Deployer.TraefikDir, rest, e.edgeMode(), e.Host.EdgeGateway()); err != nil {
 				return err
 			}
-			if err := e.syncAdopted(); err != nil {
-				return err
-			}
-			shared := slices.ContainsFunc(svcs, func(o adopt.Service) bool { return o.Name != s.Name && o.Port() == s.Port() })
-			if !shared {
+			if !portShared(svcs, s) {
 				if err := e.ufwAdopted(cmd, s.Port(), "delete", "allow"); err != nil {
 					return err
 				}
+			}
+			if err := adopt.Remove(e.fs(), e.adoptDir(), s.Name); err != nil {
+				return err
 			}
 			printerFrom(cmd).Result(s, func(w io.Writer) { fmt.Fprintf(w, "removed %s\n", s.Name) })
 			return nil

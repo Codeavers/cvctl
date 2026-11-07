@@ -2,6 +2,7 @@ package adopt
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -72,6 +73,9 @@ type dynamic struct {
 			Middlewares []string       `yaml:"middlewares"`
 			TLS         map[string]any `yaml:"tls"`
 		} `yaml:"routers"`
+		Middlewares map[string]struct {
+			Headers map[string]any `yaml:"headers"`
+		} `yaml:"middlewares"`
 		Services map[string]struct {
 			LoadBalancer struct {
 				Servers []struct {
@@ -111,7 +115,8 @@ func TestRenderEdge(t *testing.T) {
 	if r.TLS["certResolver"] != "le" {
 		t.Fatalf("tls %v", r.TLS)
 	}
-	if len(r.Middlewares) != 1 || r.Middlewares[0] != "cvctl-default@file" {
+	want := []string{"adopted-headers@file", "cvctl-ratelimit@file", "cvctl-inflight@file"}
+	if !slices.Equal(r.Middlewares, want) {
 		t.Fatalf("middlewares %v", r.Middlewares)
 	}
 	if got := d.HTTP.Services["adopted-cockpit"].LoadBalancer.Servers[0].URL; got != "https://10.203.0.1:9090" {
@@ -119,6 +124,23 @@ func TestRenderEdge(t *testing.T) {
 	}
 	if len(d.HTTP.ServersTransports) != 0 {
 		t.Fatalf("unexpected transports %v", d.HTTP.ServersTransports)
+	}
+}
+
+// Panels such as Cockpit load their pages in a same-origin iframe, which the
+// default chain's X-Frame-Options: DENY would blank out.
+func TestRenderHeadersAllowSameOriginFrames(t *testing.T) {
+	svcs := []Service{{Name: "app", Domain: "a.example.com", Target: "http://host:3000"}}
+	edge := renderDoc(t, svcs, "edge").HTTP.Middlewares["adopted-headers"].Headers
+	if edge["customFrameOptionsValue"] != "SAMEORIGIN" || edge["contentTypeNosniff"] != true {
+		t.Fatalf("headers %v", edge)
+	}
+	if edge["frameDeny"] != nil || edge["stsSeconds"] != 31536000 || edge["stsIncludeSubdomains"] != true {
+		t.Fatalf("headers %v", edge)
+	}
+	proxied := renderDoc(t, svcs, "behind-proxy").HTTP.Middlewares["adopted-headers"].Headers
+	if proxied["stsSeconds"] != nil {
+		t.Fatalf("headers %v", proxied)
 	}
 }
 
@@ -198,6 +220,23 @@ func TestSyncWritesRoutes(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "adopted-a") {
 		t.Fatalf("routes %s", b)
+	}
+}
+
+func TestWriteRoutes(t *testing.T) {
+	fs := systest.NewFS()
+	svcs := []Service{{Name: "a", Domain: "a.example.com", Target: "http://host:1"}}
+	if err := WriteRoutes(fs, dynDir, svcs, "edge", "10.203.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fs.ReadFile(dynDir + "/" + RouteFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRoutes(fs, dynDir, nil, "edge", "10.203.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fs.ReadFile(dynDir + "/" + RouteFile); err == nil {
+		t.Fatal("routes file still there")
 	}
 }
 

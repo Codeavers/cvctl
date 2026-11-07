@@ -134,6 +134,12 @@ func Sync(fsys sys.FS, dir, dynamicDir, edgeMode, gateway string) error {
 	if err != nil {
 		return err
 	}
+	return WriteRoutes(fsys, dynamicDir, svcs, edgeMode, gateway)
+}
+
+// WriteRoutes takes the list instead of the registry so a removal can publish
+// the new routes first and drop the registry entry only once everything worked.
+func WriteRoutes(fsys sys.FS, dynamicDir string, svcs []Service, edgeMode, gateway string) error {
 	b, err := Render(svcs, edgeMode, gateway)
 	if err != nil {
 		return err

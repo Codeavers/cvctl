@@ -433,6 +433,9 @@ func Restore(ctx context.Context, e *Env, inst string, opts RestoreOptions) (*Re
 	if err != nil {
 		return fail(err)
 	}
+	if err := checkAdoptedDomains(e, d); err != nil {
+		return fail(err)
+	}
 	if v, ok := sourceUpdates[keySource]; ok {
 		d.InfraSource = v
 		if isOCI {

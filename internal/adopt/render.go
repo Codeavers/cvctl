@@ -6,7 +6,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const prefix = "adopted-"
+const (
+	prefix            = "adopted-"
+	headersMiddleware = "adopted-headers"
+)
 
 // Render builds the Traefik dynamic config, or nil with no services. The target
 // host is the gateway of Traefik's own network: its address on the host side.
@@ -22,7 +25,7 @@ func Render(svcs []Service, edgeMode, gateway string) ([]byte, error) {
 		r := map[string]any{
 			"rule":        "Host(`" + s.Domain + "`)",
 			"service":     name,
-			"middlewares": []string{"cvctl-default@file"},
+			"middlewares": []string{headersMiddleware + "@file", "cvctl-ratelimit@file", "cvctl-inflight@file"},
 		}
 		if edgeMode == "edge" {
 			r["entryPoints"] = []string{"websecure"}
@@ -40,7 +43,18 @@ func Render(svcs []Service, edgeMode, gateway string) ([]byte, error) {
 		}
 		services[name] = map[string]any{"loadBalancer": lb}
 	}
-	doc := map[string]any{"routers": routers, "services": services}
+	// Not cvctl-default: its X-Frame-Options: DENY blanks panels built on
+	// same-origin iframes, such as Cockpit.
+	headers := map[string]any{"contentTypeNosniff": true, "customFrameOptionsValue": "SAMEORIGIN"}
+	if edgeMode == "edge" {
+		headers["stsSeconds"] = 31536000
+		headers["stsIncludeSubdomains"] = true
+	}
+	doc := map[string]any{
+		"routers":     routers,
+		"services":    services,
+		"middlewares": map[string]any{headersMiddleware: map[string]any{"headers": headers}},
+	}
 	if len(transports) > 0 {
 		doc["serversTransports"] = transports
 	}

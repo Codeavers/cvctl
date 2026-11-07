@@ -27,6 +27,7 @@ func setupAdopt(t *testing.T, firewall bool) adoptFixture {
 	tmp, env := setupOpsFixture(t, "myapp-dev")
 	r := &systest.Runner{}
 	r.OnPrefix("ufw", sys.Result{})
+	r.OnPrefix("sh -c command -v ufw", sys.Result{})
 	env.Run = r
 	env.AdoptDir = filepath.Join(tmp, "adopted")
 	env.Host.EdgeMode = "edge"
@@ -201,6 +202,7 @@ func TestAdoptAddKeepsNoRegistryWhenFirewallFails(t *testing.T) {
 	f := setupAdopt(t, true)
 	r := &systest.Runner{}
 	r.OnPrefix("ufw", sys.Result{ExitCode: 1, Stderr: []byte("boom")})
+	r.OnPrefix("sh -c command -v ufw", sys.Result{})
 	f.env.Run = r
 	if code, _, _ := run(t, addCockpit...); code == 0 {
 		t.Fatal("expected failure")
@@ -333,5 +335,101 @@ func TestStatusByNameIgnoresAdopted(t *testing.T) {
 	code, out, _ := run(t, "status", "cockpit", "--json")
 	if code == 0 || errorCode(t, out) != "E_INSTANCE_NOT_FOUND" {
 		t.Fatalf("code %d: %s", code, out)
+	}
+}
+
+// breakRoutes makes writing adopted.yml fail: its directory is a regular file.
+func (f adoptFixture) breakRoutes(t *testing.T) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(p, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.env.Deployer.TraefikDir = p
+}
+
+func TestAdoptAddRollbackKeepsSharedPortRule(t *testing.T) {
+	f := setupAdopt(t, true)
+	if code, out, _ := run(t, addCockpit...); code != 0 {
+		t.Fatalf("code %d: %s", code, out)
+	}
+	f.breakRoutes(t)
+	if code, _, _ := run(t, "adopt", "add", "other", "--domain", "o.example.com", "--target", "http://host:9090"); code == 0 {
+		t.Fatal("expected failure")
+	}
+	for _, c := range f.ufw() {
+		if strings.HasPrefix(c, "delete") {
+			t.Fatalf("ufw %v", f.ufw())
+		}
+	}
+	if got := f.registered(t); len(got) != 1 || got[0].Name != "cockpit" {
+		t.Fatalf("registry %+v", got)
+	}
+}
+
+func TestAdoptRmKeepsRegistryWhenRoutesFail(t *testing.T) {
+	f := setupAdopt(t, true)
+	if code, out, _ := run(t, addCockpit...); code != 0 {
+		t.Fatalf("code %d: %s", code, out)
+	}
+	dyn := f.env.Deployer.TraefikDir
+	f.breakRoutes(t)
+	if code, _, _ := run(t, "adopt", "rm", "cockpit"); code == 0 {
+		t.Fatal("expected failure")
+	}
+	if got := f.registered(t); len(got) != 1 {
+		t.Fatalf("registry %+v", got)
+	}
+	f.env.Deployer.TraefikDir = dyn
+	if code, out, _ := run(t, "adopt", "rm", "cockpit"); code != 0 {
+		t.Fatalf("retry: code %d: %s", code, out)
+	}
+	if got := f.registered(t); len(got) != 0 {
+		t.Fatalf("registry %+v", got)
+	}
+}
+
+func TestAdoptRmKeepsRegistryWhenFirewallFails(t *testing.T) {
+	f := setupAdopt(t, true)
+	if code, out, _ := run(t, addCockpit...); code != 0 {
+		t.Fatalf("code %d: %s", code, out)
+	}
+	r := &systest.Runner{}
+	r.OnPrefix("ufw", sys.Result{ExitCode: 1, Stderr: []byte("boom")})
+	r.OnPrefix("sh -c command -v ufw", sys.Result{})
+	f.env.Run = r
+	if code, _, _ := run(t, "adopt", "rm", "cockpit"); code == 0 {
+		t.Fatal("expected failure")
+	}
+	if got := f.registered(t); len(got) != 1 {
+		t.Fatalf("registry %+v", got)
+	}
+}
+
+func TestAdoptAddRefusesWhenInstanceUnreadable(t *testing.T) {
+	f := setupAdopt(t, false)
+	if err := os.RemoveAll(filepath.Join(f.env.DeployRoot, "myapp-dev", "infra")); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := run(t, "adopt", "add", "other", "--domain", "o.example.com", "--target", "http://host:1", "--json")
+	if code == 0 || errorCode(t, out) != "E_ADOPT_INSTANCE_UNREADABLE" || !strings.Contains(out, "myapp-dev") {
+		t.Fatalf("code %d: %s", code, out)
+	}
+}
+
+func TestAdoptAddWithoutUfwInstalled(t *testing.T) {
+	f := setupAdopt(t, true)
+	r := &systest.Runner{}
+	r.OnPrefix("sh -c command -v ufw", sys.Result{ExitCode: 1})
+	f.env.Run = r
+	code, out, errb := run(t, addCockpit...)
+	if code != 0 {
+		t.Fatalf("code %d: %s %s", code, out, errb)
+	}
+	if !strings.Contains(errb, "ufw") {
+		t.Fatalf("no warning in %q", errb)
+	}
+	if got := f.registered(t); len(got) != 1 {
+		t.Fatalf("registry %+v", got)
 	}
 }
