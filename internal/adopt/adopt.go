@@ -25,9 +25,8 @@ const (
 )
 
 var (
-	rootOwner = sys.Owner{User: "root", Group: "root"}
-	nameRE    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-	targetRE  = regexp.MustCompile(`^(http|https)://host:([0-9]{1,5})$`)
+	nameRE   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+	targetRE = regexp.MustCompile(`^(http|https)://host:([0-9]{1,5})$`)
 )
 
 type Service struct {
@@ -114,14 +113,14 @@ func corrupt(p string, err error) error {
 }
 
 func Save(fsys sys.FS, dir string, s Service) error {
-	if err := fsys.MkdirAll(dir, 0o755, rootOwner); err != nil {
+	if err := fsys.MkdirAll(dir, 0o755, sys.Owner{}); err != nil {
 		return err
 	}
 	b, err := yaml.Marshal(s)
 	if err != nil {
 		return err
 	}
-	return fsys.WriteFile(path(dir, s.Name), b, 0o644, rootOwner)
+	return fsys.WriteFile(path(dir, s.Name), b, 0o644, sys.Owner{})
 }
 
 func Remove(fsys sys.FS, dir, name string) error {
@@ -143,5 +142,5 @@ func Sync(fsys sys.FS, dir, dynamicDir, edgeMode, gateway string) error {
 	if b == nil {
 		return fsys.Remove(dst)
 	}
-	return fsys.WriteFile(dst, b, 0o644, sys.Owner{User: "root", Group: "deploy"})
+	return fsys.WriteFile(dst, b, 0o644, sys.Owner{})
 }
