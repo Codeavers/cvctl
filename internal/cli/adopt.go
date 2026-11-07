@@ -170,14 +170,19 @@ func newAdoptAddCmd() *cobra.Command {
 			if err := adopt.Save(e.fs(), e.adoptDir(), s); err != nil {
 				return err
 			}
+			warnRollback := func(what string, err error) {
+				if err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: rollback of %s failed: %v\n", what, err)
+				}
+			}
 			if err := e.ufwAdopted(cmd, s.Port(), "allow"); err != nil {
-				_ = adopt.Remove(e.fs(), e.adoptDir(), s.Name)
+				warnRollback("registry entry "+s.Name, adopt.Remove(e.fs(), e.adoptDir(), s.Name))
 				return err
 			}
 			if err := e.syncAdopted(); err != nil {
-				_ = adopt.Remove(e.fs(), e.adoptDir(), s.Name)
+				warnRollback("registry entry "+s.Name, adopt.Remove(e.fs(), e.adoptDir(), s.Name))
 				if !portShared(existing, s) {
-					_ = e.ufwAdopted(cmd, s.Port(), "delete", "allow")
+					warnRollback(fmt.Sprintf("ufw rule for port %d", s.Port()), e.ufwAdopted(cmd, s.Port(), "delete", "allow"))
 				}
 				return err
 			}

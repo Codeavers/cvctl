@@ -273,3 +273,39 @@ func TestSyncKeepsRoutesOnCorruptRegistry(t *testing.T) {
 		t.Fatalf("routes rewritten: %s", b)
 	}
 }
+
+func TestLoadRejectsInconsistentRegistry(t *testing.T) {
+	cases := []struct {
+		name  string
+		files map[string]string
+		want  string
+	}{
+		{"name differs from file", map[string]string{
+			"foo.yml": "name: bar\ndomain: a.example.com\ntarget: http://host:1\n",
+		}, "foo.yml"},
+		{"duplicate domain", map[string]string{
+			"a.yml": "name: a\ndomain: same.example.com\ntarget: http://host:1\n",
+			"b.yml": "name: b\ndomain: same.example.com\ntarget: http://host:2\n",
+		}, "b.yml"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fs := systest.NewFS()
+			if err := fs.MkdirAll(testDir, 0o755, sys.Owner{}); err != nil {
+				t.Fatal(err)
+			}
+			for name, body := range c.files {
+				if err := fs.WriteFile(testDir+"/"+name, []byte(body), 0o644, sys.Owner{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := Load(fs, testDir)
+			if got := errCode(t, err); got != "E_ADOPT_REGISTRY" {
+				t.Fatalf("code %s", got)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err %v", err)
+			}
+		})
+	}
+}

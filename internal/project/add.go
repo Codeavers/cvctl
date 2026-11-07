@@ -603,6 +603,9 @@ func checkDomainServices(p *contract.Project, domains map[string]string) error {
 // checkAdoptedDomains keeps an instance from taking a domain an adopted service
 // already serves: two Traefik routers on one host would fight over its traffic.
 func checkAdoptedDomains(e *Env, d *instance.Decisions) error {
+	if len(d.Domains) == 0 {
+		return nil
+	}
 	dir := e.AdoptDir
 	if dir == "" {
 		dir = adopt.Dir

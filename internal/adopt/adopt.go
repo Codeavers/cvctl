@@ -101,6 +101,12 @@ func Load(fsys sys.FS, dir string) ([]Service, error) {
 		if err := s.Validate(); err != nil {
 			return nil, corrupt(p, err)
 		}
+		if want := strings.TrimSuffix(ent.Name(), ".yml"); s.Name != want {
+			return nil, corrupt(p, fmt.Errorf("name %q does not match the file", s.Name))
+		}
+		if slices.ContainsFunc(svcs, func(o Service) bool { return o.Domain == s.Domain }) {
+			return nil, corrupt(p, fmt.Errorf("domain %s is already adopted", s.Domain))
+		}
 		svcs = append(svcs, s)
 	}
 	slices.SortFunc(svcs, func(a, b Service) int { return strings.Compare(a.Name, b.Name) })

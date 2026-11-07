@@ -2824,3 +2824,16 @@ func TestUpdateRejectsAdoptedDomain(t *testing.T) {
 	})
 	requireCode(t, err, "E_ADOPT_DOMAIN_IN_USE")
 }
+
+func TestCheckAdoptedDomainsSkipsRegistryWithoutDomains(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bad.yml"), []byte("name: [unclosed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := &Env{FS: sys.NewOSFS(), AdoptDir: dir}
+	if err := checkAdoptedDomains(e, &instance.Decisions{}); err != nil {
+		t.Fatalf("instance without domains blocked: %v", err)
+	}
+	err := checkAdoptedDomains(e, &instance.Decisions{Domains: map[string]string{"web": "w.example.com"}})
+	requireCode(t, err, "E_ADOPT_REGISTRY")
+}

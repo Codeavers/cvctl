@@ -433,3 +433,20 @@ func TestAdoptAddWithoutUfwInstalled(t *testing.T) {
 		t.Fatalf("registry %+v", got)
 	}
 }
+
+func TestAdoptAddReportsRollbackFailure(t *testing.T) {
+	f := setupAdopt(t, true)
+	r := &systest.Runner{}
+	r.OnPrefix("ufw", sys.Result{})
+	r.OnPrefix("ufw delete", sys.Result{ExitCode: 1, Stderr: []byte("boom")})
+	r.OnPrefix("sh -c command -v ufw", sys.Result{})
+	f.env.Run = r
+	f.breakRoutes(t)
+	code, _, errb := run(t, addCockpit...)
+	if code == 0 {
+		t.Fatal("expected failure")
+	}
+	if !strings.Contains(errb, "rollback") || !strings.Contains(errb, "9090") {
+		t.Fatalf("no rollback warning in %q", errb)
+	}
+}
