@@ -229,6 +229,26 @@ had already run its migrations.
 `info` notices are silent: successful deploys, the pause after a manual rollback, finished restores
 and `cvctl notify test`. `warn` and `error` notices make a sound.
 
+## Adopting external services
+
+`cvctl adopt` exposes a process cvctl does not deploy, such as a systemd unit, a manual Node process or
+another Docker stack, without a contract:
+
+```
+sudo cvctl adopt add panel --domain panel.example.com --target https://host:9090 --insecure-tls
+sudo cvctl adopt list
+sudo cvctl adopt rm panel
+```
+
+cvctl only adds the Traefik route and TLS, and `cvctl status` lists the service as `ADOPTED` without
+checking it. It does not start, update, notify about or back up what it adopts, and `adopt rm` leaves the
+process running.
+
+`host` is the gateway of Traefik's network, so the process cannot listen on `127.0.0.1` only: `adopt add`
+fails with `E_ADOPT_UNREACHABLE` unless it answers there. `--force` skips that check for a stopped process.
+With `CVCTL_FIREWALL_MANAGE=true` the port opens to Traefik's subnet only. Domains are exclusive: an instance
+and an adopted service cannot share one. HTTP only; raw TCP or UDP ports stay out.
+
 ## lint
 
 Validates `compose.yml` and `env.spec.yml` against the cvctl contract.

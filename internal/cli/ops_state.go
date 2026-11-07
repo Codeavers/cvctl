@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/codeavers/cvctl/internal/adopt"
 	"github.com/codeavers/cvctl/internal/backup"
 	"github.com/codeavers/cvctl/internal/compose"
 	"github.com/codeavers/cvctl/internal/contract"
@@ -29,6 +30,7 @@ type instanceStatusItem struct {
 	Status   string `json:"status"`
 	Commit   string `json:"commit"`
 	Age      string `json:"age"`
+	Kind     string `json:"kind,omitempty"`
 }
 
 type statusReport struct {
@@ -137,6 +139,16 @@ func newStatusCmd() *cobra.Command {
 			}
 
 			warnings := make([]string, 0)
+			if len(args) == 0 {
+				// Adopted services only join the output: backups and S3 warnings read instances.
+				adopted, err := adopt.Load(e.fs(), e.adoptDir())
+				if err != nil {
+					warnings = append(warnings, errText(err))
+				}
+				for _, s := range adopted {
+					items = append(items, instanceStatusItem{Instance: s.Name, Env: "-", Status: "ADOPTED", Commit: "-", Age: "-", Kind: "adopted"})
+				}
+			}
 			if (e.Host != nil && e.Host.Storage == "local") || os.Getenv("CVCTL_STORAGE") == "local" {
 				warnings = append(warnings, "CVCTL_STORAGE=local: backups are stored on local disk; configure S3 for offsite backup")
 			}

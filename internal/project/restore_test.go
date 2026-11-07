@@ -1107,3 +1107,13 @@ func TestRestoreRemovesInstanceDirItCreatedOnEarlyFailure(t *testing.T) {
 		t.Fatalf("%s created by this run was left behind", rig.instDir)
 	}
 }
+
+func TestRestoreRejectsAdoptedDomain(t *testing.T) {
+	rig := newRestoreRig(t, restoreEnvBase)
+	rig.env.AdoptDir = adoptedDir(t, "web.example.com")
+	_, err := Restore(context.Background(), rig.env, "demo-dev", RestoreOptions{})
+	requireCode(t, err, "E_ADOPT_DOMAIN_IN_USE")
+	if got := strings.Join(*rig.log, ","); strings.Contains(got, "restore db") {
+		t.Fatalf("data restored before the check: %s", got)
+	}
+}

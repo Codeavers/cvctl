@@ -87,6 +87,7 @@ func DefaultSteps() []Step {
 		NotifierStep{},
 		AgentStep{},
 		BackupTimersStep{},
+		AdoptedStep{},
 	}
 }
 

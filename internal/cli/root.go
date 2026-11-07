@@ -51,6 +51,7 @@ func NewRoot(version string) *cobra.Command {
 	root.AddCommand(newSecretsCmd())
 	root.AddCommand(newImagesCmd())
 	root.AddCommand(newRemoteCmd())
+	root.AddCommand(newAdoptCmd())
 	return root
 }
 
