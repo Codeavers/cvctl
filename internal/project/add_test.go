@@ -19,6 +19,7 @@ import (
 	"github.com/codeavers/cvctl/internal/gitrepo"
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/hostcfg/hostcfgtest"
+	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
