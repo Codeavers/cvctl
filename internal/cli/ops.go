@@ -42,6 +42,7 @@ type OpsEnv struct {
 	Catalog     kinds.Catalog
 	DeployRoot  string
 	StateRoot   string
+	AdoptDir    string
 	Resolver    registry.Resolver
 	RepoFactory func(dir, keyPath string) project.RepoLike
 }
