@@ -17,7 +17,8 @@ external: [url]
 # leaves its logs out of the data directory, the image's default HOME.
 health: ["CMD-SHELL", "HOME=/tmp mongosh --nodb --quiet --norc --eval 'const e = process.env; const d = connect(\"mongodb://\" + encodeURIComponent(e.MONGO_INITDB_ROOT_USERNAME) + \":\" + encodeURIComponent(e.MONGO_INITDB_ROOT_PASSWORD) + \"@127.0.0.1:27017/admin?serverSelectionTimeoutMS=3000\"); if (d.adminCommand({getCmdLineOpts: 1}).parsed.security?.authorization !== \"enabled\") quit(1)'"]
 # The tools read a password only from argv or a --config file. A JSON string is
-# a YAML one that keeps every character of the password; stdin is the archive.
+# a YAML one that keeps every character of the password. mongosh stays off
+# stdin, which carries the archive to mongorestore.
 dump_command:
   - |
     umask 077; f=$(mktemp) || exit 1; trap 'rm -f "$f"' EXIT
