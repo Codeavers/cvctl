@@ -76,8 +76,8 @@ requires `integrity_check` to print exactly `ok`.
 ## Disaster recovery and restore
 
 With off-site backups (`CVCTL_STORAGE=s3`), rebuilding an instance on a new host only needs the host
-bundle (`cvctl secrets export --host`): import it with `cvctl secrets import <bundle>`, run
-`cvctl init` (it reuses the imported `host.env` and its S3 storage), then
+bundle (`cvctl secrets export --host`). The order the disaster-recovery e2e runs is: `cvctl init`
+with S3 storage (`CVCTL_STORAGE=s3`), `cvctl secrets import --force <bundle>`, start the agent, then
 `cvctl project restore <inst>`, which fails with `E_RESTORE_LOCAL_STORAGE` without S3 storage.
 `cvctl.env`, `app.env` and the deploy key are recovered automatically from the latest off-site env
 backup (or pick an older one with `--env-snapshot <id>`). If `cvctl.env` already exists locally, those files are kept as is
