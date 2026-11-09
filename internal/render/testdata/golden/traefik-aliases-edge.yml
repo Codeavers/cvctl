@@ -1,0 +1,41 @@
+http:
+  middlewares:
+    proj-dev--api--redirect-0:
+      redirectRegex:
+        permanent: true
+        regex: ^https?://[^/]+(.*)$
+        replacement: https://api.example.com${1}
+  routers:
+    proj-dev--api:
+      entryPoints:
+        - websecure
+      middlewares:
+        - cvctl-default@file
+      rule: Host(`api.example.com`)
+      service: proj-dev--api
+      tls:
+        certResolver: le
+    proj-dev--api--alias-0:
+      entryPoints:
+        - websecure
+      middlewares:
+        - cvctl-default@file
+      rule: Host(`api2.example.com`)
+      service: proj-dev--api
+      tls:
+        certResolver: le
+    proj-dev--api--redirect-0:
+      entryPoints:
+        - websecure
+      middlewares:
+        - cvctl-default@file
+        - proj-dev--api--redirect-0
+      rule: Host(`www.api.example.com`)
+      service: noop@internal
+      tls:
+        certResolver: le
+  services:
+    proj-dev--api:
+      loadBalancer:
+        servers:
+          - url: http://proj-dev--api:3000
