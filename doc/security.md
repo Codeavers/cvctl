@@ -11,7 +11,8 @@ see [SECURITY.md](../SECURITY.md); do not open a public issue.
 - **`deployer`** (group `deploy`): the `cvctl-agent` service, which pulls and deploys. Its systemd
   unit sets `NoNewPrivileges=yes`, `ProtectSystem=strict` and `PrivateTmp=yes`, can write only
   `/srv/deploy`, `/var/lib/cvctl` and `/etc/traefik/dynamic`, and gets the `docker` group as a
-  supplementary group. The backup timers run with the same sandbox.
+  supplementary group. The backup timers run with the same sandbox. The sandbox limits the agent's
+  own writes, not the Docker daemon: the `docker` group is root-equivalent on the host.
 - Host config lives in `/etc/cvctl` and `/etc/cvctl/secrets` (`root:deploy`, mode `0750`);
   instances live in `/srv/deploy/<instance>/` (`deployer:deploy`, `/srv/deploy` mode `2750`).
 
@@ -28,13 +29,15 @@ over).
 ## Isolation between instances
 
 Each instance gets its own networks, `<inst>_edge` (Traefik) and `<inst>_backup` (WAL-G and the
-backup user `bk-<inst>` with policy `cvctl-bk-<inst>`), so instances cannot reach each other and
-each instance's backups use their own credentials. A local `s3` service gives the app a user
+backup user `bk-<inst>` with policy `cvctl-bk-<inst>`), so instances cannot reach each other.
+An instance without its own backup keys uses the host's, and with S3 storage one without its own
+credentials (`--ext backup.*`, only at `project add`) uses the host's, so any instance can delete
+its backups; `cvctl status` warns in both cases. A local `s3` service gives the app a user
 scoped to its buckets, never the silo root keys (see [data.md](data.md#s3-buckets)).
 
 ## Secrets
 
-- Secret values never go into argv, logs or error messages.
+- cvctl never puts secret values into argv, logs or error messages.
 - `app.env` and the rendered files are written with mode `0640`.
 - The secrets bundle is age-encrypted, written with mode `0600`, and its plaintext only lives in
   memory (see [backups.md](backups.md#secrets-bundle)).
@@ -42,8 +45,8 @@ scoped to its buckets, never the silo root keys (see [data.md](data.md#s3-bucket
 - `project add --env-file` prints the keys it used and ignored, never their values.
 - The publish token goes only to the registry host of the ref.
 - Registry logins other than the token host are pruned by the agent on start.
-- `--ext` values land in the shell history and the process list; prefer the interactive prompt for
-  keys on a shared host.
+- `--ext` and `project add --set` values land in the shell history and the process list; prefer the
+  interactive prompt or `--env-file` for secrets on a shared host.
 - Backups are encrypted: env files with the host restic key, WAL-G archives with a libsodium key.
 
 ## Traefik without the Docker socket
@@ -62,7 +65,7 @@ can carry tokens. See [domains.md](domains.md#traefik).
 - UFW (`FIREWALL_MANAGE`): deny incoming, allow outgoing, allow the SSH ports and, in `edge` mode,
   80 and 443. If the SSH port cannot be determined it refuses to enable the firewall
   (`E_FIREWALL_FAILED`). Without `ufw` the firewall is not managed: allow SSH, 80 and 443
-  yourself. An adopted service's port opens to Traefik's subnet only.
+  yourself. An adopted service's port is allowed from Traefik's subnet (see [domains.md](domains.md)).
 
 ## Upgrades
 

@@ -9,10 +9,10 @@ Each GitHub release attaches static binaries for `linux/amd64` and `linux/arm64`
 (`cvctl-linux-amd64`, `cvctl-linux-arm64`) and a `sha256sums.txt`:
 
 ```
-curl -fsSLO https://github.com/Codeavers/cvctl/releases/latest/download/cvctl-linux-amd64
-curl -fsSLO https://github.com/Codeavers/cvctl/releases/latest/download/sha256sums.txt
-sha256sum --ignore-missing -c sha256sums.txt
-install -m 0755 cvctl-linux-amd64 ./cvctl
+curl -fsSLO https://github.com/Codeavers/cvctl/releases/latest/download/cvctl-linux-amd64 &&
+  curl -fsSLO https://github.com/Codeavers/cvctl/releases/latest/download/sha256sums.txt &&
+  sha256sum --ignore-missing -c sha256sums.txt &&
+  install -m 0755 cvctl-linux-amd64 ./cvctl
 ```
 
 ### From GHCR
@@ -38,8 +38,10 @@ with auto-revert timer, fail2ban, firewall (UFW), unattended security upgrades, 
 reverse proxy (file provider only, no Docker socket), backup storage (local silo or S3),
 and notifications.
 
+The first run uses the downloaded binary (`sudo ./cvctl init`); after that `cvctl` is on `PATH`.
+
 ```
-sudo cvctl init
+sudo ./cvctl init
 sudo cvctl init --dry-run
 sudo cvctl init --adopt
 sudo cvctl init --non-interactive --json

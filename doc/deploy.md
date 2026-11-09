@@ -81,12 +81,14 @@ Blue-green, per exposed service, in contract order:
 
 1. Compose scales it to 2 (the old container keeps running and a new one starts with the new
    config).
-2. The new container must pass its health check.
+2. The new container must pass its health check: the HTTP probe of `x-cvctl.health` for the
+   health service, only running with no restarts for the other services.
 3. Traefik's route is pinned to the new container only.
 4. The old one is stopped with its `stop_grace_period` (10s by default) and removed.
 5. The route goes back to the service alias, which now resolves only to the new container.
 
-If the new container is unhealthy it is removed and the old one never stops. Workers, data
+If the new container fails that check it is removed and the old one never stops; a service other
+than the health service that runs but answers HTTP errors still replaces the old one. Workers, data
 services and non-exposed apps are recreated as in `recreate`. The first deploy of an instance is a
 plain `up`. `cvctl history` lists the services swapped blue-green per deploy.
 

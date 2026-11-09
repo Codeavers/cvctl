@@ -8,7 +8,7 @@ A service declares `cvctl.kind` to get a managed data service:
 | --- | --- | --- | --- |
 | `postgres` | 15, 16, 17 | WAL-G with PITR | yes |
 | `postgis` | 16, 17 (Postgres with PostGIS) | same WAL-G backups and PITR as `postgres` | yes |
-| `redis` | 7 | none | yes |
+| `redis` | 7 | none unless `cvctl.backup: volume` | yes |
 | `s3` | S3-compatible (silo when local) | none unless `cvctl.backup: volume` | yes |
 | `sqlite` | no container | dump with restic | no |
 
@@ -30,8 +30,9 @@ store:
     cvctl.uid: "1000"  # optional
 ```
 
-- The app gets `STORE_PATH=/data/store/app.db` and must keep its database at that path: backups read
-  no other file.
+- The service provides `STORE_PATH=/data/store/app.db` (`<cvctl.env>_PATH`); declare it in
+  `env.spec.yml` (`STORE_PATH: { source: service, service: store }`) so it reaches `app.env`. The
+  app must keep its database at that path: backups read no other file.
 - **Owner of the volume**: the uid of `cvctl.uid`, or else the image's `USER` when it is numeric
   (`1000` or `1000:1000`). A name or an empty `USER` requires `cvctl.uid`, and root is rejected
   (`E_SQLITE_UID`). `cvctl.uid` also renders `user: <uid>` on the owner app, so the app runs as that
@@ -52,9 +53,10 @@ How a sqlite database is backed up and restored is in [backups.md](backups.md#sq
 ## S3 buckets
 
 An `s3` service declares its buckets in `x-cvctl.s3.<service>.buckets`, each public or private
-(see [examples/demo](../examples/demo/compose.yml)). The app gets `S3_BUCKET_<B>` per bucket and
-`S3_PUBLIC_URL_<B>` per public bucket, plus `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` and
-`S3_REGION`.
+(see [examples/demo](../examples/demo/compose.yml)). With `cvctl.env: S3` the service provides
+`S3_BUCKET_<B>` per bucket and `S3_PUBLIC_URL_<B>` per public bucket, plus `S3_ENDPOINT`,
+`S3_ACCESS_KEY`, `S3_SECRET_KEY` and `S3_REGION`; another `cvctl.env` prefix changes the names.
+Declare the ones the app needs in `env.spec.yml` with `source: service`.
 
 - **Local (silo)**, for dev and tests: every deploy creates the buckets and a user scoped to them
   (`<service>-app`); the app never receives the silo root keys. Public buckets allow anonymous

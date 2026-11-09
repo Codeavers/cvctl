@@ -51,5 +51,7 @@ process running. `cvctl init` regenerates the routes of adopted services.
 
 `host` is the gateway of Traefik's network, so the process cannot listen on `127.0.0.1` only: `adopt add`
 fails with `E_ADOPT_UNREACHABLE` unless it answers there. `--force` skips that check for a stopped process.
-With `CVCTL_FIREWALL_MANAGE=true` the port opens to Traefik's subnet only. Domains are exclusive: an instance
+With `CVCTL_FIREWALL_MANAGE=true` and `ufw` installed, cvctl allows the port from Traefik's subnet;
+it removes no other rule, and without `ufw` it only warns, so check the effective rules (`ufw status`)
+to keep clients from bypassing Traefik. Domains are exclusive: an instance
 and an adopted service cannot share one. HTTP only; raw TCP or UDP ports stay out.

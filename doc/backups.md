@@ -7,7 +7,8 @@ Backups go to the storage chosen at `cvctl init`: local silo (S3-compatible) on 
 
 Per app the daily timer backs up databases (WAL-G) and the env files (`cvctl.env`, `app.env`,
 deploy key) encrypted with the host restic key; object storage (`s3` services) is not backed up by
-default: set `cvctl.backup: volume` on the service to back it up. Run manual env backups with
+default: set `cvctl.backup: volume` on the service to back up its local volume. External services
+(R2, S3) are never backed up by cvctl; that is the provider's job. Run manual env backups with
 `cvctl backup now <inst> env`.
 
 | Command | What it does |
@@ -75,9 +76,11 @@ requires `integrity_check` to print exactly `ok`.
 ## Disaster recovery and restore
 
 With off-site backups (`CVCTL_STORAGE=s3`), rebuilding an instance on a new host only needs the host
-bundle (`cvctl secrets export --host`) plus `cvctl project restore <inst>`. `cvctl.env`, `app.env`
-and the deploy key are recovered automatically from the latest off-site env backup (or pick an older
-one with `--env-snapshot <id>`). If `cvctl.env` already exists locally, those files are kept as is
+bundle (`cvctl secrets export --host`): import it with `cvctl secrets import <bundle>`, run
+`cvctl init` (it reuses the imported `host.env` and its S3 storage), then
+`cvctl project restore <inst>`, which fails with `E_RESTORE_LOCAL_STORAGE` without S3 storage.
+`cvctl.env`, `app.env` and the deploy key are recovered automatically from the latest off-site env
+backup (or pick an older one with `--env-snapshot <id>`). If `cvctl.env` already exists locally, those files are kept as is
 and `--env-snapshot` is rejected (`E_USAGE_ENV_SNAPSHOT`).
 
 `cvctl project restore` clones the infra repository, restores every data service from its latest
@@ -103,13 +106,14 @@ when the secrets bundle names an older one (it warns). Re-run `cvctl secrets exp
 ## Secrets bundle
 
 `cvctl secrets` backs up or restores host and instance secrets as an age-encrypted bundle (`0600`).
-Plaintext only lives in memory.
+Plaintext only lives in memory. `-o -` writes the bundle ASCII-armored to stdout; the shell creates
+the redirected file, hence the `umask` and `set -C` (no overwrite) below.
 
 ```
 sudo cvctl secrets export -o secrets.age
 sudo cvctl secrets export --instance demo-prod -o demo-prod.age
 sudo cvctl secrets export --host -o host.age
-sudo cvctl secrets export -o - > secrets.age.txt
+(umask 077; set -C; sudo cvctl secrets export -o - > secrets.age.txt)
 
 sudo cvctl secrets import secrets.age
 sudo cvctl secrets import --force secrets.age

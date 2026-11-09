@@ -82,8 +82,9 @@ Steps a release needs beyond `cvctl upgrade`. The full list of changes is in
 
 ### Upgrading to v0.8.0
 
-`s3` services stop being backed up unless the contract sets `cvctl.backup: volume`. The old restic
-repository `<bucket>/<host>/<inst>/<svc>` is no longer used and can be deleted by hand.
+`s3` services stop being backed up unless the contract sets `cvctl.backup: volume`. For a service
+without it, its restic repository `<bucket>/<host>/<inst>/<svc>` (with any `r<N>` under it) is no
+longer used and can be deleted by hand; with `volume` it stays in use, so keep it.
 
 ### Upgrading a host to v0.7
 

@@ -40,7 +40,7 @@ cvctl project add oci://ghcr.io/<org>/<repo>-infra --env dev
 ```
 
 `project add` takes the repository without a tag or digest: the instance follows `develop` in dev
-and `main` in prod, the same tags `publish` pushes.
+and `main` in prod, or the tag given with `--tag` (dev only); publish the contract under that tag.
 
 `publish` runs the `lint` checks, then pushes `compose.yml`, `env.spec.yml` and, if present,
 `deploy/prod.env` (as `prod.env`) and prints the digest (`--json`: `{"ref":...,"digest":...}`).
@@ -68,9 +68,9 @@ It writes, atomically and with mode `0640`:
 - `compose.cvctl.yml`: override file wiring data services, limits, networks and the route aliases
   (routes themselves come from the Traefik file provider, see `traefik.yml`);
 - `traefik.yml`: routes, only when some service is exposed;
-- `app.env`: resolved variables from `env.spec.yml`, sorted. Existing values
-  (including ones set with `cvctl set-env`) and generated secrets are preserved,
-  so re-running is idempotent.
+- `app.env`: resolved variables from `env.spec.yml`, sorted. `random` and `prompt` values already
+  set (including with `cvctl set-env`) are kept; `service`, `fixed` and `template` values are
+  recomputed from the contract on every render.
 
 Variables of source `prompt` without a default are not an error: they are
 reported as `missing` together with a hint, and the render still succeeds. Set the value with
