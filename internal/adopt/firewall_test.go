@@ -26,6 +26,7 @@ ufw deny from 10.203.0.0/24 to any port 5000 proto tcp
 ufw allow out from 10.203.0.0/24 to any port 6000 proto tcp
 ufw allow in on eth0 from 10.203.0.0/24 to any port 7000 proto tcp
 ufw allow from 10.203.0.0/24 to 10.203.0.1 port 8000 proto tcp
+ufw allow from 10.0.0.0/24 port 1234 to any port 9090 proto tcp
 `
 	got := ParseAdded([]byte(out))
 	want := []Rule{RuleFor("10.203.0.0/24", 9090), RuleFor("172.30.4.0/22", 3000)}

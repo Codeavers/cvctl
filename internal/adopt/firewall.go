@@ -62,7 +62,7 @@ func ParseAdded(out []byte) []Rule {
 			}
 			switch f[i] {
 			case "from", "to", "port", "proto":
-				if i+1 >= len(f) {
+				if _, dup := kv[f[i]]; dup || i+1 >= len(f) {
 					ok = false
 					break
 				}
