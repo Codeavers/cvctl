@@ -27,6 +27,9 @@ type projectListItem struct {
 	Domains  map[string]string `json:"domains"`
 	Data     map[string]string `json:"data"`
 	Paused   bool              `json:"paused"`
+	// hosts are every domain the instance answers for, aliases and redirect
+	// sources included; adopt checks them, the list does not print them.
+	hosts []string
 	// Error is set when the contract cannot be read; the other fields are then partial.
 	Error string `json:"error,omitempty"`
 }
@@ -104,6 +107,9 @@ func (e *OpsEnv) projectListItem(inst string) projectListItem {
 	}
 	for svc, host := range d.Domains {
 		it.Domains[svc] = host
+	}
+	for host := range d.Hosts() {
+		it.hosts = append(it.hosts, host)
 	}
 	for _, ds := range p.Data {
 		mode := d.Services[ds.Name].Mode

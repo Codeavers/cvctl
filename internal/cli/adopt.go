@@ -104,10 +104,8 @@ func (e *OpsEnv) adoptConflict(s adopt.Service, existing []adopt.Service) error 
 				Message: fmt.Sprintf("cannot read the domains of %s: %s", inst, it.Error),
 				Hint:    "fix the instance first: its domain could clash with this one"}
 		}
-		for _, host := range it.Domains {
-			if host == s.Domain {
-				return inUse(inst)
-			}
+		if slices.Contains(it.hosts, s.Domain) {
+			return inUse(inst)
 		}
 	}
 	return nil

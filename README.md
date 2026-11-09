@@ -63,6 +63,27 @@ sudo cvctl project add oci://ghcr.io/<org>/<repo>-infra --env dev \
   --env-file /srv/deploy/<project>/dev/.env --domain web=app.example.com
 ```
 
+## Domain aliases and redirects
+
+`--domain` can repeat for one service: the first is its primary domain (`{svc.domain}` in
+`env.spec.yml`) and the rest are aliases that serve the same app. `--redirect source=destination`
+answers `source` with a 301 to the same path and query on `destination`, which must be the primary
+domain or an alias of an exposed service.
+
+```
+sudo cvctl project add oci://ghcr.io/<org>/<repo>-infra --env prod \
+  --domain web=example.com --domain web=app.example.com --redirect www.example.com=example.com
+sudo cvctl project update <inst> --redirect old.example.com=example.com
+sudo cvctl project update <inst> --redirect old.example.com=
+```
+
+In `project update`, `--domain` for a service replaces its primary domain and all its aliases;
+`--redirect source=` removes that redirect. Every domain gets its own Traefik router and
+certificate, so each one needs its DNS pointing at this host; one without it only fails its own
+certificate. A domain belongs to one service only, as primary, alias or redirect source
+(`E_DECISION_INVALID`, `E_USAGE_REDIRECT`), and never to an adopted service (`E_ADOPT_DOMAIN_IN_USE`).
+They are stored as `CVCTL_ALIASES_<SVC>` and `CVCTL_REDIRECT_<SVC>` in `cvctl.env`.
+
 ## project list
 
 `cvctl project list [--json]` reads each instance's `cvctl.env` and installed contract (no network,
@@ -74,7 +95,8 @@ whether it is paused. An instance whose contract cannot be read is listed with t
 
 `cvctl plan [--json]` describes what this binary would do for each instance, from its `cvctl.env`,
 installed contract and embedded `kinds` catalog (read-only, no network, no docker). Per instance:
-`env`, `strategy`, `apps` (image without digest, exposed port, domain), `data` (`kind`, `version`,
+`env`, `strategy`, `apps` (image without digest, exposed port, domain, and `aliases` and
+`redirects` when set), `data` (`kind`, `version`,
 `mode`, `backup`, buckets), `health`, hook counts and `issues`, the sorted codes of the contract and
 decision checks a deploy would fail on (codes only, omitted when empty; app digests are not required,
 because a deploy gets them from the desired state). The document has a `schema` number, sorted
@@ -247,7 +269,7 @@ process running.
 `host` is the gateway of Traefik's network, so the process cannot listen on `127.0.0.1` only: `adopt add`
 fails with `E_ADOPT_UNREACHABLE` unless it answers there. `--force` skips that check for a stopped process.
 With `CVCTL_FIREWALL_MANAGE=true` the port opens to Traefik's subnet only. Domains are exclusive: an instance
-and an adopted service cannot share one. HTTP only; raw TCP or UDP ports stay out.
+and an adopted service cannot share one, counting the instance's aliases and redirect sources. HTTP only; raw TCP or UDP ports stay out.
 
 ## lint
 

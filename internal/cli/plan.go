@@ -28,6 +28,10 @@ type planApp struct {
 	Image  string `json:"image"`
 	Expose int    `json:"expose"`
 	Domain string `json:"domain"`
+	// Aliases and Redirects are omitted when empty so the plan of an instance
+	// without them stays what older versions print.
+	Aliases   []string `json:"aliases,omitempty"`
+	Redirects []string `json:"redirects,omitempty"`
 }
 
 type planData struct {
@@ -135,7 +139,11 @@ func (e *OpsEnv) planInstance(inst string) planInstance {
 	pi.Hooks = map[string]int{"pre_deploy": len(p.X.Hooks.PreDeploy), "post_deploy": len(p.X.Hooks.PostDeploy)}
 	pi.Apps = map[string]planApp{}
 	for _, a := range p.Apps {
-		pi.Apps[a.Name] = planApp{Image: stripDigest(a.Image), Expose: a.ExposePort, Domain: d.Domains[a.Name]}
+		pa := planApp{Image: stripDigest(a.Image), Expose: a.ExposePort, Domain: d.Domains[a.Name], Aliases: d.Aliases[a.Name]}
+		for _, r := range d.Redirects[a.Name] {
+			pa.Redirects = append(pa.Redirects, r.From+"="+r.To)
+		}
+		pi.Apps[a.Name] = pa
 	}
 	pi.Data = map[string]planData{}
 	for _, ds := range p.Data {

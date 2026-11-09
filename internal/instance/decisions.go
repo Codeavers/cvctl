@@ -802,16 +802,16 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 			add("E_DECISION_INVALID", ds.Name, fmt.Sprintf("mode %q is not valid", s.Mode), "use local or external")
 		}
 	}
-	is = append(is, checkRoutes(d, p)...)
+	is = append(is, CheckRoutes(d, p)...)
 	output.SortIssues(is)
 	return is
 }
 
-// checkRoutes rejects aliases and redirects Traefik could not route on its
+// CheckRoutes rejects aliases and redirects Traefik could not route on its
 // own: two routers for one host make it pick one, and a redirect to a host
 // that redirects again loops. A primary domain shared by two services predates
 // aliases and is left as it was.
-func checkRoutes(d *Decisions, p *contract.Project) []output.Issue {
+func CheckRoutes(d *Decisions, p *contract.Project) []output.Issue {
 	var is []output.Issue
 	add := func(svc, msg, hint string) {
 		is = append(is, output.Issue{Code: "E_DECISION_INVALID", Service: svc, Message: msg, Hint: hint})
