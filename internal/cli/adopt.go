@@ -228,6 +228,9 @@ func newAdoptAddCmd() *cobra.Command {
 			if err := e.syncAdopted(); err != nil {
 				return rollback(err)
 			}
+			if !e.Host.FirewallManage {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: CVCTL_FIREWALL_MANAGE is not true; port %d may be reachable from outside, not only by Traefik\n", s.Port())
+			}
 			printerFrom(cmd).Result(s, func(w io.Writer) {
 				fmt.Fprintf(w, "adopted %s: %s -> %s\n", s.Name, s.Domain, s.Target)
 			})

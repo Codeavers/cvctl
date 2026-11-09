@@ -564,3 +564,20 @@ func TestAdoptRmDeletesOnlyRecordedRule(t *testing.T) {
 		})
 	}
 }
+
+func TestAdoptAddWarnsWhenFirewallNotManaged(t *testing.T) {
+	cases := []struct {
+		firewall bool
+		warn     bool
+	}{{false, true}, {true, false}}
+	for _, c := range cases {
+		setupAdopt(t, c.firewall)
+		code, out, errb := run(t, append(addCockpit, "--json")...)
+		if code != 0 {
+			t.Fatalf("code %d: %s %s", code, out, errb)
+		}
+		if got := strings.Contains(errb, "CVCTL_FIREWALL_MANAGE"); got != c.warn {
+			t.Fatalf("firewall=%v: stderr %q", c.firewall, errb)
+		}
+	}
+}
