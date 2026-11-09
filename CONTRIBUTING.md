@@ -1,5 +1,7 @@
 # Contributing
 
+Participation follows the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Development
 
 - Go version from `go.mod`. No cgo; the binary is static.
@@ -13,6 +15,8 @@
 ## Pull requests
 
 - One topic per pull request, with tests for the behaviour it changes.
+- Behaviour changes update the reference in [doc/](doc/README.md) and the `Unreleased` section
+  of [CHANGELOG.md](CHANGELOG.md).
 - Commit messages follow Conventional Commits (`feat(deploy): ...`, `fix(init): ...`).
 - Code comments explain why or a constraint, not what the code does.
 - Never put secret values in argv, logs or error messages; tests should assert it.
