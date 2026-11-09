@@ -434,7 +434,7 @@ func TestCatalogLoadsEngines(t *testing.T) {
 // dump_command, restore_command and restore_check run under docker exec, where
 // an expanded -p"$X" is the tool's argv and shows in ps.
 func TestEngineSecretsNotInCommand(t *testing.T) {
-	argvSecret := regexp.MustCompile(`(^|\s)(-p|--password)[=\s"']*\$`)
+	argvSecret := regexp.MustCompile(`(^|[\s"'])(-p|--password)[=\s"']*\$`)
 	for name, k := range mustLoad(t) {
 		if k.Backup != "dump" || k.Helper != "" {
 			continue
