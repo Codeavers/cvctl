@@ -486,6 +486,10 @@ func TestMongoDumpPasswordStaysOutOfArgv(t *testing.T) {
 				t.Errorf("%q lacks %q", s, want)
 			}
 		}
+		// Command substitution strips trailing newlines from the password.
+		if regexp.MustCompile(`\$\([^)]*MONGO_INITDB_ROOT_PASSWORD`).MatchString(s) {
+			t.Errorf("%q reads the password through a command substitution", s)
+		}
 	}
 }
 
