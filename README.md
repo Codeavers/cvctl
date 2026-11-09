@@ -246,8 +246,13 @@ process running.
 
 `host` is the gateway of Traefik's network, so the process cannot listen on `127.0.0.1` only: `adopt add`
 fails with `E_ADOPT_UNREACHABLE` unless it answers there. `--force` skips that check for a stopped process.
-With `CVCTL_FIREWALL_MANAGE=true` the port opens to Traefik's subnet only. Domains are exclusive: an instance
-and an adopted service cannot share one. HTTP only; raw TCP or UDP ports stay out.
+With `CVCTL_FIREWALL_MANAGE=true` the port opens to Traefik's subnet only: cvctl records the ufw rule it adds,
+`cvctl init` moves it when the subnet changes, and `adopt rm` deletes only that rule, so a rule you created
+yourself stays. Otherwise `adopt add` warns that the port may be reachable from outside. Docker publishes `-p`
+ports past ufw, so publish another stack's backend on the gateway address (`-p 10.203.0.1:3000:3000` with the
+default subnet), not on `0.0.0.0`. For Cockpit use `--target https://host:9090 --insecure-tls`: with an http
+target Cockpit rejects the WebSocket Origin. Domains are exclusive: an instance and an adopted service cannot
+share one. HTTP only; raw TCP or UDP ports stay out.
 
 ## lint
 
