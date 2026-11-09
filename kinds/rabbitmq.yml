@@ -14,7 +14,8 @@ container_env:
   # enough: the management UI and the metrics listen on loopback only.
   RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: '-rabbitmq_management tcp_config [{ip,"127.0.0.1"},{port,15672}] -rabbitmq_prometheus tcp_config [{ip,"127.0.0.1"},{port,15692}]'
 env:
-  URL: "amqp://{user}:{password}@{host}:{port}/"
+  # An empty path is the empty vhost to clients that follow the URI spec.
+  URL: "amqp://{user}:{password}@{host}:{port}/%2F"
 backup: none
 external: [url]
 # rabbitmq-diagnostics runs as root under docker exec: early in the boot it
