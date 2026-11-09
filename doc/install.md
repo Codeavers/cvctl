@@ -35,7 +35,7 @@ Prepares a Linux host with systemd. On Ubuntu and Debian it installs and hardens
 elsewhere install Docker yourself and cvctl skips what the host lacks. It adopts an existing
 server to the desired state idempotently: packages, docker daemon, accounts (`deployer` user), SSH hardening
 with auto-revert timer, fail2ban, firewall (UFW), unattended security upgrades, Traefik v3
-reverse proxy (file provider only, no Docker socket), backup storage (local MinIO or S3),
+reverse proxy (file provider only, no Docker socket), backup storage (local silo or S3),
 and notifications.
 
 ```
@@ -72,7 +72,7 @@ Re-running init never asks again for a key that already has a value.
 | `SSH_MANAGE` | always | `true` / `false`: let cvctl manage SSH hardening |
 | `FIREWALL_MANAGE` | always | `true` / `false`: let cvctl manage the firewall |
 | `ACME_EMAIL`, `ACME_CHALLENGE` | `edge` | Let's Encrypt email; challenge `http`, `route53` or `cloudflare` |
-| `STORAGE` | always | backup storage: `local` (MinIO on the host) or `s3` |
+| `STORAGE` | always | backup storage: `local` (silo, S3-compatible, on the host) or `s3` |
 | `S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION` | `s3` | off-site backup bucket (secrets `s3_access_key`, `s3_secret_key`) |
 | `NOTIFY` | always | `telegram` or `none` |
 | `TELEGRAM_CHAT_ID`, `TELEGRAM_THREAD_ID` | `telegram` | see [Notifications](#notifications) |

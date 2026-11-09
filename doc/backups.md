@@ -1,6 +1,6 @@
 # Backups and recovery
 
-Backups go to the storage chosen at `cvctl init`: local MinIO on the host or an S3 bucket
+Backups go to the storage chosen at `cvctl init`: local silo (S3-compatible) on the host or an S3 bucket
 (`CVCTL_STORAGE=s3`, off-site). Databases use WAL-G; dumps, volumes and env files use restic.
 
 ## What is backed up
