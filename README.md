@@ -309,6 +309,8 @@ with its routines and events; `mongodb` dumps every database but restores none o
 writes is not a point-in-time copy, and documents written while it runs may or may not be in it.
 
 `valkey`, `rabbitmq` and `nats` are not backed up unless the service sets `cvctl.backup: volume`.
+That copy is taken while the engine runs: for `rabbitmq`, whose docs require a stopped node to back
+up messages, it may be inconsistent and lose messages even when `backup verify` passes.
 `rabbitmq` uses its management image, but the UI and the metrics listen on loopback only: reach them
 with `docker exec`, not from another container. `nats` authenticates with a token, so its URL has no
 user; the service's password must parse as a string in a nats config, which a generated one does.
