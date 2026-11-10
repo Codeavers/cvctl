@@ -72,6 +72,39 @@ var runAgentRegistryLogin = func(ctx context.Context, run sys.Runner, hcfg *host
 	}
 }
 
+// hostReloader re-reads host.env and the secrets for each agent tick and
+// applies them to the deployer, so a change made by cvctl init reaches the next
+// deploy without restarting the agent. The notifier is rebuilt and the
+// registry login redone only when what they read changed.
+func hostReloader(ctx context.Context, fsys sys.FS, dir string, run sys.Runner, deployer *deploy.Deployer, notifOut, logOut io.Writer) func() (*hostcfg.Config, *hostcfg.Secrets, notify.Notifier, error) {
+	return func() (*hostcfg.Config, *hostcfg.Secrets, notify.Notifier, error) {
+		hcfg, secrets, err := hostcfg.Load(fsys, dir)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if !hcfg.Equal(deployer.Host) || !secrets.Equal(deployer.Secrets) {
+			login := registryLogin(deployer.Host, deployer.Secrets) != registryLogin(hcfg, secrets)
+			deploy.Rewire(deployer, run, hcfg, secrets)
+			deployer.Notify = notify.FromHostLogged(hcfg, secrets, notifOut)
+			if login {
+				runAgentRegistryLogin(ctx, run, hcfg, secrets, deployer.Notify, logOut)
+			}
+		}
+		return deployer.Host, deployer.Secrets, deployer.Notify, nil
+	}
+}
+
+func registryLogin(hcfg *hostcfg.Config, secrets *hostcfg.Secrets) [3]string {
+	var r [3]string
+	if hcfg != nil {
+		r[0], r[1] = hcfg.TokenHost(), hcfg.RegistryUser
+	}
+	if secrets != nil {
+		r[2], _ = secrets.Get("registry_token")
+	}
+	return r
+}
+
 func newAgentCmd() *cobra.Command {
 	var (
 		once     bool
@@ -142,6 +175,7 @@ func newAgentCmd() *cobra.Command {
 				StateRoot:  "/var/lib/cvctl",
 				FS:         fsys,
 				Catalog:    cat,
+				ReloadHost: hostReloader(ctx, fsys, hostCfgDir, run, deployer, cmd.ErrOrStderr(), logOut),
 			}
 
 			if err := agent.Run(ctx, cfg); err != nil {

@@ -122,6 +122,14 @@ func Wire(d *Deployer, run sys.Runner) {
 	}
 }
 
+// Rewire swaps the host config of a deployer built by Wire and rebuilds what
+// Wire derives from it (allowed registries, backup target, registry auth).
+func Rewire(d *Deployer, run sys.Runner, cfg *hostcfg.Config, sec *hostcfg.Secrets) {
+	d.Host, d.Secrets = cfg, sec
+	d.Backup, d.Contracts, d.Labels, d.Restore = nil, nil, nil, nil
+	Wire(d, run)
+}
+
 // ComposeProject is the compose project of an instance with the default
 // override and app env paths.
 func (d *Deployer) ComposeProject(run sys.Runner, inst string) *compose.Project {
