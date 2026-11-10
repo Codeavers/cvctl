@@ -30,6 +30,7 @@ type instanceStatusItem struct {
 	Status   string `json:"status"`
 	Commit   string `json:"commit"`
 	Age      string `json:"age"`
+	Routes   string `json:"routes,omitempty"`
 	Kind     string `json:"kind,omitempty"`
 }
 
@@ -139,6 +140,11 @@ func newStatusCmd() *cobra.Command {
 			}
 
 			warnings := make([]string, 0)
+			routes, routeWarnings := e.checkRoutes(cmd.Context(), instances)
+			for i := range items {
+				items[i].Routes = routes[items[i].Instance]
+			}
+			warnings = append(warnings, routeWarnings...)
 			if len(args) == 0 {
 				// Adopted services only join the output: backups and S3 warnings read instances.
 				adopted, err := adopt.Load(e.fs(), e.adoptDir())
@@ -146,7 +152,7 @@ func newStatusCmd() *cobra.Command {
 					warnings = append(warnings, errText(err))
 				}
 				for _, s := range adopted {
-					items = append(items, instanceStatusItem{Instance: s.Name, Env: "-", Status: "ADOPTED", Commit: "-", Age: "-", Kind: "adopted"})
+					items = append(items, instanceStatusItem{Instance: s.Name, Env: "-", Status: "ADOPTED", Commit: "-", Age: "-", Routes: routesNone, Kind: "adopted"})
 				}
 			}
 			if (e.Host != nil && e.Host.Storage == "local") || os.Getenv("CVCTL_STORAGE") == "local" {
@@ -169,13 +175,17 @@ func newStatusCmd() *cobra.Command {
 					fmt.Fprintf(w, "warning: %s\n", warn)
 				}
 				tw := tabwriter.NewWriter(w, 0, 8, 2, ' ', 0)
-				fmt.Fprintln(tw, "INSTANCE\tENV\tSTRATEGY\tSTATUS\tCOMMIT\tAGE")
+				fmt.Fprintln(tw, "INSTANCE\tENV\tSTRATEGY\tSTATUS\tROUTES\tCOMMIT\tAGE")
 				for _, it := range items {
 					strategy := it.Strategy
 					if strategy == "" {
 						strategy = "-"
 					}
-					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", it.Instance, it.Env, strategy, it.Status, it.Commit, it.Age)
+					routes := it.Routes
+					if routes == "" {
+						routes = routesNone
+					}
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", it.Instance, it.Env, strategy, it.Status, routes, it.Commit, it.Age)
 				}
 				tw.Flush()
 			})

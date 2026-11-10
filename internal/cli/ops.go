@@ -45,6 +45,8 @@ type OpsEnv struct {
 	AdoptDir    string
 	Resolver    registry.Resolver
 	RepoFactory func(dir, keyPath string) project.RepoLike
+	// ProbeRoute replaces the HTTP probe of cvctl status; nil uses probeRoute.
+	ProbeRoute RouteProber
 }
 
 func (e *OpsEnv) deployRoot() string {
