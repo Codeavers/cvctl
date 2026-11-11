@@ -1,0 +1,24 @@
+name: valkey
+image: valkey/valkey:{version}-alpine
+versions: ["8", "9"]
+default_version: "8"
+port: 6379
+volume_path: /data
+container_env:
+  VALKEY_PASSWORD: "{password}"
+# valkey has no password variable; reading the config from stdin keeps it out
+# of argv and of any file.
+command:
+  - sh
+  - -c
+  - |
+    exec docker-entrypoint.sh valkey-server - --appendonly yes <<EOF
+    requirepass "$(printf %s "$VALKEY_PASSWORD" | sed 's/[\\"]/\\&/g')"
+    EOF
+env:
+  URL: "redis://:{password}@{host}:{port}/0"
+backup: none
+external: [url]
+# valkey-cli exits 0 on an error reply, so only the reply proves the password.
+health: ["CMD-SHELL", "REDISCLI_AUTH=\"$VALKEY_PASSWORD\" valkey-cli ping | grep -q PONG"]
+cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]

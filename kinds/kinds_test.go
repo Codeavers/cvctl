@@ -3,6 +3,9 @@ package kinds
 import (
 	"errors"
 	"reflect"
+	"regexp"
+	"slices"
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -390,5 +393,147 @@ func TestNoContainerRequiresHelperAndNoExternal(t *testing.T) {
 	}
 	if _, err := LoadFS(fstest.MapFS{"a.yml": {Data: []byte(base + "helper: h:1\nenv:\n  PATH: /data/{host}/x\n")}}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCatalogLoadsEngines(t *testing.T) {
+	c := mustLoad(t)
+	creds := Credentials{User: "app", Password: "p@ss", DB: "appdb"}
+	for name, want := range map[string]struct {
+		image, defaultVersion, backup, url string
+		versions                           []string
+	}{
+		"mysql":    {"mysql:8.4", "8.4", "dump", "mysql://app:p%40ss@h:3306/appdb", []string{"8.4", "9"}},
+		"mariadb":  {"mariadb:11.4", "11.4", "dump", "mysql://app:p%40ss@h:3306/appdb", []string{"10.11", "11.4"}},
+		"mongodb":  {"mongo:7", "7", "dump", "mongodb://app:p%40ss@h:27017/appdb?authSource=admin", []string{"7", "8"}},
+		"valkey":   {"valkey/valkey:8-alpine", "8", "none", "redis://:p%40ss@h:6379/0", []string{"8", "9"}},
+		"rabbitmq": {"rabbitmq:4-management-alpine", "4", "none", "amqp://app:p%40ss@h:5672/%2F", []string{"4"}},
+		"nats":     {"nats:2-alpine", "2", "none", "nats://p%40ss@h:4222", []string{"2"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			k, ok := c[name]
+			if !ok {
+				t.Fatalf("missing kind %s", name)
+			}
+			if !reflect.DeepEqual(k.Versions, want.versions) || k.DefaultVersion != want.defaultVersion || k.Backup != want.backup {
+				t.Errorf("kind: %+v", k)
+			}
+			if img, err := k.ImageFor(k.DefaultVersion); err != nil || img != want.image {
+				t.Errorf("img=%q err=%v", img, err)
+			}
+			if got := k.LocalVars("X", "h", creds); len(got) != 1 || got["X_URL"] != want.url {
+				t.Errorf("vars: %v", got)
+			}
+			if !reflect.DeepEqual(k.External, []string{"url"}) {
+				t.Errorf("external: %v", k.External)
+			}
+		})
+	}
+}
+
+// dump_command, restore_command and restore_check run under docker exec, where
+// an expanded -p"$X" is the tool's argv and shows in ps.
+func TestEngineSecretsNotInCommand(t *testing.T) {
+	argvSecret := regexp.MustCompile(`(^|[\s"'])(-p|--password)[=\s"']*\$`)
+	for name, k := range mustLoad(t) {
+		if k.Backup != "dump" || k.Helper != "" {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			for _, part := range [][]string{k.Command, k.Health, k.DumpCommand, k.RestoreCommand, {k.RestoreCheck}} {
+				s := strings.Join(part, " ")
+				if strings.Contains(s, "{password}") || strings.Contains(s, "{app_password}") {
+					t.Errorf("password placeholder in %q", s)
+				}
+				if argvSecret.MatchString(s) {
+					t.Errorf("password in argv: %q", s)
+				}
+			}
+			if strings.TrimSpace(k.RestoreCheck) == "" {
+				t.Error("no restore_check")
+			}
+		})
+	}
+}
+
+// The image's init runs a temporary server on the socket only: a socket check
+// would pass there, and the restore would load into a server about to stop.
+func TestMySQLHealthWaitsForTCP(t *testing.T) {
+	c := mustLoad(t)
+	for _, name := range []string{"mysql", "mariadb"} {
+		if s := strings.Join(c[name].Health, " "); !strings.Contains(s, "--protocol=tcp") {
+			t.Errorf("%s health: %q", name, s)
+		}
+	}
+}
+
+// The image's init runs a temporary mongod without --auth on the same loopback
+// port, so only the flag tells it from the real server.
+func TestMongoHealthRequiresAuthorization(t *testing.T) {
+	if s := strings.Join(mustLoad(t)["mongodb"].Health, " "); !strings.Contains(s, "authorization") {
+		t.Errorf("health: %q", s)
+	}
+}
+
+// mongodump has no password variable, so its secret goes through a file that
+// must not outlive the command.
+func TestMongoDumpPasswordStaysOutOfArgv(t *testing.T) {
+	k := mustLoad(t)["mongodb"]
+	for _, cmd := range [][]string{k.DumpCommand, k.RestoreCommand} {
+		s := strings.Join(cmd, " ")
+		for _, want := range []string{"umask 077", "--config", "rm -f"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("%q lacks %q", s, want)
+			}
+		}
+		// Command substitution strips trailing newlines from the password.
+		if regexp.MustCompile(`\$\([^)]*MONGO_INITDB_ROOT_PASSWORD`).MatchString(s) {
+			t.Errorf("%q reads the password through a command substitution", s)
+		}
+	}
+}
+
+// These kinds pass a CMD health straight to docker, which would put a secret in
+// the container's config; they read it from their environment instead.
+func TestQueueKindsKeepSecretsOutOfArgv(t *testing.T) {
+	c := mustLoad(t)
+	for _, name := range []string{"valkey", "rabbitmq", "nats"} {
+		k := c[name]
+		if s := strings.Join(append(slices.Clone(k.Command), k.Health...), " "); strings.Contains(s, "{password}") {
+			t.Errorf("%s: password in %q", name, s)
+		}
+		if len(k.ContainerEnv) == 0 {
+			t.Errorf("%s: no credentials in the environment", name)
+		}
+	}
+}
+
+func TestRabbitmqManagementStaysOnLoopback(t *testing.T) {
+	args := mustLoad(t)["rabbitmq"].ContainerEnv["RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS"]
+	for _, want := range []string{"rabbitmq_management", "rabbitmq_prometheus"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("%s is not bound: %q", want, args)
+		}
+	}
+}
+
+// The entrypoints walk the volume as root under set -e before dropping to the
+// engine's user, and a populated volume has 0700 directories: without these the
+// second boot dies, though the first, on an empty volume, passes.
+func TestEngineCapsCoverPopulatedVolume(t *testing.T) {
+	c := mustLoad(t)
+	want := c["postgres"].CapAdd
+	for _, name := range []string{"mysql", "mariadb", "mongodb", "valkey", "rabbitmq"} {
+		if !reflect.DeepEqual(c[name].CapAdd, want) {
+			t.Errorf("%s cap_add = %v, want %v", name, c[name].CapAdd, want)
+		}
+	}
+}
+
+// The default node name holds the hostname, a container id, and names the data
+// directory: a recreated container would start empty beside the old data.
+func TestRabbitmqNodeNameIsFixed(t *testing.T) {
+	if got := mustLoad(t)["rabbitmq"].ContainerEnv["RABBITMQ_NODENAME"]; got != "rabbit@localhost" {
+		t.Errorf("RABBITMQ_NODENAME = %q", got)
 	}
 }

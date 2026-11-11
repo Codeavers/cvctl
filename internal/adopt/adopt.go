@@ -34,6 +34,9 @@ type Service struct {
 	Domain      string `yaml:"domain" json:"domain"`
 	Target      string `yaml:"target" json:"target"`
 	InsecureTLS bool   `yaml:"insecure_tls,omitempty" json:"insecure_tls,omitempty"`
+	// Firewall is nil when cvctl did not add the rule: entries written before
+	// this field existed, firewall not managed, or a rule the operator had.
+	Firewall *Rule `yaml:"firewall,omitempty" json:"firewall,omitempty"`
 }
 
 func usage(code, msg, hint string) error {
@@ -59,6 +62,11 @@ func (s Service) Validate() error {
 	}
 	if s.InsecureTLS && m[1] != "https" {
 		return usage("E_ADOPT_TARGET", "--insecure-tls needs an https target", hint)
+	}
+	if s.Firewall != nil {
+		if err := s.Firewall.Validate(); err != nil {
+			return usage("E_ADOPT_FIREWALL", err.Error(), "fix or remove the firewall record")
+		}
 	}
 	return nil
 }

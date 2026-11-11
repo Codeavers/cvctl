@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -49,7 +50,7 @@ func setupAdopt(t *testing.T, firewall bool) adoptFixture {
 func (f adoptFixture) ufw() []string {
 	var out []string
 	for _, c := range f.run.Calls {
-		if c.Name == "ufw" {
+		if c.Name == "ufw" && !slices.Equal(c.Args, []string{"show", "added"}) {
 			out = append(out, strings.Join(c.Args, " "))
 		}
 	}
@@ -475,6 +476,136 @@ func TestAdoptAddDomainInUseByInstanceAliasOrRedirect(t *testing.T) {
 		code, out, _ := run(t, "adopt", "add", "other", "--domain", "taken.example.com", "--target", "http://host:1", "--json")
 		if code == 0 || errorCode(t, out) != "E_ADOPT_DOMAIN_IN_USE" || !strings.Contains(out, "myapp-dev") {
 			t.Fatalf("%s: code %d: %s", key, code, out)
+		}
+	}
+}
+
+const cockpitRule = "ufw allow from 10.203.0.0/24 to any port 9090 proto tcp\n"
+
+func hasDelete(calls []string) bool {
+	return slices.ContainsFunc(calls, func(c string) bool { return strings.HasPrefix(c, "delete") })
+}
+
+func TestAdoptAddRecordsRule(t *testing.T) {
+	f := setupAdopt(t, true)
+	if code, out, errb := run(t, addCockpit...); code != 0 {
+		t.Fatalf("code %d: %s %s", code, out, errb)
+	}
+	want := adopt.RuleFor("10.203.0.0/24", 9090)
+	if got := f.registered(t); len(got) != 1 || got[0].Firewall == nil || *got[0].Firewall != want {
+		t.Fatalf("registry %+v", got)
+	}
+}
+
+// An operator rule shows up in `ufw show added` or makes `ufw allow` skip; in
+// both cases cvctl must not record it, so neither rm nor a rollback deletes it.
+func TestAdoptLeavesOperatorRule(t *testing.T) {
+	cases := []struct {
+		name  string
+		shown string
+		allow string
+	}{
+		{"listed", cockpitRule, ""},
+		{"allow skips", "", "Skipping adding existing rule\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := setupAdopt(t, true)
+			f.run.OnPrefix("ufw show added", sys.Result{Stdout: []byte(c.shown)})
+			f.run.OnPrefix("ufw allow", sys.Result{Stdout: []byte(c.allow)})
+			if code, out, errb := run(t, addCockpit...); code != 0 {
+				t.Fatalf("code %d: %s %s", code, out, errb)
+			}
+			if got := f.registered(t); len(got) != 1 || got[0].Firewall != nil {
+				t.Fatalf("registry %+v", got)
+			}
+			if code, out, _ := run(t, "adopt", "rm", "cockpit"); code != 0 {
+				t.Fatalf("rm: code %d: %s", code, out)
+			}
+			if hasDelete(f.ufw()) {
+				t.Fatalf("ufw %v", f.ufw())
+			}
+
+			f.breakRoutes(t)
+			if code, _, _ := run(t, addCockpit...); code == 0 {
+				t.Fatal("expected failure")
+			}
+			if hasDelete(f.ufw()) {
+				t.Fatalf("rollback: ufw %v", f.ufw())
+			}
+		})
+	}
+}
+
+func TestAdoptSharedPortKeepsRuleUntilLast(t *testing.T) {
+	f := setupAdopt(t, true)
+	if code, out, _ := run(t, addCockpit...); code != 0 {
+		t.Fatalf("code %d: %s", code, out)
+	}
+	f.run.OnPrefix("ufw show added", sys.Result{Stdout: []byte(cockpitRule)})
+	if code, out, _ := run(t, "adopt", "add", "other", "--domain", "o.example.com", "--target", "http://host:9090"); code != 0 {
+		t.Fatalf("code %d: %s", code, out)
+	}
+	for _, s := range f.registered(t) {
+		if s.Firewall == nil {
+			t.Fatalf("%s did not record the shared cvctl rule", s.Name)
+		}
+	}
+	if code, out, _ := run(t, "adopt", "rm", "cockpit"); code != 0 {
+		t.Fatalf("code %d: %s", code, out)
+	}
+	if hasDelete(f.ufw()) {
+		t.Fatalf("ufw %v", f.ufw())
+	}
+	if code, out, _ := run(t, "adopt", "rm", "other"); code != 0 {
+		t.Fatalf("code %d: %s", code, out)
+	}
+	got := f.ufw()
+	if want := "delete allow from 10.203.0.0/24 to any port 9090 proto tcp"; got[len(got)-1] != want {
+		t.Fatalf("ufw %v", got)
+	}
+}
+
+func TestAdoptRmDeletesOnlyRecordedRule(t *testing.T) {
+	cases := []struct {
+		name   string
+		record *adopt.Rule
+		want   []string
+	}{
+		{"legacy entry", nil, nil},
+		{"old subnet", &adopt.Rule{Subnet: "172.30.4.0/22", Port: 9090, Proto: "tcp"},
+			[]string{"delete allow from 172.30.4.0/22 to any port 9090 proto tcp"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := setupAdopt(t, true)
+			s := adopt.Service{Name: "cockpit", Domain: "server.example.com", Target: "https://host:9090", Firewall: c.record}
+			if err := adopt.Save(sys.NewOSFS(), f.dir, s); err != nil {
+				t.Fatal(err)
+			}
+			if code, out, _ := run(t, "adopt", "rm", "cockpit"); code != 0 {
+				t.Fatalf("code %d: %s", code, out)
+			}
+			if got := f.ufw(); !slices.Equal(got, c.want) {
+				t.Fatalf("ufw %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestAdoptAddWarnsWhenFirewallNotManaged(t *testing.T) {
+	cases := []struct {
+		firewall bool
+		warn     bool
+	}{{false, true}, {true, false}}
+	for _, c := range cases {
+		setupAdopt(t, c.firewall)
+		code, out, errb := run(t, append(addCockpit, "--json")...)
+		if code != 0 {
+			t.Fatalf("code %d: %s %s", code, out, errb)
+		}
+		if got := strings.Contains(errb, "CVCTL_FIREWALL_MANAGE"); got != c.warn {
+			t.Fatalf("firewall=%v: stderr %q", c.firewall, errb)
 		}
 	}
 }

@@ -268,8 +268,14 @@ process running.
 
 `host` is the gateway of Traefik's network, so the process cannot listen on `127.0.0.1` only: `adopt add`
 fails with `E_ADOPT_UNREACHABLE` unless it answers there. `--force` skips that check for a stopped process.
-With `CVCTL_FIREWALL_MANAGE=true` the port opens to Traefik's subnet only. Domains are exclusive: an instance
-and an adopted service cannot share one, counting the instance's aliases and redirect sources. HTTP only; raw TCP or UDP ports stay out.
+With `CVCTL_FIREWALL_MANAGE=true` the port opens to Traefik's subnet only: cvctl records the ufw rule it adds,
+`cvctl init` moves it when the subnet changes, and `adopt rm` deletes only that rule, so a rule you created
+yourself stays. Otherwise `adopt add` warns that the port may be reachable from outside. Docker publishes `-p`
+ports past ufw, so publish another stack's backend on the gateway address (`-p 10.203.0.1:3000:3000` with the
+default subnet), not on `0.0.0.0`. For Cockpit use `--target https://host:9090 --insecure-tls`: with an http
+target Cockpit rejects the WebSocket Origin. Domains are exclusive: an instance and an adopted service cannot
+share one, counting the instance's aliases and redirect sources. HTTP only; raw TCP or UDP ports stay
+out.
 
 ## lint
 
@@ -340,8 +346,22 @@ sudo cvctl secrets import --force secrets.age
 ## Data kinds
 
 A service declares `cvctl.kind` to get a managed data service: `postgres` (15, 16, 17), `postgis`
-(Postgres with PostGIS, 16, 17; same WAL-G backups and PITR as `postgres`), `redis`, `s3` and
-`sqlite`.
+(Postgres with PostGIS, 16, 17; same WAL-G backups and PITR as `postgres`), `mysql` (8.4, 9),
+`mariadb` (10.11, 11.4), `mongodb` (7, 8), `redis`, `valkey` (8, 9), `rabbitmq` (4), `nats` (2, with
+JetStream in its volume), `s3` and `sqlite`. `mysql`, `mariadb` and
+`mongodb` are backed up with `dump`, so they have no point-in-time recovery; a restored engine keeps
+the users it started with, not those of the dump. `mysql` and `mariadb` dump the service's database
+with its routines and events; `mongodb` dumps every database but restores none of `admin`.
+
+`mongodb` defaults to 7 because 8 refuses to start on Linux 6.19 and newer ([SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912)). `mongodb` runs without a replica set, so `mongodump` has no oplog to replay: a dump taken during
+writes is not a point-in-time copy, and documents written while it runs may or may not be in it.
+
+`valkey`, `rabbitmq` and `nats` are not backed up unless the service sets `cvctl.backup: volume`.
+That copy is taken while the engine runs: for `rabbitmq`, whose docs require a stopped node to back
+up messages, it may be inconsistent and lose messages even when `backup verify` passes.
+`rabbitmq` uses its management image, but the UI and the metrics listen on loopback only: reach them
+with `docker exec`, not from another container. `nats` authenticates with a token, so its URL has no
+user; the service's password must parse as a string in a nats config, which a generated one does.
 
 ## sqlite
 

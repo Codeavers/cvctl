@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -39,10 +40,6 @@ func (e *OpsEnv) syncAdopted() error {
 	return adopt.Sync(e.fs(), e.adoptDir(), e.Deployer.TraefikDir, e.edgeMode(), e.Host.EdgeGateway())
 }
 
-func portShared(svcs []adopt.Service, s adopt.Service) bool {
-	return slices.ContainsFunc(svcs, func(o adopt.Service) bool { return o.Name != s.Name && o.Port() == s.Port() })
-}
-
 func (e *OpsEnv) edgeMode() string {
 	if e.Host != nil && e.Host.EdgeMode != "" {
 		return e.Host.EdgeMode
@@ -50,27 +47,66 @@ func (e *OpsEnv) edgeMode() string {
 	return "edge"
 }
 
-// ufwAdopted opens or closes a port for Traefik's subnet only: the point of
-// adopting is that nothing else reaches the service.
-func (e *OpsEnv) ufwAdopted(cmd *cobra.Command, port int, verb ...string) error {
+// adoptUfw reports whether cvctl may touch ufw for adopted services.
+func (e *OpsEnv) adoptUfw(cmd *cobra.Command, port int) bool {
 	if !e.Host.FirewallManage {
-		return nil
+		return false
 	}
 	which, err := e.runner().Run(cmd.Context(), sys.Cmd{Name: "sh", Args: []string{"-c", "command -v ufw"}})
 	if err != nil || which.ExitCode != 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: ufw not installed; firewall not managed for port %d\n", port)
+		return false
+	}
+	return true
+}
+
+func (e *OpsEnv) ufw(cmd *cobra.Command, port int, args ...string) (sys.Result, error) {
+	res, err := e.runner().Run(cmd.Context(), sys.Cmd{Name: "ufw", Args: args, Env: []string{"LC_ALL=C"}})
+	if err != nil {
+		return res, err
+	}
+	if res.ExitCode != 0 {
+		return res, &output.Error{Code: "E_FIREWALL_FAILED", Message: fmt.Sprintf("ufw failed for port %d: %s", port, res.Stderr),
+			Hint: "check `ufw status`, or set CVCTL_FIREWALL_MANAGE=false"}
+	}
+	return res, nil
+}
+
+// openAdopted allows Traefik's subnet only, the point of adopting being that
+// nothing else reaches the service, and sets s.Firewall when cvctl owns the
+// rule. A rule already there is the operator's unless another entry recorded it.
+func (e *OpsEnv) openAdopted(cmd *cobra.Command, s *adopt.Service, existing []adopt.Service) error {
+	if !e.adoptUfw(cmd, s.Port()) {
 		return nil
 	}
-	args := append(verb, "from", e.Host.EdgeSubnetOrDefault(), "to", "any", "port", strconv.Itoa(port), "proto", "tcp")
-	res, err := e.runner().Run(cmd.Context(), sys.Cmd{Name: "ufw", Args: args})
+	r := adopt.RuleFor(e.Host.EdgeSubnetOrDefault(), s.Port())
+	shown, err := e.ufw(cmd, r.Port, "show", "added")
 	if err != nil {
 		return err
 	}
-	if res.ExitCode != 0 {
-		return &output.Error{Code: "E_FIREWALL_FAILED", Message: fmt.Sprintf("ufw failed for port %d: %s", port, res.Stderr),
-			Hint: "check `ufw status`, or set CVCTL_FIREWALL_MANAGE=false"}
+	if !slices.Contains(adopt.ParseAdded(shown.Stdout), r) {
+		res, err := e.ufw(cmd, r.Port, append([]string{"allow"}, r.Args()...)...)
+		if err != nil {
+			return err
+		}
+		if !bytes.Contains(res.Stdout, []byte("Skipping adding existing rule")) {
+			s.Firewall = &r
+			return nil
+		}
+	}
+	if adopt.Recorded(existing, r, s.Name) {
+		s.Firewall = &r
 	}
 	return nil
+}
+
+// closeAdopted deletes the rule s recorded once no other entry records it.
+func (e *OpsEnv) closeAdopted(cmd *cobra.Command, s adopt.Service, others []adopt.Service) error {
+	if s.Firewall == nil || adopt.Recorded(others, *s.Firewall, s.Name) || !e.adoptUfw(cmd, s.Port()) {
+		return nil
+	}
+	_, err := e.ufw(cmd, s.Firewall.Port, append([]string{"delete", "allow"}, s.Firewall.Args()...)...)
+	return err
 }
 
 func (e *OpsEnv) adoptPreflight() error {
@@ -173,16 +209,25 @@ func newAdoptAddCmd() *cobra.Command {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warning: rollback of %s failed: %v\n", what, err)
 				}
 			}
-			if err := e.ufwAdopted(cmd, s.Port(), "allow"); err != nil {
+			if err := e.openAdopted(cmd, &s, existing); err != nil {
 				warnRollback("registry entry "+s.Name, adopt.Remove(e.fs(), e.adoptDir(), s.Name))
 				return err
 			}
-			if err := e.syncAdopted(); err != nil {
+			rollback := func(err error) error {
 				warnRollback("registry entry "+s.Name, adopt.Remove(e.fs(), e.adoptDir(), s.Name))
-				if !portShared(existing, s) {
-					warnRollback(fmt.Sprintf("ufw rule for port %d", s.Port()), e.ufwAdopted(cmd, s.Port(), "delete", "allow"))
-				}
+				warnRollback(fmt.Sprintf("ufw rule for port %d", s.Port()), e.closeAdopted(cmd, s, existing))
 				return err
+			}
+			if s.Firewall != nil {
+				if err := adopt.Save(e.fs(), e.adoptDir(), s); err != nil {
+					return rollback(err)
+				}
+			}
+			if err := e.syncAdopted(); err != nil {
+				return rollback(err)
+			}
+			if !e.Host.FirewallManage {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: CVCTL_FIREWALL_MANAGE is not true; port %d may be reachable from outside, not only by Traefik\n", s.Port())
 			}
 			printerFrom(cmd).Result(s, func(w io.Writer) {
 				fmt.Fprintf(w, "adopted %s: %s -> %s\n", s.Name, s.Domain, s.Target)
@@ -258,10 +303,8 @@ func newAdoptRmCmd() *cobra.Command {
 			if err := adopt.WriteRoutes(e.fs(), e.Deployer.TraefikDir, rest, e.edgeMode(), e.Host.EdgeGateway()); err != nil {
 				return err
 			}
-			if !portShared(svcs, s) {
-				if err := e.ufwAdopted(cmd, s.Port(), "delete", "allow"); err != nil {
-					return err
-				}
+			if err := e.closeAdopted(cmd, s, rest); err != nil {
+				return err
 			}
 			if err := adopt.Remove(e.fs(), e.adoptDir(), s.Name); err != nil {
 				return err
