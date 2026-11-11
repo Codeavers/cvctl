@@ -654,14 +654,9 @@ func redirectErr(msg, hint string) error {
 func applyRedirects(d *instance.Decisions, p *contract.Project, redirects map[string]string, update bool) error {
 	served := map[string]string{}
 	var exposed []string
-	for _, a := range p.Apps {
-		if a.ExposePort > 0 {
-			exposed = append(exposed, a.Name)
-		}
-	}
-	for _, ds := range p.Data {
-		if ds.ExposePort > 0 {
-			exposed = append(exposed, ds.Name)
+	for svc, ok := range instance.Routed(d, p) {
+		if ok {
+			exposed = append(exposed, svc)
 		}
 	}
 	slices.Sort(exposed)

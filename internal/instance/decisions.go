@@ -807,6 +807,21 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 	return is
 }
 
+// Routed reports, per service, whether Traefik gets a route for it: an app
+// with an exposed port, or a local data service with an exposed port and public
+// buckets. It must match render.Traefik, or an alias or redirect on a service
+// it skips passes the checks and is never routed.
+func Routed(d *Decisions, p *contract.Project) map[string]bool {
+	out := map[string]bool{}
+	for _, a := range p.Apps {
+		out[a.Name] = a.ExposePort > 0
+	}
+	for _, ds := range p.Data {
+		out[ds.Name] = ds.ExposePort > 0 && d.Services[ds.Name].Mode == "local" && len(p.PublicBuckets(ds.Name)) > 0
+	}
+	return out
+}
+
 // CheckRoutes rejects aliases and redirects Traefik could not route on its
 // own: two routers for one host make it pick one, and a redirect to a host
 // that redirects again loops. A primary domain shared by two services predates
@@ -816,13 +831,7 @@ func CheckRoutes(d *Decisions, p *contract.Project) []output.Issue {
 	add := func(svc, msg, hint string) {
 		is = append(is, output.Issue{Code: "E_DECISION_INVALID", Service: svc, Message: msg, Hint: hint})
 	}
-	exposed := map[string]bool{}
-	for _, a := range p.Apps {
-		exposed[a.Name] = a.ExposePort > 0
-	}
-	for _, ds := range p.Data {
-		exposed[ds.Name] = ds.ExposePort > 0
-	}
+	exposed := Routed(d, p)
 	services := func(m map[string]bool) []string {
 		out := make([]string, 0, len(m))
 		for k := range m {
@@ -850,8 +859,8 @@ func CheckRoutes(d *Decisions, p *contract.Project) []output.Issue {
 	for _, svc := range services(named) {
 		n := contract.Normalize(svc)
 		if !exposed[svc] {
-			add(svc, "aliases and redirects need an exposed service",
-				"remove "+aliasPrefix+n+" and "+redirPrefix+n+", or expose the service with cvctl.expose")
+			add(svc, "aliases and redirects need a service Traefik routes",
+				"remove "+aliasPrefix+n+" and "+redirPrefix+n+", or expose the service with cvctl.expose (a data service also needs local mode and a public bucket)")
 			continue
 		}
 		for _, h := range SortedAliases(d.Aliases[svc]) {

@@ -892,3 +892,40 @@ func TestCheckRoutesSharedDomainDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// Traefik routes a data service only in local mode with a public bucket; an
+// alias or a redirect on it otherwise would pass the checks and never route.
+func TestCheckRoutesDataServiceNotRouted(t *testing.T) {
+	cases := []struct {
+		name   string
+		mode   string
+		public bool
+		routed bool
+	}{
+		{"external", "external", true, false},
+		{"no public bucket", "local", false, false},
+		{"local and public", "local", true, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p, d := loadTwoApps(t)
+			for i := range p.Data {
+				if p.Data[i].Name == "media" {
+					p.Data[i].ExposePort = 9000
+				}
+			}
+			p.X.S3 = map[string][]contract.Bucket{"media": {{Name: "pub", Public: c.public}}}
+			sd := d.Services["media"]
+			sd.Mode = c.mode
+			d.Services["media"] = sd
+			d.Domains["media"] = "files.example.com"
+			d.Aliases = map[string][]string{"media": {"cdn.example.com"}}
+			if got := Routed(d, p)["media"]; got != c.routed {
+				t.Fatalf("routed %v, want %v", got, c.routed)
+			}
+			if is := CheckRoutes(d, p); (len(is) == 0) != c.routed {
+				t.Fatalf("got %v", is)
+			}
+		})
+	}
+}
