@@ -83,7 +83,8 @@ Blue-green, per exposed service, in contract order:
    config).
 2. The new container must pass its health check: the HTTP probe of `x-cvctl.health` for the
    health service, only running with no restarts for the other services: two readings
-   2 seconds apart, so a container that crashes later still passes.
+   2 seconds apart, the first taking the restart count as the baseline, so a restart before the
+   first reading or a crash after the second still passes.
 3. Traefik's route is pinned to the new container only.
 4. The old one is stopped with its `stop_grace_period` (10s by default) and removed.
 5. The route goes back to the service alias, which now resolves only to the new container.
