@@ -95,7 +95,9 @@ Declare the ones the app needs in `env.spec.yml` with `source: service`.
   the app holds scoped keys and cannot create buckets itself. Without declared buckets the bucket is
   `CVCTL_SVC_<SVC>_DB`, which must be a valid S3 bucket name; otherwise declare the buckets.
 - **Moving to external**: `cvctl project update <instance> --ext <service>.endpoint=…` switches a
-  local service with `cvctl.external: allowed` to external. Data is not copied; use `mc mirror`.
+  local service with `cvctl.external: allowed` to external. Data is not copied: before the switch,
+  copy the buckets with `mc mirror` and check the copy; then stop the app's writes, run a last
+  `mc mirror`, and switch. Objects written after the last mirror stay in silo.
 - `--ext` values land in the shell history and the process list; prefer the interactive prompt
   for keys on a shared host.
 - An exposed silo joins its instance's `<inst>_edge` network so Traefik can reach it; anonymous access stays

@@ -83,7 +83,8 @@ with S3 storage (`CVCTL_STORAGE=s3`), `cvctl secrets import --force <bundle>`, s
 backup (or pick an older one with `--env-snapshot <id>`). Every backup of the whole instance
 (`cvctl backup now <inst>` and the timer) takes that env backup; if none exists (`cvctl backup list
 <inst> env`), restore fails with `E_RESTORE_NO_SECRETS`, so take one (`cvctl backup now <inst> env`)
-or keep an instance bundle (`cvctl secrets export --instance <inst>`) too. If `cvctl.env` already
+or keep an instance bundle (`cvctl secrets export --instance <inst>`) and import it after the host
+bundle, before `project restore` (`cvctl secrets import <inst>.age`). If `cvctl.env` already
 exists locally, those files are kept as is and `--env-snapshot` is rejected (`E_USAGE_ENV_SNAPSHOT`).
 
 `cvctl project restore` clones the infra repository, restores every data service from its latest
