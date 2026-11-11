@@ -877,3 +877,18 @@ func TestValidateAliases(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckRoutesSharedDomainDeterministic(t *testing.T) {
+	p, d := loadTwoApps(t)
+	d.Domains["api"] = d.Domains["web"]
+	d.Redirects = map[string][]Redirect{"web": {{From: "www.example.com", To: d.Domains["web"]}}}
+	first := CheckRoutes(d, p)
+	if len(first) == 0 {
+		t.Fatal("redirect to a domain first owned by api should be rejected")
+	}
+	for range 50 {
+		if got := CheckRoutes(d, p); !reflect.DeepEqual(got, first) {
+			t.Fatalf("got %v, then %v", first, got)
+		}
+	}
+}

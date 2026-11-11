@@ -840,8 +840,8 @@ func CheckRoutes(d *Decisions, p *contract.Project) []output.Issue {
 	}
 	// owner holds the domains served by each exposed service.
 	owner := map[string]string{}
-	for svc, h := range d.Domains {
-		if exposed[svc] && h != "" {
+	for _, svc := range services(exposed) {
+		if h := d.Domains[svc]; exposed[svc] && h != "" {
 			if _, ok := owner[h]; !ok {
 				owner[h] = svc
 			}
