@@ -32,8 +32,8 @@ contract allowlist accepts.
   pushes it as an OCI artifact; cvctl generates the compose file it runs.
 - **Blue-green or recreate**: zero-downtime swaps for exposed services, health checks, migration
   hooks and automatic rollback when a deploy fails.
-- **Data services**: `postgres`, `postgis`, `redis`, `s3` and `sqlite`, on the host or external
-  (managed Postgres, R2, S3).
+- **Data services**: `postgres`, `postgis`, `mysql`, `mariadb`, `mongodb`, `redis`, `valkey`,
+  `rabbitmq`, `nats`, `s3` and `sqlite`, on the host or external (managed Postgres, R2, S3).
 - **Encrypted backups with PITR**: WAL-G for Postgres, restic for dumps, volumes and env files,
   restore points before each prod deploy, `backup verify` and rebuilding an instance on a new host
   from off-site backups.

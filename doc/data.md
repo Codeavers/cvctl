@@ -8,13 +8,35 @@ A service declares `cvctl.kind` to get a managed data service:
 | --- | --- | --- | --- |
 | `postgres` | 15, 16, 17 | WAL-G with PITR | yes |
 | `postgis` | 16, 17 (Postgres with PostGIS) | same WAL-G backups and PITR as `postgres` | yes |
+| `mysql` | 8.4, 9 | dump with restic, no PITR | yes |
+| `mariadb` | 10.11, 11.4 | dump with restic, no PITR | yes |
+| `mongodb` | 7, 8 (7 by default) | dump with restic, no PITR | yes |
 | `redis` | 7 | none unless `cvctl.backup: volume` | yes |
+| `valkey` | 8, 9 | none unless `cvctl.backup: volume` | yes |
+| `rabbitmq` | 4 | none unless `cvctl.backup: volume` | yes |
+| `nats` | 2 (JetStream in its volume) | none unless `cvctl.backup: volume` | yes |
 | `s3` | S3-compatible (silo when local) | none unless `cvctl.backup: volume` | yes |
 | `sqlite` | no container | dump with restic | no |
 
 A service with `cvctl.external: allowed` can run on the host (local) or point at an external
 provider; `project add` and `project update` ask for the external values, or take them from
 `--ext <service>.<field>=<value>`. Backups are described in [backups.md](backups.md).
+
+A restored `mysql`, `mariadb` or `mongodb` keeps the users it started with, not those of the dump.
+`mysql` and `mariadb` dump the service's database with its routines and events; `mongodb` dumps
+every database but restores none of `admin`.
+
+`mongodb` defaults to 7 because 8 refuses to start on Linux 6.19 and newer
+([SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912)). It runs without a replica set,
+so `mongodump` has no oplog to replay: a dump taken during writes is not a point-in-time copy, and
+documents written while it runs may or may not be in it.
+
+The `volume` copy of `valkey`, `rabbitmq` and `nats` is taken while the engine runs: for `rabbitmq`,
+whose docs require a stopped node to back up messages, it may be inconsistent and lose messages even
+when `backup verify` passes. `rabbitmq` uses its management image, but the UI and the metrics listen
+on loopback only: reach them with `docker exec`, not from another container. `nats` authenticates
+with a token, so its URL has no user; the service's password must parse as a string in a nats
+config, which a generated one does.
 
 ## sqlite
 

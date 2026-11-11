@@ -1,0 +1,24 @@
+name: rabbitmq
+image: rabbitmq:{version}-management-alpine
+versions: ["4"]
+default_version: "4"
+port: 5672
+volume_path: /var/lib/rabbitmq
+container_env:
+  RABBITMQ_DEFAULT_USER: "{user}"
+  RABBITMQ_DEFAULT_PASS: "{password}"
+  # The data directory is named after the node, and the default node after the
+  # hostname: a recreated container would start empty.
+  RABBITMQ_NODENAME: rabbit@localhost
+  # Other containers of the instance share the network, so unpublished is not
+  # enough: the management UI and the metrics listen on loopback only.
+  RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: '-rabbitmq_management tcp_config [{ip,"127.0.0.1"},{port,15672}] -rabbitmq_prometheus tcp_config [{ip,"127.0.0.1"},{port,15692}]'
+env:
+  # An empty path is the empty vhost to clients that follow the URI spec.
+  URL: "amqp://{user}:{password}@{host}:{port}/%2F"
+backup: none
+external: [url]
+# rabbitmq-diagnostics runs as root under docker exec: early in the boot it
+# creates the Erlang cookie the server then cannot read, and the server dies.
+health: ["CMD", "nc", "-z", "127.0.0.1", "5672"]
+cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]
