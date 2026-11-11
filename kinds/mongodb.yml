@@ -30,5 +30,6 @@ restore_command:
     umask 077; f=$(mktemp) || exit 1; trap 'rm -f "$f"' EXIT
     HOME=/tmp mongosh --nodb --quiet --norc --eval 'print("password: " + JSON.stringify(process.env.MONGO_INITDB_ROOT_PASSWORD))' </dev/null >"$f" || exit 1
     mongorestore --config "$f" --username "$MONGO_INITDB_ROOT_USERNAME" --authenticationDatabase admin --archive --drop --nsExclude 'admin.*'
-restore_check: "HOME=/tmp mongosh --nodb --quiet --norc --eval 'const e = process.env; const d = connect(\"mongodb://\" + encodeURIComponent(e.MONGO_INITDB_ROOT_USERNAME) + \":\" + encodeURIComponent(e.MONGO_INITDB_ROOT_PASSWORD) + \"@127.0.0.1:27017/admin\"); print(d.getSiblingDB(e.MONGO_INITDB_DATABASE).getCollectionNames().length)'"
+# The dump holds every database: admin, config and local are the engine's own.
+restore_check: "HOME=/tmp mongosh --nodb --quiet --norc --eval 'const e = process.env; const d = connect(\"mongodb://\" + encodeURIComponent(e.MONGO_INITDB_ROOT_USERNAME) + \":\" + encodeURIComponent(e.MONGO_INITDB_ROOT_PASSWORD) + \"@127.0.0.1:27017/admin\"); print(d.adminCommand({listDatabases: 1, nameOnly: true}).databases.filter(x => ![\"admin\", \"config\", \"local\"].includes(x.name)).reduce((n, x) => n + d.getSiblingDB(x.name).getCollectionNames().length, 0))'"
 cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]
