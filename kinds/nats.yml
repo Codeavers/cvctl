@@ -1,0 +1,27 @@
+name: nats
+image: nats:{version}-alpine
+versions: ["2"]
+default_version: "2"
+port: 4222
+volume_path: /data
+container_env:
+  NATS_TOKEN: "{password}"
+# nats-server takes the token from argv or a config file; the config names the
+# variable, so the file holds no secret.
+command:
+  - sh
+  - -c
+  - |
+    cat > /tmp/nats.conf <<'EOF'
+    port: 4222
+    http: 127.0.0.1:8222
+    jetstream { store_dir: /data }
+    authorization { token: $NATS_TOKEN }
+    EOF
+    exec nats-server -c /tmp/nats.conf
+env:
+  URL: "nats://{password}@{host}:{port}"
+backup: none
+external: [url]
+health: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
+cap_add: []
