@@ -760,3 +760,172 @@ func hasCode(is []output.Issue, code string) bool {
 	}
 	return false
 }
+
+// loadTwoApps adds a second exposed app, web, so domains can collide across services.
+func loadTwoApps(t *testing.T) (*contract.Project, *Decisions) {
+	t.Helper()
+	p, _ := load(t)
+	p.Apps = append(p.Apps, contract.AppService{Name: "web", Role: "app", Image: "ghcr.io/org/web", ExposePort: 8080})
+	d := full()
+	d.Domains["web"] = "example.com"
+	d.Digests["web"] = d.Digests["api"]
+	return p, d
+}
+
+func TestAliasesRedirectsRoundTrip(t *testing.T) {
+	p, d := loadTwoApps(t)
+	d.Aliases = map[string][]string{"web": {"b.example.com", "a.example.com"}}
+	d.Redirects = map[string][]Redirect{"web": {{From: "www.example.com", To: "example.com"}, {From: "old.example.com", To: "a.example.com"}}}
+	path := filepath.Join(t.TempDir(), "cvctl.env")
+	if err := Write(path, d); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	for _, want := range []string{
+		"CVCTL_ALIASES_WEB=a.example.com,b.example.com\n",
+		"CVCTL_REDIRECT_WEB=old.example.com=a.example.com,www.example.com=example.com\n",
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("missing %q in\n%s", want, raw)
+		}
+	}
+	got, err := Read(path, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"a.example.com", "b.example.com"}; !reflect.DeepEqual(got.Aliases["web"], want) {
+		t.Fatalf("aliases %v", got.Aliases)
+	}
+	want := []Redirect{{From: "old.example.com", To: "a.example.com"}, {From: "www.example.com", To: "example.com"}}
+	if !reflect.DeepEqual(got.Redirects["web"], want) {
+		t.Fatalf("redirects %v", got.Redirects)
+	}
+}
+
+func TestStaleAliasKeysDropped(t *testing.T) {
+	p, _ := load(t)
+	path := filepath.Join(t.TempDir(), "cvctl.env")
+	os.WriteFile(path, []byte("CVCTL_ALIASES_GONE=a.example.com\nCVCTL_REDIRECT_GONE=b.example.com=a.example.com\n"), 0o640)
+	d, err := Read(path, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Aliases) != 0 || len(d.Redirects) != 0 {
+		t.Fatalf("unexpected: %v %v", d.Aliases, d.Redirects)
+	}
+}
+
+func TestNoAliasKeysWhenEmpty(t *testing.T) {
+	d := full()
+	d.Aliases = map[string][]string{"api": nil}
+	d.Redirects = map[string][]Redirect{"api": {}}
+	for k := range d.Entries() {
+		if strings.HasPrefix(k, "CVCTL_ALIASES_") || strings.HasPrefix(k, "CVCTL_REDIRECT_") {
+			t.Fatalf("unexpected key %s", k)
+		}
+	}
+}
+
+func TestValidateAliases(t *testing.T) {
+	cases := []struct {
+		name      string
+		aliases   map[string][]string
+		redirects map[string][]Redirect
+		bad       bool
+	}{
+		{name: "valid", aliases: map[string][]string{"web": {"a.example.com"}},
+			redirects: map[string][]Redirect{"web": {{From: "www.example.com", To: "example.com"}, {From: "old.example.com", To: "a.example.com"}}}},
+		{name: "alias not a hostname", aliases: map[string][]string{"web": {"a.com`) || Host(`b"}}, bad: true},
+		{name: "alias equals own primary", aliases: map[string][]string{"web": {"example.com"}}, bad: true},
+		{name: "alias equals other service domain", aliases: map[string][]string{"web": {"api.example.com"}}, bad: true},
+		{name: "alias twice across services", aliases: map[string][]string{"web": {"a.example.com"}, "api": {"a.example.com"}}, bad: true},
+		{name: "redirect source is served", redirects: map[string][]Redirect{"web": {{From: "api.example.com", To: "example.com"}}}, bad: true},
+		{name: "redirect source is an alias", aliases: map[string][]string{"web": {"a.example.com"}},
+			redirects: map[string][]Redirect{"web": {{From: "a.example.com", To: "example.com"}}}, bad: true},
+		{name: "same source twice", redirects: map[string][]Redirect{
+			"web": {{From: "www.example.com", To: "example.com"}},
+			"api": {{From: "www.example.com", To: "api.example.com"}}}, bad: true},
+		{name: "destination not of the service", redirects: map[string][]Redirect{"web": {{From: "www.example.com", To: "api.example.com"}}}, bad: true},
+		{name: "destination is another redirect", redirects: map[string][]Redirect{"web": {
+			{From: "www.example.com", To: "example.com"}, {From: "old.example.com", To: "www.example.com"}}}, bad: true},
+		{name: "source equals destination", redirects: map[string][]Redirect{"web": {{From: "example.com", To: "example.com"}}}, bad: true},
+		{name: "source not a hostname", redirects: map[string][]Redirect{"web": {{From: "a b", To: "example.com"}}}, bad: true},
+		{name: "alias on unexposed service", aliases: map[string][]string{"main-db": {"db.example.com"}}, bad: true},
+		{name: "redirect on unexposed service", redirects: map[string][]Redirect{"cache": {{From: "x.example.com", To: "y.example.com"}}}, bad: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p, d := loadTwoApps(t)
+			_, cat := load(t)
+			d.Aliases = c.aliases
+			d.Redirects = c.redirects
+			is := Check(d, p, cat)
+			if !c.bad {
+				if len(is) != 0 {
+					t.Fatalf("got %v", is)
+				}
+				return
+			}
+			if len(is) == 0 || !hasCode(is, "E_DECISION_INVALID") {
+				t.Fatalf("got %v", is)
+			}
+			for _, i := range is {
+				if i.Code != "E_DECISION_INVALID" {
+					t.Fatalf("unexpected issue %v", i)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckRoutesSharedDomainDeterministic(t *testing.T) {
+	p, d := loadTwoApps(t)
+	d.Domains["api"] = d.Domains["web"]
+	d.Redirects = map[string][]Redirect{"web": {{From: "www.example.com", To: d.Domains["web"]}}}
+	first := CheckRoutes(d, p)
+	if len(first) == 0 {
+		t.Fatal("redirect to a domain first owned by api should be rejected")
+	}
+	for range 50 {
+		if got := CheckRoutes(d, p); !reflect.DeepEqual(got, first) {
+			t.Fatalf("got %v, then %v", first, got)
+		}
+	}
+}
+
+// Traefik routes a data service only in local mode with a public bucket; an
+// alias or a redirect on it otherwise would pass the checks and never route.
+func TestCheckRoutesDataServiceNotRouted(t *testing.T) {
+	cases := []struct {
+		name   string
+		mode   string
+		public bool
+		routed bool
+	}{
+		{"external", "external", true, false},
+		{"no public bucket", "local", false, false},
+		{"local and public", "local", true, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p, d := loadTwoApps(t)
+			for i := range p.Data {
+				if p.Data[i].Name == "media" {
+					p.Data[i].ExposePort = 9000
+				}
+			}
+			p.X.S3 = map[string][]contract.Bucket{"media": {{Name: "pub", Public: c.public}}}
+			sd := d.Services["media"]
+			sd.Mode = c.mode
+			d.Services["media"] = sd
+			d.Domains["media"] = "files.example.com"
+			d.Aliases = map[string][]string{"media": {"cdn.example.com"}}
+			if got := Routed(d, p)["media"]; got != c.routed {
+				t.Fatalf("routed %v, want %v", got, c.routed)
+			}
+			if is := CheckRoutes(d, p); (len(is) == 0) != c.routed {
+				t.Fatalf("got %v", is)
+			}
+		})
+	}
+}

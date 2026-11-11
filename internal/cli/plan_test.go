@@ -315,3 +315,40 @@ func TestPlanIssuesCarryNoValues(t *testing.T) {
 		}
 	}
 }
+
+func planWeb(t *testing.T) (string, planApp) {
+	t.Helper()
+	code, out, errb := run(t, "plan", "--json")
+	if code != 0 {
+		t.Fatalf("code %d: out=%s err=%s", code, out, errb)
+	}
+	var resp struct {
+		Data planReport `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("json: %v (%s)", err, out)
+	}
+	return out, resp.Data.Instances["myapp-dev"].Apps["web"]
+}
+
+func TestPlanJSONUnchangedWithoutAliases(t *testing.T) {
+	setupPlanRig(t, "myapp-dev")
+	out, _ := planWeb(t)
+	if strings.Contains(out, `"aliases"`) || strings.Contains(out, `"redirects"`) {
+		t.Fatalf("plan gained alias keys:\n%s", out)
+	}
+}
+
+func TestPlanListsAliasesAndRedirects(t *testing.T) {
+	tmp, _ := setupPlanRig(t, "myapp-dev")
+	path := filepath.Join(tmp, "myapp-dev", "cvctl.env")
+	raw, _ := os.ReadFile(path)
+	raw = append(raw, "CVCTL_ALIASES_WEB=b.example.com,a.example.com\nCVCTL_REDIRECT_WEB=www.example.com=app.example.com\n"...)
+	if err := os.WriteFile(path, raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	_, web := planWeb(t)
+	if !slices.Equal(web.Aliases, []string{"a.example.com", "b.example.com"}) || !slices.Equal(web.Redirects, []string{"www.example.com=app.example.com"}) {
+		t.Fatalf("web = %+v", web)
+	}
+}

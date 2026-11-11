@@ -186,6 +186,23 @@ echo "XFF via a container on ${INST}_edge: $inner"
 case "$inner" in 203.0.113.7*) echo "Traefik trusted a container's X-Forwarded-For"; false ;; esac
 echo "Assert 8b: client IP kept through the proxy port; spoofed header from a container ignored"
 
+echo "=== 8c. An alias serves the app and a redirect answers 301 keeping path and query ==="
+res=$(cvctl project update "$INST" --domain api=api.e2e.local --domain api=alias.e2e.local \
+  --redirect old.e2e.local=api.e2e.local --json) || { echo "$res"; false; }
+echo "$res" | jq -e '.ok == true'
+# Traefik reloads the file provider on its own: poll until the new routers answer.
+for _ in $(seq 1 15); do
+  aliased=$(curl -s -H 'Host: alias.e2e.local' http://127.0.0.1:8081/health || true)
+  [ "$aliased" = "$greeting" ] && break
+  sleep 1
+done
+echo "Alias response: $aliased"
+test "$aliased" = "$greeting"
+redir=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: old.e2e.local' 'http://127.0.0.1:8081/health?a=1')
+echo "Redirect: $redir"
+test "$redir" = "301 https://api.e2e.local/health?a=1"
+echo "Assert 8c: alias serves the app; redirect is a 301 to the same path and query"
+
 echo "=== 9. External buckets: probe passed, status warns, a broken public URL fails the deploy ==="
 cvctl status --json | jq -e '[.data.warnings[]? | select(contains("media is external"))] | length == 1'
 echo "Assert 9: status warns that media is external (deploys above passed the bucket probe)"

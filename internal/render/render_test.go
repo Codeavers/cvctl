@@ -895,3 +895,154 @@ func TestDumpServiceJoinsBackupNetworkWithoutWalgEnv(t *testing.T) {
 		t.Fatalf("a dump service has no wal-g env:\n%s", out)
 	}
 }
+
+func setupAliases(t *testing.T) (*contract.Project, *instance.Decisions) {
+	t.Helper()
+	p, d, _ := setup(t)
+	d.Aliases = map[string][]string{"api": {"api2.example.com"}}
+	d.Redirects = map[string][]instance.Redirect{"api": {{From: "www.api.example.com", To: "api.example.com"}}}
+	return p, d
+}
+
+func TestTraefikGoldenAliasesEdge(t *testing.T) {
+	p, d := setupAliases(t)
+	out, err := Traefik(p, d, Options{Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "traefik-aliases-edge.yml", out)
+}
+
+func TestTraefikGoldenAliasesBehindProxy(t *testing.T) {
+	p, d := setupAliases(t)
+	out, err := Traefik(p, d, Options{Edge: "behind-proxy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "traefik-aliases-behind-proxy.yml", out)
+}
+
+type traefikDoc struct {
+	HTTP struct {
+		Routers map[string]struct {
+			Rule        string         `yaml:"rule"`
+			Service     string         `yaml:"service"`
+			Middlewares []string       `yaml:"middlewares"`
+			EntryPoints []string       `yaml:"entryPoints"`
+			TLS         map[string]any `yaml:"tls"`
+		} `yaml:"routers"`
+		Services    map[string]any `yaml:"services"`
+		Middlewares map[string]struct {
+			RedirectRegex struct {
+				Regex       string `yaml:"regex"`
+				Replacement string `yaml:"replacement"`
+				Permanent   bool   `yaml:"permanent"`
+			} `yaml:"redirectRegex"`
+		} `yaml:"middlewares"`
+	} `yaml:"http"`
+}
+
+func parseTraefik(t *testing.T, out []byte) traefikDoc {
+	t.Helper()
+	var doc traefikDoc
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}
+
+func TestTraefikAliasSharesService(t *testing.T) {
+	p, d := setupAliases(t)
+	d.Redirects = nil
+	out, err := Traefik(p, d, Options{Edge: "edge", Pin: map[string]string{"api": "http://172.20.0.5:3000"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := parseTraefik(t, out)
+	main, alias := doc.HTTP.Routers["proj-dev--api"], doc.HTTP.Routers["proj-dev--api--alias-0"]
+	if alias.Rule != "Host(`api2.example.com`)" || alias.Service != main.Service || main.Service != "proj-dev--api" {
+		t.Fatalf("routers: %+v", doc.HTTP.Routers)
+	}
+	if len(doc.HTTP.Services) != 1 || !strings.Contains(string(out), "url: http://172.20.0.5:3000") {
+		t.Fatalf("services:\n%s", out)
+	}
+}
+
+func TestTraefikAliasOnPublicBuckets(t *testing.T) {
+	p, d, _ := setupBuckets(t)
+	d.Aliases = map[string][]string{"media": {"cdn.example.com"}}
+	out, err := Traefik(p, d, Options{Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := parseTraefik(t, out)
+	want := "Host(`cdn.example.com`) && (Method(`GET`) || Method(`HEAD`)) && PathRegexp(`^/(products)/.+`)"
+	if r := doc.HTTP.Routers["proj-dev--media--alias-0"]; r.Rule != want || r.Service != "proj-dev--media" {
+		t.Fatalf("alias router: %+v", r)
+	}
+}
+
+func TestTraefikAliasesOrdered(t *testing.T) {
+	p, d := setupAliases(t)
+	d.Aliases["api"] = []string{"z.example.com", "b.example.com"}
+	d.Redirects["api"] = []instance.Redirect{{From: "y.example.com", To: "api.example.com"}, {From: "c.example.com", To: "z.example.com"}}
+	out, err := Traefik(p, d, Options{Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := parseTraefik(t, out)
+	for name, rule := range map[string]string{
+		"proj-dev--api--alias-0":    "Host(`b.example.com`)",
+		"proj-dev--api--alias-1":    "Host(`z.example.com`)",
+		"proj-dev--api--redirect-0": "Host(`c.example.com`)",
+		"proj-dev--api--redirect-1": "Host(`y.example.com`)",
+	} {
+		if got := doc.HTTP.Routers[name].Rule; got != rule {
+			t.Fatalf("%s: %q, want %q", name, got, rule)
+		}
+	}
+	if got := doc.HTTP.Middlewares["proj-dev--api--redirect-0"].RedirectRegex.Replacement; got != "https://z.example.com${1}" {
+		t.Fatalf("replacement %q", got)
+	}
+}
+
+func TestTraefikRedirect(t *testing.T) {
+	p, d := setupAliases(t)
+	for _, edge := range []string{"edge", "behind-proxy"} {
+		out, err := Traefik(p, d, Options{Edge: edge})
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc := parseTraefik(t, out)
+		r := doc.HTTP.Routers["proj-dev--api--redirect-0"]
+		if r.Rule != "Host(`www.api.example.com`)" || r.Service != "noop@internal" ||
+			!slices.Equal(r.Middlewares, []string{"cvctl-default@file", "proj-dev--api--redirect-0"}) {
+			t.Fatalf("%s: redirect router %+v", edge, r)
+		}
+		if edge == "edge" && (r.TLS["certResolver"] != "le" || !slices.Equal(r.EntryPoints, []string{"websecure"})) {
+			t.Fatalf("edge: %+v", r)
+		}
+		if edge != "edge" && (r.TLS != nil || !slices.Equal(r.EntryPoints, []string{"web"})) {
+			t.Fatalf("behind-proxy: %+v", r)
+		}
+		m := doc.HTTP.Middlewares["proj-dev--api--redirect-0"].RedirectRegex
+		if m.Regex != "^https?://[^/]+(.*)$" || m.Replacement != "https://api.example.com${1}" || !m.Permanent {
+			t.Fatalf("%s: middleware %+v", edge, m)
+		}
+		if _, ok := doc.HTTP.Services["proj-dev--api--redirect-0"]; ok {
+			t.Fatalf("%s: a redirect has no service of its own", edge)
+		}
+	}
+}
+
+func TestTraefikNoMiddlewaresWithoutRedirects(t *testing.T) {
+	p, d := setupAliases(t)
+	d.Redirects = nil
+	out, err := Traefik(p, d, Options{Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "\n    middlewares:") || strings.Contains(string(out), "\n  middlewares:") {
+		t.Fatalf("unexpected middlewares section:\n%s", out)
+	}
+}
