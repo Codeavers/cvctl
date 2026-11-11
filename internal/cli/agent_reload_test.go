@@ -127,10 +127,16 @@ func TestHostReloaderKeepsDeployerOnError(t *testing.T) {
 	}
 }
 
-type countNotifier struct{ sent int }
+type countNotifier struct {
+	sent int
+	fail int
+}
 
 func (n *countNotifier) Send(context.Context, notify.Message) error {
 	n.sent++
+	if n.sent <= n.fail {
+		return errors.New("telegram down")
+	}
 	return nil
 }
 
@@ -178,5 +184,31 @@ func TestHostReloaderRetriesFailedLogin(t *testing.T) {
 	}
 	if n.sent != 1 {
 		t.Fatalf("expected one notice for the repeated failure, got %d", n.sent)
+	}
+}
+
+// A notice that could not be sent is retried with the next failed login, and
+// each login attempt runs under its own deadline.
+func TestAgentLoginRetriesUnsentNoticeWithDeadline(t *testing.T) {
+	hcfg := &hostcfg.Config{Registries: "ghcr.io/codeavers", RegistryUser: "deployuser"}
+	sec := hostcfg.NewSecrets()
+	sec.Set("registry_token", "tok")
+
+	oldLogin := runAgentRegistryLogin
+	t.Cleanup(func() { runAgentRegistryLogin = oldLogin })
+	runAgentRegistryLogin = func(ctx context.Context, _ sys.Runner, _ *hostcfg.Config, _ *hostcfg.Secrets) error {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("registry login without a deadline")
+		}
+		return errors.New("timeout")
+	}
+
+	n := &countNotifier{fail: 1}
+	login := &agentLogin{run: &systest.Runner{}}
+	for range 3 {
+		login.ensure(context.Background(), hcfg, sec, n, io.Discard)
+	}
+	if n.sent != 2 {
+		t.Fatalf("expected the failed notice to be sent again once, got %d sends", n.sent)
 	}
 }

@@ -53,6 +53,8 @@ var runAgentRegistryLogin = func(ctx context.Context, run sys.Runner, hcfg *host
 	return nil
 }
 
+var registryLoginTimeout = 30 * time.Second
+
 // agentLogin keeps the registry credentials of the last successful login. A
 // failed login is retried on every tick until it succeeds, since deploys
 // cannot pull without it; a retry that fails the same way is not notified again.
@@ -68,7 +70,10 @@ func (l *agentLogin) ensure(ctx context.Context, hcfg *hostcfg.Config, secrets *
 	if l.ok && l.done == want {
 		return
 	}
-	err := runAgentRegistryLogin(ctx, l.run, hcfg, secrets)
+	// A hung docker login would stall every tick, and with them every deploy.
+	lctx, cancel := context.WithTimeout(ctx, registryLoginTimeout)
+	err := runAgentRegistryLogin(lctx, l.run, hcfg, secrets)
+	cancel()
 	if err == nil {
 		l.done, l.ok, l.reported = want, true, ""
 		return
@@ -83,17 +88,18 @@ func (l *agentLogin) ensure(ctx context.Context, hcfg *hostcfg.Config, secrets *
 	if reason == l.reported {
 		return
 	}
-	l.reported = reason
 	hostName := hcfg.HostName
 	if hostName == "" {
 		hostName, _ = os.Hostname()
 	}
-	_ = notif.Send(ctx, notify.Message{
+	if notif.Send(ctx, notify.Message{
 		Host:  hostName,
 		Level: "warn",
 		Title: "registry login failed",
 		Text:  reason,
-	})
+	}) == nil {
+		l.reported = reason
+	}
 }
 
 // hostReloader re-reads host.env and the secrets for each agent tick and
