@@ -9,10 +9,11 @@ Each GitHub release attaches static binaries for `linux/amd64` and `linux/arm64`
 (`cvctl-linux-amd64`, `cvctl-linux-arm64`) and a `sha256sums.txt`:
 
 ```
-curl -fsSLO https://github.com/Codeavers/cvctl/releases/latest/download/cvctl-linux-amd64 &&
+ARCH=amd64   # amd64 or arm64
+curl -fsSLO "https://github.com/Codeavers/cvctl/releases/latest/download/cvctl-linux-${ARCH}" &&
   curl -fsSLO https://github.com/Codeavers/cvctl/releases/latest/download/sha256sums.txt &&
   sha256sum --ignore-missing -c sha256sums.txt &&
-  install -m 0755 cvctl-linux-amd64 ./cvctl
+  install -m 0755 "cvctl-linux-${ARCH}" ./cvctl
 ```
 
 ### From GHCR

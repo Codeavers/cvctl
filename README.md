@@ -53,9 +53,10 @@ contract allowlist accepts.
 On the host (Ubuntu or Debian for a full setup):
 
 ```sh
-curl -fsSLO https://github.com/Codeavers/cvctl/releases/latest/download/cvctl-linux-amd64   # or cvctl-linux-arm64
-chmod +x cvctl-linux-amd64
-sudo ./cvctl-linux-amd64 init        # installs /usr/local/bin/cvctl and the cvctl-agent service
+ARCH=amd64                           # amd64 or arm64
+curl -fsSLO "https://github.com/Codeavers/cvctl/releases/latest/download/cvctl-linux-${ARCH}"
+chmod +x "cvctl-linux-${ARCH}"
+sudo "./cvctl-linux-${ARCH}" init    # installs /usr/local/bin/cvctl and the cvctl-agent service
 ```
 
 In the app's infra repository, usually from CI with `CVCTL_PUBLISH_TOKEN` or `GITHUB_TOKEN` set

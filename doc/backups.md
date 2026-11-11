@@ -80,8 +80,11 @@ bundle (`cvctl secrets export --host`). The order the disaster-recovery e2e runs
 with S3 storage (`CVCTL_STORAGE=s3`), `cvctl secrets import --force <bundle>`, start the agent, then
 `cvctl project restore <inst>`, which fails with `E_RESTORE_LOCAL_STORAGE` without S3 storage.
 `cvctl.env`, `app.env` and the deploy key are recovered automatically from the latest off-site env
-backup (or pick an older one with `--env-snapshot <id>`). If `cvctl.env` already exists locally, those files are kept as is
-and `--env-snapshot` is rejected (`E_USAGE_ENV_SNAPSHOT`).
+backup (or pick an older one with `--env-snapshot <id>`). Every backup of the whole instance
+(`cvctl backup now <inst>` and the timer) takes that env backup; if none exists (`cvctl backup list
+<inst> env`), restore fails with `E_RESTORE_NO_SECRETS`, so take one (`cvctl backup now <inst> env`)
+or keep an instance bundle (`cvctl secrets export --instance <inst>`) too. If `cvctl.env` already
+exists locally, those files are kept as is and `--env-snapshot` is rejected (`E_USAGE_ENV_SNAPSHOT`).
 
 `cvctl project restore` clones the infra repository, restores every data service from its latest
 backup into a fresh volume, deploys the instance, and starts a new WAL-G backup generation. `s3`

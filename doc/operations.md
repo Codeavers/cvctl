@@ -84,7 +84,8 @@ Steps a release needs beyond `cvctl upgrade`. The full list of changes is in
 
 `s3` services stop being backed up unless the contract sets `cvctl.backup: volume`. For a service
 without it, its restic repository `<bucket>/<host>/<inst>/<svc>` (with any `r<N>` under it) is no
-longer used and can be deleted by hand; with `volume` it stays in use, so keep it.
+longer used; it still holds the restore points taken before the upgrade, so delete it by hand only
+once those are no longer needed. With `volume` it stays in use, so keep it.
 
 ### Upgrading a host to v0.7
 
