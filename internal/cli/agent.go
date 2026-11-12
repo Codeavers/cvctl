@@ -28,21 +28,19 @@ type agentReport struct {
 	Decisions []agent.DecisionLog `json:"decisions"`
 }
 
-var runAgentRegistryLogin = func(ctx context.Context, run sys.Runner, hcfg *hostcfg.Config, secrets *hostcfg.Secrets, notif notify.Notifier, out io.Writer) {
-	if secrets == nil {
-		return
+// runAgentRegistryLogin logs in to the registry the token is for. It returns
+// nil when the login succeeded or there is no token to log in with.
+var runAgentRegistryLogin = func(ctx context.Context, run sys.Runner, hcfg *hostcfg.Config, secrets *hostcfg.Secrets) error {
+	if secrets == nil || hcfg == nil {
+		return nil
 	}
 	token, ok := secrets.Get("registry_token")
 	if !ok || token == "" {
-		return
+		return nil
 	}
-	if hcfg == nil {
-		return
-	}
-
 	host := hcfg.TokenHost()
 	if host == "" {
-		return
+		return nil
 	}
 	fsys := sys.NewOSFS()
 	err := registry.LoginWithFS(ctx, run, fsys, host, hcfg.RegistryUser, token)
@@ -50,26 +48,89 @@ var runAgentRegistryLogin = func(ctx context.Context, run sys.Runner, hcfg *host
 		err = registry.PruneAuths(fsys, host)
 	}
 	if err != nil {
-		errReason := fmt.Sprintf("registry login failed for %s: %v", host, err)
-		logEntry := agent.DecisionLog{
-			TS:       time.Now().UTC().Format(time.RFC3339),
-			Instance: "",
-			Action:   "error",
-			Reason:   errReason,
-		}
-		_ = json.NewEncoder(out).Encode(logEntry)
-
-		hostName := hcfg.HostName
-		if hostName == "" {
-			hostName, _ = os.Hostname()
-		}
-		_ = notif.Send(ctx, notify.Message{
-			Host:  hostName,
-			Level: "warn",
-			Title: "registry login failed",
-			Text:  errReason,
-		})
+		return fmt.Errorf("registry login failed for %s: %v", host, err)
 	}
+	return nil
+}
+
+var registryLoginTimeout = 30 * time.Second
+
+// agentLogin keeps the registry credentials of the last successful login. A
+// failed login is retried on every tick until it succeeds, since deploys
+// cannot pull without it; a retry that fails the same way is not notified again.
+type agentLogin struct {
+	run      sys.Runner
+	done     [3]string
+	ok       bool
+	reported string
+}
+
+func (l *agentLogin) ensure(ctx context.Context, hcfg *hostcfg.Config, secrets *hostcfg.Secrets, notif notify.Notifier, out io.Writer) {
+	want := registryCreds(hcfg, secrets)
+	if l.ok && l.done == want {
+		return
+	}
+	// A hung docker login would stall every tick, and with them every deploy.
+	lctx, cancel := context.WithTimeout(ctx, registryLoginTimeout)
+	err := runAgentRegistryLogin(lctx, l.run, hcfg, secrets)
+	cancel()
+	if err == nil {
+		l.done, l.ok, l.reported = want, true, ""
+		return
+	}
+	l.ok = false
+	reason := err.Error()
+	_ = json.NewEncoder(out).Encode(agent.DecisionLog{
+		TS:     time.Now().UTC().Format(time.RFC3339),
+		Action: "error",
+		Reason: reason,
+	})
+	if reason == l.reported {
+		return
+	}
+	hostName := hcfg.HostName
+	if hostName == "" {
+		hostName, _ = os.Hostname()
+	}
+	if notif.Send(ctx, notify.Message{
+		Host:  hostName,
+		Level: "warn",
+		Title: "registry login failed",
+		Text:  reason,
+	}) == nil {
+		l.reported = reason
+	}
+}
+
+// hostReloader re-reads host.env and the secrets for each agent tick and
+// applies them to the deployer, so a change made by cvctl init reaches the next
+// deploy without restarting the agent. The notifier is rebuilt only when what
+// it reads changed; the registry login is redone when the credentials changed
+// or the last attempt failed.
+func hostReloader(ctx context.Context, fsys sys.FS, dir string, deployer *deploy.Deployer, login *agentLogin, notifOut, logOut io.Writer) func() (*hostcfg.Config, *hostcfg.Secrets, notify.Notifier, error) {
+	return func() (*hostcfg.Config, *hostcfg.Secrets, notify.Notifier, error) {
+		hcfg, secrets, err := hostcfg.Load(fsys, dir)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if !hcfg.Equal(deployer.Host) || !secrets.Equal(deployer.Secrets) {
+			deploy.Rewire(deployer, login.run, hcfg, secrets)
+			deployer.Notify = notify.FromHostLogged(hcfg, secrets, notifOut)
+		}
+		login.ensure(ctx, deployer.Host, deployer.Secrets, deployer.Notify, logOut)
+		return deployer.Host, deployer.Secrets, deployer.Notify, nil
+	}
+}
+
+func registryCreds(hcfg *hostcfg.Config, secrets *hostcfg.Secrets) [3]string {
+	var r [3]string
+	if hcfg != nil {
+		r[0], r[1] = hcfg.TokenHost(), hcfg.RegistryUser
+	}
+	if secrets != nil {
+		r[2], _ = secrets.Get("registry_token")
+	}
+	return r
 }
 
 func newAgentCmd() *cobra.Command {
@@ -126,7 +187,8 @@ func newAgentCmd() *cobra.Command {
 				logOut = &buf
 			}
 
-			runAgentRegistryLogin(ctx, run, hcfg, secrets, notif, logOut)
+			login := &agentLogin{run: run}
+			login.ensure(ctx, hcfg, secrets, notif, logOut)
 
 			cfg := agent.Config{
 				Interval:   interval,
@@ -142,6 +204,7 @@ func newAgentCmd() *cobra.Command {
 				StateRoot:  "/var/lib/cvctl",
 				FS:         fsys,
 				Catalog:    cat,
+				ReloadHost: hostReloader(ctx, fsys, hostCfgDir, deployer, login, cmd.ErrOrStderr(), logOut),
 			}
 
 			if err := agent.Run(ctx, cfg); err != nil {

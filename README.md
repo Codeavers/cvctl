@@ -230,6 +230,18 @@ When the settings change, init sends a test message and restarts `cvctl-agent` s
 disabling notifications only restarts the agent. The agent and the backup timers log notifier
 errors (bad configuration, failed sends) to the journal.
 
+The agent re-reads `host.env` and `secrets/` at the start of every cycle, so a change made by
+init (for example `CVCTL_EDGE_MODE`) applies to its next deploy without a restart; the change is
+logged as a `reload` decision. If they fail to load, the agent skips the cycle and logs and
+notifies the error once, instead of deploying with the old values. Routes already written keep the
+old edge mode until the instance is deployed again (`cvctl deploy <inst>`).
+
+`cvctl status` checks each instance's Traefik route against the host edge mode and sends `GET /`
+for each domain to the local Traefik (`:443` with SNI in edge mode, `127.0.0.1:CVCTL_PROXY_PORT`
+behind a proxy), each probe bounded to 3s and all within 5s. The `ROUTES` column shows `ok`,
+`mismatch` (the route was rendered for the other mode), `down` (no answer, or Traefik's own
+`404 page not found`) or `-` (no route), with a warning per problem.
+
 ### Deploy notices and image labels
 
 Telegram deploy notices show the PR, commit, title and author of what was deployed. cvctl reads
