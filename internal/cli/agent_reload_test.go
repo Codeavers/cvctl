@@ -37,7 +37,7 @@ func TestHostReloaderAppliesEdgeModeToDeployer(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	writeHostEnv(t, cfgDir, "CVCTL_EDGE_MODE=behind-proxy\nCVCTL_REGISTRIES=ghcr.io/codeavers\n")
+	writeHostEnv(t, cfgDir, "CVCTL_EDGE_MODE=behind-proxy\nCVCTL_REGISTRIES=registry.example.invalid/demo\n")
 
 	fsys := sys.NewOSFS()
 	hcfg, secrets, err := hostcfg.Load(fsys, cfgDir)
@@ -68,7 +68,7 @@ func TestHostReloaderAppliesEdgeModeToDeployer(t *testing.T) {
 		t.Fatal("unchanged host.env must keep the same config")
 	}
 
-	writeHostEnv(t, cfgDir, "CVCTL_EDGE_MODE=edge\nCVCTL_ACME_EMAIL=ops@example.com\nCVCTL_REGISTRIES=ghcr.io/codeavers\n")
+	writeHostEnv(t, cfgDir, "CVCTL_EDGE_MODE=edge\nCVCTL_ACME_EMAIL=ops@example.com\nCVCTL_REGISTRIES=registry.example.invalid/demo\n")
 	h, _, n, err := reload()
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +144,7 @@ func (n *countNotifier) Send(context.Context, notify.Message) error {
 // secrets did not change, and notified once while it keeps failing the same way.
 func TestHostReloaderRetriesFailedLogin(t *testing.T) {
 	tmp := t.TempDir()
-	writeHostEnv(t, tmp, "CVCTL_REGISTRIES=ghcr.io/codeavers\nCVCTL_REGISTRY_USER=deployuser\n")
+	writeHostEnv(t, tmp, "CVCTL_REGISTRIES=registry.example.invalid/demo\nCVCTL_REGISTRY_USER=deployuser\n")
 	if err := os.MkdirAll(filepath.Join(tmp, "secrets"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestHostReloaderRetriesFailedLogin(t *testing.T) {
 // A notice that could not be sent is retried with the next failed login, and
 // each login attempt runs under its own deadline.
 func TestAgentLoginRetriesUnsentNoticeWithDeadline(t *testing.T) {
-	hcfg := &hostcfg.Config{Registries: "ghcr.io/codeavers", RegistryUser: "deployuser"}
+	hcfg := &hostcfg.Config{Registries: "registry.example.invalid/demo", RegistryUser: "deployuser"}
 	sec := hostcfg.NewSecrets()
 	sec.Set("registry_token", "tok")
 
