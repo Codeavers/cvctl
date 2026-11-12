@@ -97,9 +97,9 @@ Declare the ones the app needs in `env.spec.yml` with `source: service`.
 - **Moving to external**: `cvctl project update <instance> --ext <service>.endpoint=…` switches a
   local service with `cvctl.external: allowed` to external. Data is not copied: before the switch,
   copy the buckets with `mc mirror` and check the copy; then stop the app's writes, run a last
-  `mc mirror --remove` so objects deleted meanwhile go too, and switch. `--remove` also deletes
-  objects that exist only in the destination, so mirror into empty buckets. Objects written after
-  the last mirror stay in silo.
+  `mc mirror --overwrite --remove` so objects changed or deleted meanwhile follow, check that it
+  ended without errors, and switch. `--remove` also deletes objects that exist only in the
+  destination, so mirror into empty buckets. Objects written after the last mirror stay in silo.
 - `--ext` values land in the shell history and the process list; prefer the interactive prompt
   for keys on a shared host.
 - An exposed silo joins its instance's `<inst>_edge` network so Traefik can reach it; anonymous access stays
