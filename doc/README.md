@@ -15,9 +15,11 @@ Release history is in [CHANGELOG.md](../CHANGELOG.md).
 
 ## Conventions
 
-- Every command accepts `--json` and then prints exactly one JSON document.
+- Every command accepts `--json` and then prints exactly one JSON document, except `cvctl agent`,
+  which keeps running and prints one JSON line per decision; with `--once` it prints one document.
 - Exit codes: `0` ok, `1` validation or business error, `2` usage error.
-- Every error and issue carries a stable `E_<AREA>_<CAUSE>` code and a `hint`.
+- Every error and issue carries a stable code starting with `E_` (such as
+  `E_CONTRACT_HOOK_SERVICE` or `E_TIMEOUT`) and a `hint`.
 - `<inst>` or `<instance>` is an instance name such as `demo-dev`; it cannot contain `--`.
 
 ## Commands

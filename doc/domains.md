@@ -24,8 +24,9 @@ sudo cvctl project update <inst> --redirect old.example.com=
 In `project update`, `--domain` for a service replaces its primary domain and all its aliases;
 `--redirect source=` removes that redirect. Every domain gets its own Traefik router and
 certificate, so each one needs its DNS pointing at this host; one without it only fails its own
-certificate. A domain belongs to one service only, as primary, alias or redirect source
-(`E_DECISION_INVALID`, `E_USAGE_REDIRECT`), and never to an adopted service (`E_ADOPT_DOMAIN_IN_USE`).
+certificate. Within an instance a domain belongs to one service only, as primary, alias or redirect
+source (`E_DECISION_INVALID`, `E_USAGE_REDIRECT`), and never to an adopted service
+(`E_ADOPT_DOMAIN_IN_USE`). Domains of other instances are not checked: do not reuse one.
 They are stored as `CVCTL_ALIASES_<SVC>` and `CVCTL_REDIRECT_<SVC>` in `cvctl.env`.
 
 ## Edge modes

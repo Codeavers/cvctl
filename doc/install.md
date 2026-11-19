@@ -57,7 +57,7 @@ sudo cvctl init --reconfigure notify
 - `--reconfigure notify` asks the notification questions again (see [Notifications](#notifications)).
 
 SSH changes are applied with a revert timer: if the new session cannot be confirmed, the previous
-sshd config comes back on its own. `cvctl init confirm-ssh` confirms the hardening and cancels the
+sshd config comes back on its own. `sudo cvctl init confirm-ssh` confirms the hardening and cancels the
 timer.
 
 ## Host configuration
