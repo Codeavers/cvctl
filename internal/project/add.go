@@ -1092,14 +1092,31 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		return nil, err
 	}
 
-	instDir := filepath.Join(e.deployRoot(), inst)
-
-	if _, err := e.fs().Stat(instDir); err == nil {
-		return nil, &output.Error{
-			Code:    "E_PROJECT_EXISTS",
-			Message: fmt.Sprintf("instance %q already exists", inst),
-			Hint:    fmt.Sprintf("cvctl project update %s", inst),
+	locked := e.Deployer != nil && e.Deployer.Store != nil
+	if locked {
+		unlock, err := e.Deployer.Store.Lock(inst)
+		if err != nil {
+			return nil, err
 		}
+		defer unlock()
+	}
+
+	instDir := filepath.Join(e.deployRoot(), inst)
+	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
+
+	var warnings []string
+	if _, err := e.fs().Stat(instDir); err == nil {
+		if _, err := e.fs().Stat(cvctlEnvPath); err == nil {
+			return nil, &output.Error{
+				Code:    "E_PROJECT_EXISTS",
+				Message: fmt.Sprintf("instance %q already exists", inst),
+				Hint:    fmt.Sprintf("cvctl project update %s", inst),
+			}
+		}
+		if err := removeAll(e.fs(), instDir); err != nil {
+			return nil, err
+		}
+		warnings = append(warnings, fmt.Sprintf("removed the leftover of an interrupted project add in %s", instDir))
 	}
 
 	isFileRepo := strings.HasPrefix(repoURL, "file://")
@@ -1190,13 +1207,15 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		}
 	}
 
-	cleanupInst := func() {
-		_ = removeAll(e.fs(), instDir)
-	}
-
 	if err := e.fs().MkdirAll(instDir, 0o2775, deployOwner); err != nil {
 		return nil, err
 	}
+	stateSaved := false
+	defer func() {
+		if !stateSaved {
+			_ = removeAll(e.fs(), instDir)
+		}
+	}()
 
 	branch := opts.Branch
 	if branch == "" {
@@ -1218,38 +1237,31 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	if isOCI {
 		ociRef = strings.TrimPrefix(repoURL, ociScheme)
 		if _, err := installOCI(ctx, e, instDir, ociRef, ociTrackTag(envName, trackTag)); err != nil {
-			cleanupInst()
 			return nil, err
 		}
 	} else {
 		repo = e.repo(infraDir, keyPath)
 		if err := repo.Clone(ctx, repoURL, branch); err != nil {
-			cleanupInst()
 			return nil, err
 		}
 	}
 
 	cat, err := e.catalog()
 	if err != nil {
-		cleanupInst()
 		return nil, err
 	}
 
 	p, spec, err := loadContractAndSpec(e.fs(), contractDir(infraDir, infraPath), cat)
 	if err != nil {
-		cleanupInst()
 		return nil, err
 	}
 
 	if err := checkDomainServices(p, opts.Domains, opts.Aliases); err != nil {
-		cleanupInst()
 		return nil, err
 	}
 
-	var warnings []string
 	if svcs := instance.RecreateOnly(p, cat); opts.Strategy == "blue-green" && len(svcs) > 0 {
 		if !defaultStrategy {
-			cleanupInst()
 			return nil, instance.RecreateErr(svcs)
 		}
 		opts.Strategy = "recreate"
@@ -1275,34 +1287,27 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	applyDomains(d, opts.Domains, opts.Aliases)
 	ext, err := takeBackupExt(d, opts.Ext, e.storage(), true)
 	if err != nil {
-		cleanupInst()
 		return nil, err
 	}
 	if err := applyExt(d, p, cat, ext); err != nil {
-		cleanupInst()
 		return nil, err
 	}
 	// A new instance has no backups yet: every generation uses its own keys.
 	if _, err := ensureBackupKeys(d); err != nil {
-		cleanupInst()
 		return nil, err
 	}
 
 	if err := promptDataServices(ctx, e, cat, p, d); err != nil {
-		cleanupInst()
 		return nil, err
 	}
 
 	if err := promptDomains(ctx, e, p, d); err != nil {
-		cleanupInst()
 		return nil, err
 	}
 	if err := applyRedirects(d, p, opts.Redirects, false); err != nil {
-		cleanupInst()
 		return nil, err
 	}
 	if err := checkAdoptedDomains(e, d); err != nil {
-		cleanupInst()
 		return nil, err
 	}
 
@@ -1311,7 +1316,6 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	if opts.EnvFile != nil {
 		taken, rep, err := selectEnvFile(spec, opts.EnvFile, opts.Set)
 		if err != nil {
-			cleanupInst()
 			return nil, err
 		}
 		for k, v := range taken {
@@ -1324,16 +1328,13 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	}
 
 	if err := promptEnvSpec(ctx, e, spec, appEnvValues); err != nil {
-		cleanupInst()
 		return nil, err
 	}
 
 	if err := checkDecisions(d, p, cat); err != nil {
-		cleanupInst()
 		return nil, err
 	}
 
-	cvctlEnvPath := filepath.Join(instDir, "cvctl.env")
 	appEnvPath := filepath.Join(instDir, "app.env")
 
 	addEntries := d.Entries()
@@ -1345,11 +1346,9 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		}
 	}
 	if err := e.fs().WriteFile(cvctlEnvPath, instance.FormatEnv(addEntries), 0o640, deployOwner); err != nil {
-		cleanupInst()
 		return nil, err
 	}
 	if err := e.fs().WriteFile(appEnvPath, instance.FormatEnv(appEnvValues), 0o640, deployOwner); err != nil {
-		cleanupInst()
 		return nil, err
 	}
 
@@ -1362,12 +1361,12 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 			Detail:    "initial deploy pending",
 			UpdatedAt: time.Now(),
 		}); err != nil {
-			cleanupInst()
 			return nil, err
 		}
 	}
+	stateSaved = true
 
-	deployRes, err := runDeploy(ctx, e, repo, d, "cli:project-add", false)
+	deployRes, err := runDeploy(ctx, e, repo, d, "cli:project-add", locked)
 	if err != nil {
 		return nil, err
 	}
