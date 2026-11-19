@@ -66,6 +66,11 @@ type Config struct {
 	StateRoot  string
 	FS         sys.FS
 	Catalog    kinds.Catalog
+	// ReloadHost, when set, runs at the start of every tick and returns the
+	// host config, secrets and notifier to use for that tick. A long-running
+	// agent must not deploy with a host.env older than the one on disk: a
+	// stale CVCTL_EDGE_MODE renders routes for the wrong entry point.
+	ReloadHost func() (*hostcfg.Config, *hostcfg.Secrets, notify.Notifier, error)
 }
 
 // Run executes the agent monitoring loop.
@@ -100,12 +105,15 @@ func Run(ctx context.Context, cfg Config) error {
 		stateRoot = deploy.DefaultStateRoot
 	}
 
-	hostName := ""
-	if cfg.Host != nil && cfg.Host.HostName != "" {
-		hostName = cfg.Host.HostName
-	} else {
-		hostName, _ = os.Hostname()
+	host, secrets := cfg.Host, cfg.Secrets
+	hostNameOf := func(h *hostcfg.Config) string {
+		if h != nil && h.HostName != "" {
+			return h.HostName
+		}
+		n, _ := os.Hostname()
+		return n
 	}
+	hostName := hostNameOf(host)
 
 	loadFn := cfg.Load
 	if loadFn == nil {
@@ -156,7 +164,7 @@ func Run(ctx context.Context, cfg Config) error {
 	sourcesFn := cfg.Sources
 	if sourcesFn == nil {
 		sourcesFn = func(d *instance.Decisions) deploy.Source {
-			deps := deploy.SourceDepsWithRoots(d.Instance, cfg.Run, cfg.Host, cfg.Secrets, deployRoot, stateRoot, fsys)
+			deps := deploy.SourceDepsWithRoots(d.Instance, cfg.Run, host, secrets, deployRoot, stateRoot, fsys)
 			return deploy.SourceFor(d, deps)
 		}
 	}
@@ -216,7 +224,42 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	lastReloadErr := ""
+	reloadHost := func() bool {
+		if cfg.ReloadHost == nil {
+			return true
+		}
+		h, s, n, err := cfg.ReloadHost()
+		if err != nil {
+			reason := fmt.Sprintf("cannot reload host config, skipping this tick: %v", err)
+			if reason != lastReloadErr {
+				lastReloadErr = reason
+				logDecision("", "error", reason)
+				_ = notif.Send(ctx, notify.Message{
+					Host:  hostName,
+					Level: "error",
+					Title: "agent cannot reload host config",
+					Text:  reason,
+				})
+			}
+			return false
+		}
+		lastReloadErr = ""
+		if !host.Equal(h) {
+			logDecision("", "reload", "host config changed")
+		}
+		host, secrets = h, s
+		if n != nil {
+			notif = n
+		}
+		hostName = hostNameOf(host)
+		return true
+	}
+
 	runTick := func() {
+		if !reloadHost() {
+			return
+		}
 		instances, err := cfg.Store.Instances()
 		if err != nil {
 			logDecision("", "error", fmt.Sprintf("cannot list instances: %v", err))
@@ -247,7 +290,7 @@ func Run(ctx context.Context, cfg Config) error {
 				}
 
 				src := sourcesFn(dec)
-				fetchCtx, fetchCancel := deploy.WithStepTimeout(ctx, cfg.Host.TimeoutFetch(), "fetch")
+				fetchCtx, fetchCancel := deploy.WithStepTimeout(ctx, host.TimeoutFetch(), "fetch")
 				want, err := src.Desired(fetchCtx, dec)
 				if err != nil {
 					te := deploy.TimeoutError(fetchCtx)
@@ -300,7 +343,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 				// ctx is cancelled by the shutdown signal; the pipeline stops at its
 				// next step boundary and records "interrupted".
-				deployCtx, deployCancel := deploy.WithStepTimeout(ctx, cfg.Host.TimeoutDeploy(), "deploy")
+				deployCtx, deployCancel := deploy.WithStepTimeout(ctx, host.TimeoutDeploy(), "deploy")
 				res, err := cfg.Deployer.Deploy(deployCtx, inst, want, deploy.Options{Actor: "agent"})
 				if err != nil {
 					if te := deploy.TimeoutError(deployCtx); te != nil {

@@ -37,10 +37,9 @@ func TestAgentRegistryLogin(t *testing.T) {
 	sec := hostcfg.NewSecrets()
 	sec.Set("registry_token", "ghp_secrettoken")
 
-	notif := notify.NoopNotifier{}
-	var out bytes.Buffer
-
-	runAgentRegistryLogin(context.Background(), run, hcfg, sec, notif, &out)
+	if err := runAgentRegistryLogin(context.Background(), run, hcfg, sec); err != nil {
+		t.Fatal(err)
+	}
 
 	found := false
 	for _, c := range run.Calls {
@@ -68,11 +67,9 @@ func TestAgentRegistryLoginFailure(t *testing.T) {
 	sec := hostcfg.NewSecrets()
 	sec.Set("registry_token", "bad-token")
 
-	notif := notify.NoopNotifier{}
 	var out bytes.Buffer
-
-	// Should log error and not panic / not block
-	runAgentRegistryLogin(context.Background(), run, hcfg, sec, notif, &out)
+	login := &agentLogin{run: run}
+	login.ensure(context.Background(), hcfg, sec, notify.NoopNotifier{}, &out)
 
 	logStr := out.String()
 	if !strings.Contains(logStr, `"action":"error"`) {
@@ -117,8 +114,9 @@ func TestAgentRegistryLoginOnlyTokenHost(t *testing.T) {
 	sec := hostcfg.NewSecrets()
 	sec.Set("registry_token", "ghp_secrettoken")
 
-	var out bytes.Buffer
-	runAgentRegistryLogin(context.Background(), run, hcfg, sec, notify.NoopNotifier{}, &out)
+	if err := runAgentRegistryLogin(context.Background(), run, hcfg, sec); err != nil {
+		t.Fatal(err)
+	}
 
 	if len(run.Calls) != 1 || run.Calls[0].String() != "docker login ghcr.io -u deployuser --password-stdin" {
 		t.Fatalf("expected a single login to the token host, got %v", run.Calls)

@@ -45,9 +45,17 @@ type Decisions struct {
 	Strategy    string // recreate | blue-green
 	Services    map[string]ServiceDecision
 	Domains     map[string]string
-	Digests     map[string]string
-	Backup      BackupDecision
+	// Aliases are more domains that serve the same service as Domains, which
+	// stays the primary one; Redirects answer a 301 to one of them.
+	Aliases   map[string][]string
+	Redirects map[string][]Redirect
+	Digests   map[string]string
+	Backup    BackupDecision
 }
+
+// Redirect sends every request for From to the same path on To, a primary
+// domain or alias of the service it belongs to.
+type Redirect struct{ From, To string }
 
 // BackupDecision is the instance's own backup identity: S3 credentials on the
 // host silo (user bk-<inst>) and encryption keys. Ext, when set, points the
@@ -75,6 +83,8 @@ const (
 	keyStrategy = "CVCTL_STRATEGY"
 	svcPrefix   = "CVCTL_SVC_"
 	domPrefix   = "CVCTL_DOMAIN_"
+	aliasPrefix = "CVCTL_ALIASES_"
+	redirPrefix = "CVCTL_REDIRECT_"
 	digPrefix   = "CVCTL_DIGEST_"
 	extInfix    = "_EXT_"
 
@@ -150,6 +160,7 @@ func Read(path string, p *contract.Project) (*Decisions, error) {
 		if v, ok := m[domPrefix+n]; ok {
 			d.Domains[a.Name] = v
 		}
+		d.readRoutes(m, a.Name)
 		if v, ok := m[digPrefix+n]; ok {
 			d.Digests[a.Name] = v
 		}
@@ -160,6 +171,7 @@ func Read(path string, p *contract.Project) (*Decisions, error) {
 			if v, ok := m[domPrefix+n]; ok {
 				d.Domains[ds.Name] = v
 			}
+			d.readRoutes(m, ds.Name)
 		}
 	}
 	for _, ds := range p.Data {
@@ -229,6 +241,100 @@ func Read(path string, p *contract.Project) (*Decisions, error) {
 	return d, nil
 }
 
+// readRoutes leaves Aliases and Redirects nil when the file has none, so
+// decisions without them compare equal to what they were before.
+func (d *Decisions) readRoutes(m map[string]string, svc string) {
+	n := contract.Normalize(svc)
+	if v, ok := m[aliasPrefix+n]; ok {
+		var list []string
+		for _, h := range strings.Split(v, ",") {
+			if h = strings.TrimSpace(h); h != "" {
+				list = append(list, h)
+			}
+		}
+		if len(list) > 0 {
+			sort.Strings(list)
+			if d.Aliases == nil {
+				d.Aliases = map[string][]string{}
+			}
+			d.Aliases[svc] = list
+		}
+	}
+	if v, ok := m[redirPrefix+n]; ok {
+		var list []Redirect
+		for _, pair := range strings.Split(v, ",") {
+			if pair = strings.TrimSpace(pair); pair == "" {
+				continue
+			}
+			from, to, _ := strings.Cut(pair, "=")
+			list = append(list, Redirect{From: strings.TrimSpace(from), To: strings.TrimSpace(to)})
+		}
+		if len(list) > 0 {
+			sortRedirects(list)
+			if d.Redirects == nil {
+				d.Redirects = map[string][]Redirect{}
+			}
+			d.Redirects[svc] = list
+		}
+	}
+}
+
+func sortRedirects(list []Redirect) {
+	sort.Slice(list, func(i, j int) bool { return list[i].From < list[j].From })
+}
+
+// SortedRedirects returns a sorted copy of rs: the order of routers and of
+// cvctl.env must not depend on how the redirects were given.
+func SortedRedirects(rs []Redirect) []Redirect {
+	out := append([]Redirect(nil), rs...)
+	sortRedirects(out)
+	return out
+}
+
+// SortedAliases returns a sorted copy of hosts.
+func SortedAliases(hosts []string) []string {
+	out := append([]string(nil), hosts...)
+	sort.Strings(out)
+	return out
+}
+
+// RouteKeys lists the alias and redirect keys of every service in p, so an
+// update that clears them can drop the stale values from the raw file.
+func RouteKeys(p *contract.Project) []string {
+	var keys []string
+	for _, a := range p.Apps {
+		n := contract.Normalize(a.Name)
+		keys = append(keys, aliasPrefix+n, redirPrefix+n)
+	}
+	for _, ds := range p.Data {
+		n := contract.Normalize(ds.Name)
+		keys = append(keys, aliasPrefix+n, redirPrefix+n)
+	}
+	return keys
+}
+
+// Hosts maps every domain the instance answers for (primary, alias and
+// redirect source) to its service.
+func (d *Decisions) Hosts() map[string]string {
+	out := map[string]string{}
+	for svc, h := range d.Domains {
+		if h != "" {
+			out[h] = svc
+		}
+	}
+	for svc, list := range d.Aliases {
+		for _, h := range list {
+			out[h] = svc
+		}
+	}
+	for svc, list := range d.Redirects {
+		for _, r := range list {
+			out[r.From] = svc
+		}
+	}
+	return out
+}
+
 // AtoiNonNeg parses a non-negative integer; anything else is 0.
 func AtoiNonNeg(v string) int {
 	n, err := strconv.Atoi(v)
@@ -288,6 +394,16 @@ func (d *Decisions) Entries() map[string]string {
 	}
 	for name, v := range d.Domains {
 		set(domPrefix+contract.Normalize(name), v)
+	}
+	for name, list := range d.Aliases {
+		set(aliasPrefix+contract.Normalize(name), strings.Join(SortedAliases(list), ","))
+	}
+	for name, list := range d.Redirects {
+		pairs := make([]string, 0, len(list))
+		for _, r := range SortedRedirects(list) {
+			pairs = append(pairs, r.From+"="+r.To)
+		}
+		set(redirPrefix+contract.Normalize(name), strings.Join(pairs, ","))
 	}
 	for name, v := range d.Digests {
 		set(digPrefix+contract.Normalize(name), v)
@@ -686,7 +802,107 @@ func Check(d *Decisions, p *contract.Project, cat kinds.Catalog) []output.Issue 
 			add("E_DECISION_INVALID", ds.Name, fmt.Sprintf("mode %q is not valid", s.Mode), "use local or external")
 		}
 	}
+	is = append(is, CheckRoutes(d, p)...)
 	output.SortIssues(is)
+	return is
+}
+
+// Routed reports, per service, whether Traefik gets a route for it: an app
+// with an exposed port, or a local data service with an exposed port and public
+// buckets. It must match render.Traefik, or an alias or redirect on a service
+// it skips passes the checks and is never routed.
+func Routed(d *Decisions, p *contract.Project) map[string]bool {
+	out := map[string]bool{}
+	for _, a := range p.Apps {
+		out[a.Name] = a.ExposePort > 0
+	}
+	for _, ds := range p.Data {
+		out[ds.Name] = ds.ExposePort > 0 && d.Services[ds.Name].Mode == "local" && len(p.PublicBuckets(ds.Name)) > 0
+	}
+	return out
+}
+
+// CheckRoutes rejects aliases and redirects Traefik could not route on its
+// own: two routers for one host make it pick one, and a redirect to a host
+// that redirects again loops. A primary domain shared by two services predates
+// aliases and is left as it was.
+func CheckRoutes(d *Decisions, p *contract.Project) []output.Issue {
+	var is []output.Issue
+	add := func(svc, msg, hint string) {
+		is = append(is, output.Issue{Code: "E_DECISION_INVALID", Service: svc, Message: msg, Hint: hint})
+	}
+	exposed := Routed(d, p)
+	services := func(m map[string]bool) []string {
+		out := make([]string, 0, len(m))
+		for k := range m {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
+	}
+	named := map[string]bool{}
+	for svc := range d.Aliases {
+		named[svc] = true
+	}
+	for svc := range d.Redirects {
+		named[svc] = true
+	}
+	// owner holds the domains served by each exposed service.
+	owner := map[string]string{}
+	for _, svc := range services(exposed) {
+		if h := d.Domains[svc]; exposed[svc] && h != "" {
+			if _, ok := owner[h]; !ok {
+				owner[h] = svc
+			}
+		}
+	}
+	for _, svc := range services(named) {
+		n := contract.Normalize(svc)
+		if !exposed[svc] {
+			add(svc, "aliases and redirects need a service Traefik routes",
+				"remove "+aliasPrefix+n+" and "+redirPrefix+n+", or expose the service with cvctl.expose (a data service also needs local mode and a public bucket)")
+			continue
+		}
+		for _, h := range SortedAliases(d.Aliases[svc]) {
+			switch prev, taken := owner[h]; {
+			case !validHostname(h):
+				add(svc, fmt.Sprintf("alias %q is not a valid hostname", h),
+					"set "+aliasPrefix+n+" to comma-separated lowercase hostnames")
+			case taken:
+				add(svc, fmt.Sprintf("alias %s is already a domain of %s", h, prev), "give each domain to one service only")
+			default:
+				owner[h] = svc
+			}
+		}
+	}
+	sources := map[string]string{}
+	for _, svc := range services(named) {
+		if !exposed[svc] {
+			continue
+		}
+		n := contract.Normalize(svc)
+		hint := "set " + redirPrefix + n + " to comma-separated source=destination pairs, the destination a domain of " + svc
+		for _, r := range SortedRedirects(d.Redirects[svc]) {
+			prevSrc, dup := sources[r.From]
+			prevOwn, served := owner[r.From]
+			switch {
+			case !validHostname(r.From):
+				add(svc, fmt.Sprintf("redirect source %q is not a valid hostname", r.From), hint)
+			case !validHostname(r.To):
+				add(svc, fmt.Sprintf("redirect destination %q of %s is not a valid hostname", r.To, r.From), hint)
+			case r.From == r.To:
+				add(svc, fmt.Sprintf("redirect from %s to itself would loop", r.From), hint)
+			case served:
+				add(svc, fmt.Sprintf("redirect source %s is already a domain of %s", r.From, prevOwn), "a domain either serves a service or redirects, not both")
+			case dup:
+				add(svc, fmt.Sprintf("redirect source %s is already redirected by %s", r.From, prevSrc), "redirect each source once")
+			case owner[r.To] != svc:
+				add(svc, fmt.Sprintf("redirect destination %s is not a domain or alias of %s", r.To, svc), hint)
+			default:
+				sources[r.From] = svc
+			}
+		}
+	}
 	return is
 }
 

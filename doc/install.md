@@ -94,6 +94,12 @@ test message and restarts `cvctl-agent` so it uses them; disabling notifications
 agent. The agent and the backup timers log notifier errors (bad configuration, failed sends) to the
 journal.
 
+The agent re-reads `host.env` and `secrets/` at the start of every cycle, so a change made by
+init (for example `CVCTL_EDGE_MODE`) applies to its next deploy without a restart; the change is
+logged as a `reload` decision. If they fail to load, the agent skips the cycle and logs and
+notifies the error once, instead of deploying with the old values. Routes already written keep the
+old edge mode until the instance is deployed again (`cvctl deploy <inst>`).
+
 The Telegram chat ID is numeric (groups and channels are negative) or a public `@channelname`. From
 a topic link `t.me/c/<id>/<thread>` the chat ID is `-100<id>` and the optional thread ID is
 `<thread>`.

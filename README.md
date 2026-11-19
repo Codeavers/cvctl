@@ -38,8 +38,8 @@ contract allowlist accepts.
   restore points before each prod deploy, `backup verify` and rebuilding an instance on a new host
   from off-site backups.
 - **Traefik with automatic TLS**: file provider only, no Docker socket; Let's Encrypt over HTTP,
-  Route53 or Cloudflare, or behind another proxy. `cvctl adopt` exposes services cvctl does not
-  deploy.
+  Route53 or Cloudflare, or behind another proxy; domain aliases and 301 redirects. `cvctl adopt`
+  exposes services cvctl does not deploy.
 - **Host hardening**: `cvctl init` sets up Docker, accounts, SSH with an auto-revert timer,
   fail2ban, UFW and unattended upgrades, idempotently.
 - **Safe self-upgrade**: `cvctl upgrade` shows what the new release would change per instance,

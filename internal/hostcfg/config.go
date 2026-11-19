@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net/netip"
 	"os"
 	"path"
@@ -356,6 +357,14 @@ func (c *Config) sync(key, val string) {
 	}
 }
 
+// Equal reports whether c and o hold the same host.env entries.
+func (c *Config) Equal(o *Config) bool {
+	if c == nil || o == nil {
+		return c == o
+	}
+	return maps.Equal(c.vals, o.vals) && maps.Equal(c.extra, o.extra)
+}
+
 // Secrets holds secret values by file name. Values never appear in errors.
 type Secrets struct{ m map[string]string }
 
@@ -370,6 +379,14 @@ func (s *Secrets) Get(name string) (string, bool) {
 	}
 	v, ok := s.m[name]
 	return v, ok && v != ""
+}
+
+// Equal reports whether s and o hold the same secrets.
+func (s *Secrets) Equal(o *Secrets) bool {
+	if s == nil || o == nil {
+		return s == o
+	}
+	return maps.Equal(s.m, o.m)
 }
 
 func (s *Secrets) Set(name, value string) {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/codeavers/cvctl/internal/adopt"
+	"github.com/codeavers/cvctl/internal/contract"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/internal/sys/systest"
 )
@@ -293,8 +294,8 @@ func TestStatusShowsAdopted(t *testing.T) {
 	_, out, _ := run(t, "status")
 	found := false
 	for _, line := range strings.Split(out, "\n") {
-		if f := strings.Fields(line); len(f) == 6 && f[0] == "cockpit" {
-			found = f[1] == "-" && f[2] == "-" && f[3] == "ADOPTED" && f[4] == "-" && f[5] == "-"
+		if f := strings.Fields(line); len(f) == 7 && f[0] == "cockpit" {
+			found = f[1] == "-" && f[2] == "-" && f[3] == "ADOPTED" && f[4] == "-" && f[5] == "-" && f[6] == "-"
 		}
 	}
 	if !found {
@@ -449,6 +450,33 @@ func TestAdoptAddReportsRollbackFailure(t *testing.T) {
 	}
 	if !strings.Contains(errb, "rollback") || !strings.Contains(errb, "9090") {
 		t.Fatalf("no rollback warning in %q", errb)
+	}
+}
+
+func TestAdoptAddDomainInUseByInstanceAliasOrRedirect(t *testing.T) {
+	for _, key := range []string{"ALIASES", "REDIRECT"} {
+		f := setupAdopt(t, false)
+		var svc, host string
+		for s, h := range f.env.projectListItem("myapp-dev").Domains {
+			svc, host = s, h
+		}
+		value := "taken.example.com"
+		if key == "REDIRECT" {
+			value += "=" + host
+		}
+		path := filepath.Join(f.env.deployRoot(), "myapp-dev", "cvctl.env")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		line := "CVCTL_" + key + "_" + contract.Normalize(svc) + "=" + value + "\n"
+		if err := os.WriteFile(path, append(raw, line...), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		code, out, _ := run(t, "adopt", "add", "other", "--domain", "taken.example.com", "--target", "http://host:1", "--json")
+		if code == 0 || errorCode(t, out) != "E_ADOPT_DOMAIN_IN_USE" || !strings.Contains(out, "myapp-dev") {
+			t.Fatalf("%s: code %d: %s", key, code, out)
+		}
 	}
 }
 

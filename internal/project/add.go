@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -146,13 +147,22 @@ type AddOptions struct {
 	// random and prompt vars of env.spec are taken from it.
 	EnvFile map[string]string
 	Domains map[string]string
-	Ext     map[string]map[string]string
+	// Aliases are the extra domains of a service in Domains.
+	Aliases map[string][]string
+	// Redirects maps a source domain to the domain it redirects to.
+	Redirects map[string]string
+	Ext       map[string]map[string]string
 }
 
 type UpdateOptions struct {
 	Ext map[string]map[string]string
-	// Domains replaces the domain of each named service (svc -> host).
+	// Domains replaces the domain of each named service (svc -> host), and
+	// Aliases its aliases: a service in Domains keeps only the ones given here.
 	Domains map[string]string
+	Aliases map[string][]string
+	// Redirects adds or replaces a redirect per source domain; an empty
+	// destination removes it.
+	Redirects map[string]string
 }
 
 type AddResult struct {
@@ -567,7 +577,7 @@ func promptDataServices(ctx context.Context, e *Env, cat kinds.Catalog, p *contr
 
 // checkDomainServices rejects a --domain for a service the contract does not
 // define or does not expose, or whose host is not a valid hostname.
-func checkDomainServices(p *contract.Project, domains map[string]string) error {
+func checkDomainServices(p *contract.Project, domains map[string]string, aliases map[string][]string) error {
 	valid := make(map[string]bool, len(p.Apps)+len(p.Data))
 	for _, a := range p.Apps {
 		valid[a.Name] = true
@@ -597,13 +607,136 @@ func checkDomainServices(p *contract.Project, domains map[string]string) error {
 			}
 		}
 	}
+	for svc, hosts := range aliases {
+		if _, ok := domains[svc]; !ok {
+			return &output.UsageError{Err: &output.Error{
+				Code:    "E_USAGE_DOMAIN",
+				Message: fmt.Sprintf("aliases for %s without its primary domain", svc),
+				Hint:    "pass the primary domain first: --domain " + svc + "=<primary> --domain " + svc + "=<alias>",
+			}}
+		}
+		for _, h := range hosts {
+			if !instance.ValidHostname(h) {
+				return &output.UsageError{Err: &output.Error{
+					Code:    "E_USAGE_DOMAIN",
+					Message: fmt.Sprintf("domain %q for %s is not a valid hostname", h, svc),
+					Hint:    "use a lowercase hostname such as api.example.com",
+				}}
+			}
+		}
+	}
+	return nil
+}
+
+// applyDomains sets each named service's whole domain set: the primary and,
+// replacing the old ones, its aliases.
+func applyDomains(d *instance.Decisions, domains map[string]string, aliases map[string][]string) {
+	for svc, host := range domains {
+		d.Domains[svc] = host
+		if len(aliases[svc]) == 0 {
+			delete(d.Aliases, svc)
+			continue
+		}
+		if d.Aliases == nil {
+			d.Aliases = map[string][]string{}
+		}
+		d.Aliases[svc] = instance.SortedAliases(aliases[svc])
+	}
+}
+
+func redirectErr(msg, hint string) error {
+	return &output.UsageError{Err: &output.Error{Code: "E_USAGE_REDIRECT", Message: msg, Hint: hint}}
+}
+
+// applyRedirects resolves each redirect to the exposed service that serves its
+// destination, then makes sure every redirect still points at a domain of its
+// service: replacing a service's domains can drop the alias one targets.
+func applyRedirects(d *instance.Decisions, p *contract.Project, redirects map[string]string, update bool) error {
+	served := map[string]string{}
+	var exposed []string
+	for svc, ok := range instance.Routed(d, p) {
+		if ok {
+			exposed = append(exposed, svc)
+		}
+	}
+	slices.Sort(exposed)
+	for _, svc := range exposed {
+		for _, h := range append([]string{d.Domains[svc]}, d.Aliases[svc]...) {
+			if _, ok := served[h]; h != "" && !ok {
+				served[h] = svc
+			}
+		}
+	}
+	drop := func(from string) bool {
+		found := false
+		for svc, list := range d.Redirects {
+			kept := slices.DeleteFunc(slices.Clone(list), func(r instance.Redirect) bool { return r.From == from })
+			if len(kept) == len(list) {
+				continue
+			}
+			found = true
+			if len(kept) == 0 {
+				delete(d.Redirects, svc)
+			} else {
+				d.Redirects[svc] = kept
+			}
+		}
+		return found
+	}
+	froms := make([]string, 0, len(redirects))
+	for from := range redirects {
+		froms = append(froms, from)
+	}
+	slices.Sort(froms)
+	for _, from := range froms {
+		to := redirects[from]
+		if !instance.ValidHostname(from) {
+			return redirectErr(fmt.Sprintf("redirect source %q is not a valid hostname", from), "use a lowercase hostname such as www.example.com")
+		}
+		if to == "" {
+			if !update {
+				return redirectErr(fmt.Sprintf("--redirect %s= has no destination", from), "pass --redirect <source>=<destination>; an empty destination only removes a redirect in project update")
+			}
+			if !drop(from) {
+				return redirectErr(fmt.Sprintf("no redirect from %s to remove", from), "list the instance's redirects with cvctl plan")
+			}
+			continue
+		}
+		if !instance.ValidHostname(to) {
+			return redirectErr(fmt.Sprintf("redirect destination %q is not a valid hostname", to), "use a lowercase hostname such as example.com")
+		}
+		svc, ok := served[to]
+		if !ok {
+			return redirectErr(fmt.Sprintf("no service serves %s, the destination of the redirect from %s", to, from),
+				"redirect to the domain or an alias of an exposed service, given with --domain")
+		}
+		drop(from)
+		if d.Redirects == nil {
+			d.Redirects = map[string][]instance.Redirect{}
+		}
+		d.Redirects[svc] = instance.SortedRedirects(append(d.Redirects[svc], instance.Redirect{From: from, To: to}))
+	}
+	svcs := make([]string, 0, len(d.Redirects))
+	for svc := range d.Redirects {
+		svcs = append(svcs, svc)
+	}
+	slices.Sort(svcs)
+	for _, svc := range svcs {
+		for _, r := range d.Redirects[svc] {
+			if served[r.To] != svc {
+				return redirectErr(fmt.Sprintf("the redirect from %s goes to %s, which is no longer a domain of %s", r.From, r.To, svc),
+					fmt.Sprintf("keep %s with --domain %s=%s, or remove the redirect with --redirect %s=", r.To, svc, r.To, r.From))
+			}
+		}
+	}
 	return nil
 }
 
 // checkAdoptedDomains keeps an instance from taking a domain an adopted service
 // already serves: two Traefik routers on one host would fight over its traffic.
 func checkAdoptedDomains(e *Env, d *instance.Decisions) error {
-	if len(d.Domains) == 0 {
+	hosts := d.Hosts()
+	if len(hosts) == 0 {
 		return nil
 	}
 	dir := e.AdoptDir
@@ -615,14 +748,12 @@ func checkAdoptedDomains(e *Env, d *instance.Decisions) error {
 		return err
 	}
 	for _, s := range svcs {
-		for svc, host := range d.Domains {
-			if host == s.Domain {
-				return &output.UsageError{Err: &output.Error{
-					Code:    "E_ADOPT_DOMAIN_IN_USE",
-					Message: fmt.Sprintf("domain %s for %s is used by adopted service %s", host, svc, s.Name),
-					Hint:    "remove it with cvctl adopt rm or choose another domain",
-				}}
-			}
+		if svc, ok := hosts[s.Domain]; ok {
+			return &output.UsageError{Err: &output.Error{
+				Code:    "E_ADOPT_DOMAIN_IN_USE",
+				Message: fmt.Sprintf("domain %s for %s is used by adopted service %s", s.Domain, svc, s.Name),
+				Hint:    "remove it with cvctl adopt rm or choose another domain",
+			}}
 		}
 	}
 	return nil
@@ -782,8 +913,14 @@ func checkDecisions(d *instance.Decisions, p *contract.Project, cat kinds.Catalo
 	for _, ds := range p.Data {
 		knownData[ds.Name] = true
 	}
-	var checkIssues []output.Issue
+	// Route issues are kept for apps too: an alias or redirect Traefik cannot
+	// route must stop the write, not wait for the deploy.
+	routeIssues := instance.CheckRoutes(d, p)
+	checkIssues := slices.Clone(routeIssues)
 	for _, iss := range instance.Check(d, p, cat) {
+		if slices.Contains(routeIssues, iss) {
+			continue
+		}
 		if iss.Code == "E_S3_PUBLIC_LOCAL_PROD" || iss.Code == "E_SQLITE_RECREATE" {
 			checkIssues = append(checkIssues, iss)
 			continue
@@ -795,6 +932,7 @@ func checkDecisions(d *instance.Decisions, p *contract.Project, cat kinds.Catalo
 		}
 	}
 	if len(checkIssues) > 0 {
+		output.SortIssues(checkIssues)
 		return &output.IssuesError{Issues: checkIssues}
 	}
 	return nil
@@ -1103,7 +1241,7 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		return nil, err
 	}
 
-	if err := checkDomainServices(p, opts.Domains); err != nil {
+	if err := checkDomainServices(p, opts.Domains, opts.Aliases); err != nil {
 		cleanupInst()
 		return nil, err
 	}
@@ -1134,9 +1272,7 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 		d.InfraSource = instance.SourceOCI
 		d.InfraRef = ociRef
 	}
-	for k, v := range opts.Domains {
-		d.Domains[k] = v
-	}
+	applyDomains(d, opts.Domains, opts.Aliases)
 	ext, err := takeBackupExt(d, opts.Ext, e.storage(), true)
 	if err != nil {
 		cleanupInst()
@@ -1158,6 +1294,10 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 	}
 
 	if err := promptDomains(ctx, e, p, d); err != nil {
+		cleanupInst()
+		return nil, err
+	}
+	if err := applyRedirects(d, p, opts.Redirects, false); err != nil {
 		cleanupInst()
 		return nil, err
 	}
@@ -1350,12 +1490,10 @@ func Update(ctx context.Context, e *Env, inst string, opts UpdateOptions) (*AddR
 	if err != nil {
 		return nil, err
 	}
-	if err := checkDomainServices(p, opts.Domains); err != nil {
+	if err := checkDomainServices(p, opts.Domains, opts.Aliases); err != nil {
 		return nil, err
 	}
-	for svc, host := range opts.Domains {
-		d.Domains[svc] = host
-	}
+	applyDomains(d, opts.Domains, opts.Aliases)
 
 	ext, err := takeBackupExt(d, opts.Ext, e.storage(), len(backup.Targets(p, d)) == 0)
 	if err != nil {
@@ -1402,6 +1540,9 @@ func Update(ctx context.Context, e *Env, inst string, opts UpdateOptions) (*AddR
 	if err := promptDomains(ctx, e, p, d); err != nil {
 		return nil, err
 	}
+	if err := applyRedirects(d, p, opts.Redirects, true); err != nil {
+		return nil, err
+	}
 	if err := checkAdoptedDomains(e, d); err != nil {
 		return nil, err
 	}
@@ -1419,6 +1560,10 @@ func Update(ctx context.Context, e *Env, inst string, opts UpdateOptions) (*AddR
 	merged := make(map[string]string, len(rawEnv))
 	for k, v := range rawEnv {
 		merged[k] = v
+	}
+	// Entries omits a service's aliases and redirects once they are all gone.
+	for _, k := range instance.RouteKeys(p) {
+		delete(merged, k)
 	}
 	for k, v := range d.Entries() {
 		merged[k] = v

@@ -482,3 +482,24 @@ func TestUpgradeRepoValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigAndSecretsEqual(t *testing.T) {
+	a, b := hostcfg.NewConfig(), hostcfg.NewConfig()
+	if !a.Equal(b) || !hostcfg.NewConfig().Equal(&hostcfg.Config{}) {
+		t.Fatal("empty configs must be equal")
+	}
+	if err := b.Set("EDGE_MODE", "edge"); err != nil {
+		t.Fatal(err)
+	}
+	if a.Equal(b) || a.Equal(nil) {
+		t.Fatal("different configs reported equal")
+	}
+	if !(*hostcfg.Config)(nil).Equal(nil) {
+		t.Fatal("nil configs must be equal")
+	}
+	s1, s2 := hostcfg.NewSecrets(), hostcfg.NewSecrets()
+	s2.Set("registry_token", "t")
+	if s1.Equal(s2) || !s1.Equal(hostcfg.NewSecrets()) || s1.Equal(nil) {
+		t.Fatal("secrets equality")
+	}
+}

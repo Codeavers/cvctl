@@ -2838,3 +2838,220 @@ func TestCheckAdoptedDomainsSkipsRegistryWithoutDomains(t *testing.T) {
 	err := checkAdoptedDomains(e, &instance.Decisions{Domains: map[string]string{"web": "w.example.com"}})
 	requireCode(t, err, "E_ADOPT_REGISTRY")
 }
+
+func readCvctlEnv(t *testing.T, rig *updateRig) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(rig.instDir, "cvctl.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// seedRoutes appends alias and redirect keys to the rig's cvctl.env.
+func seedRoutes(t *testing.T, rig *updateRig, lines string) string {
+	t.Helper()
+	raw := readCvctlEnv(t, rig) + lines
+	if err := os.WriteFile(filepath.Join(rig.instDir, "cvctl.env"), []byte(raw), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestUpdateAddsAliasesAndRedirect(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+	_, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{
+		Domains:   map[string]string{"web": "web.example.com"},
+		Aliases:   map[string][]string{"web": {"b.example.com", "a.example.com"}},
+		Redirects: map[string]string{"www.example.com": "a.example.com"},
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	raw := readCvctlEnv(t, rig)
+	for _, want := range []string{"CVCTL_DOMAIN_WEB=web.example.com\n", "CVCTL_ALIASES_WEB=a.example.com,b.example.com\n", "CVCTL_REDIRECT_WEB=www.example.com=a.example.com\n"} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("missing %q:\n%s", want, raw)
+		}
+	}
+	routes, err := os.ReadFile(filepath.Join(rig.env.Deployer.TraefikDir, "demo-dev.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Host(`a.example.com`)", "Host(`www.example.com`)", "replacement: https://a.example.com${1}"} {
+		if !strings.Contains(string(routes), want) {
+			t.Fatalf("routes miss %q:\n%s", want, routes)
+		}
+	}
+}
+
+func TestUpdateDomainReplacesAliases(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+	seedRoutes(t, rig, "CVCTL_ALIASES_WEB=a.example.com\n")
+	res, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{Domains: map[string]string{"web": "web.example.com"}})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if len(res.Decisions.Aliases["web"]) != 0 {
+		t.Fatalf("aliases kept: %v", res.Decisions.Aliases)
+	}
+	if raw := readCvctlEnv(t, rig); strings.Contains(raw, "CVCTL_ALIASES_WEB") {
+		t.Fatalf("stale alias key:\n%s", raw)
+	}
+}
+
+func TestUpdateWithoutDomainKeepsAliases(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+	seedRoutes(t, rig, "CVCTL_ALIASES_WEB=a.example.com\nCVCTL_REDIRECT_WEB=www.example.com=web.example.com\n")
+	if _, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	raw := readCvctlEnv(t, rig)
+	if !strings.Contains(raw, "CVCTL_ALIASES_WEB=a.example.com\n") || !strings.Contains(raw, "CVCTL_REDIRECT_WEB=www.example.com=web.example.com\n") {
+		t.Fatalf("routes lost:\n%s", raw)
+	}
+}
+
+func TestUpdateRedirectAddRemove(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+	seedRoutes(t, rig, "CVCTL_REDIRECT_WEB=old.example.com=web.example.com\n")
+	_, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{Redirects: map[string]string{"www.example.com": "web.example.com"}})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if raw := readCvctlEnv(t, rig); !strings.Contains(raw, "CVCTL_REDIRECT_WEB=old.example.com=web.example.com,www.example.com=web.example.com\n") {
+		t.Fatalf("add:\n%s", raw)
+	}
+	_, err = Update(context.Background(), rig.env, "demo-dev", UpdateOptions{Redirects: map[string]string{"old.example.com": "", "www.example.com": ""}})
+	if err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if raw := readCvctlEnv(t, rig); strings.Contains(raw, "CVCTL_REDIRECT_WEB") {
+		t.Fatalf("remove:\n%s", raw)
+	}
+	before := readCvctlEnv(t, rig)
+	_, err = Update(context.Background(), rig.env, "demo-dev", UpdateOptions{Redirects: map[string]string{"nope.example.com": ""}})
+	requireCode(t, err, "E_USAGE_REDIRECT")
+	var ue *output.UsageError
+	if !errors.As(err, &ue) {
+		t.Fatalf("not a usage error: %v", err)
+	}
+	if readCvctlEnv(t, rig) != before {
+		t.Fatal("cvctl.env changed on error")
+	}
+}
+
+func TestRedirectUnknownDestination(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+	before := readCvctlEnv(t, rig)
+	_, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{Redirects: map[string]string{"www.example.com": "elsewhere.example.com"}})
+	requireCode(t, err, "E_USAGE_REDIRECT")
+	if readCvctlEnv(t, rig) != before {
+		t.Fatal("cvctl.env changed on error")
+	}
+}
+
+func TestUpdateDropsAliasUsedByRedirect(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+	before := seedRoutes(t, rig, "CVCTL_ALIASES_WEB=a.example.com\nCVCTL_REDIRECT_WEB=www.example.com=a.example.com\n")
+	_, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{Domains: map[string]string{"web": "web.example.com"}})
+	requireCode(t, err, "E_USAGE_REDIRECT")
+	if !strings.Contains(err.Error(), "www.example.com") || !strings.Contains(err.Error(), "a.example.com") {
+		t.Fatalf("unclear error: %v", err)
+	}
+	if readCvctlEnv(t, rig) != before {
+		t.Fatal("cvctl.env changed on error")
+	}
+}
+
+func TestUpdateRejectsAliasCollision(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+	before := readCvctlEnv(t, rig)
+	_, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{
+		Domains:   map[string]string{"web": "web.example.com"},
+		Aliases:   map[string][]string{"web": {"a.example.com"}},
+		Redirects: map[string]string{"a.example.com": "web.example.com"},
+	})
+	if err == nil {
+		t.Fatal("a domain that is both an alias and a redirect source was accepted")
+	}
+	if readCvctlEnv(t, rig) != before {
+		t.Fatal("cvctl.env changed on error")
+	}
+}
+
+func TestUpdateRejectsInvalidAlias(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+	_, err := Update(context.Background(), rig.env, "demo-dev", UpdateOptions{
+		Domains: map[string]string{"web": "web.example.com"},
+		Aliases: map[string][]string{"web": {"a.com`) || Host(`b"}},
+	})
+	requireCode(t, err, "E_USAGE_DOMAIN")
+}
+
+func TestUpdateRejectsAdoptedAliasAndRedirect(t *testing.T) {
+	for _, opts := range []UpdateOptions{
+		{Domains: map[string]string{"web": "web.example.com"}, Aliases: map[string][]string{"web": {"panel.example.com"}}},
+		{Redirects: map[string]string{"panel.example.com": "web.example.com"}},
+	} {
+		rig := newUpdateRig(t, map[string]string{"data_extra_mode": "local"})
+		rig.env.AdoptDir = adoptedDir(t, "panel.example.com")
+		_, err := Update(context.Background(), rig.env, "demo-dev", opts)
+		requireCode(t, err, "E_ADOPT_DOMAIN_IN_USE")
+	}
+}
+
+func TestAddRejectsRedirectRemoval(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra-source")
+	writeTestInfra(t, infraDir, validCompose, validSpec)
+	stub := &stubRepo{infraSource: infraDir}
+	e := &Env{
+		FS:         sys.NewOSFS(),
+		DeployRoot: tmp,
+		StateRoot:  filepath.Join(tmp, "state"),
+		Catalog:    testCatalog(t),
+		RepoFactory: func(dir, _ string) RepoLike {
+			r := *stub
+			r.dir = dir
+			return &r
+		},
+	}
+	_, err := Add(context.Background(), e, "git@github.com:myorg/my-service-infra.git", AddOptions{
+		Domains:   map[string]string{"web": "web.example.com"},
+		Redirects: map[string]string{"www.example.com": ""},
+	})
+	requireCode(t, err, "E_USAGE_REDIRECT")
+}
+
+func TestAddWithAliasAndRedirect(t *testing.T) {
+	tmp := t.TempDir()
+	infraDir := filepath.Join(tmp, "infra-source")
+	writeTestInfra(t, infraDir, validCompose, validSpec)
+	stub := &stubRepo{infraSource: infraDir}
+	e := &Env{
+		FS:         sys.NewOSFS(),
+		DeployRoot: tmp,
+		StateRoot:  filepath.Join(tmp, "state"),
+		Catalog:    testCatalog(t),
+		RepoFactory: func(dir, _ string) RepoLike {
+			r := *stub
+			r.dir = dir
+			return &r
+		},
+	}
+	res, err := Add(context.Background(), e, "git@github.com:myorg/my-service-infra.git", AddOptions{
+		Domains:   map[string]string{"web": "example.com"},
+		Aliases:   map[string][]string{"web": {"app.example.com"}},
+		Redirects: map[string]string{"www.example.com": "example.com"},
+	})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(tmp, res.Instance, "cvctl.env"))
+	for _, want := range []string{"CVCTL_ALIASES_WEB=app.example.com\n", "CVCTL_REDIRECT_WEB=www.example.com=example.com\n"} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("missing %q:\n%s", want, raw)
+		}
+	}
+}

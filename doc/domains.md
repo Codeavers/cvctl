@@ -7,6 +7,27 @@ decision, not part of the contract: `project add --domain <svc>=<host>` sets it 
 `project update <instance> --domain <svc>=<host>` changes it (both repeatable). An instance and an
 [adopted service](#adopting-external-services) cannot share a domain.
 
+### Aliases and redirects
+
+`--domain` can repeat for one service: the first is its primary domain (`{svc.domain}` in
+`env.spec.yml`) and the rest are aliases that serve the same app. `--redirect source=destination`
+answers `source` with a 301 to the same path and query on `destination`, which must be the primary
+domain or an alias of an exposed service.
+
+```
+sudo cvctl project add oci://ghcr.io/<org>/<repo>-infra --env prod \
+  --domain web=example.com --domain web=app.example.com --redirect www.example.com=example.com
+sudo cvctl project update <inst> --redirect old.example.com=example.com
+sudo cvctl project update <inst> --redirect old.example.com=
+```
+
+In `project update`, `--domain` for a service replaces its primary domain and all its aliases;
+`--redirect source=` removes that redirect. Every domain gets its own Traefik router and
+certificate, so each one needs its DNS pointing at this host; one without it only fails its own
+certificate. A domain belongs to one service only, as primary, alias or redirect source
+(`E_DECISION_INVALID`, `E_USAGE_REDIRECT`), and never to an adopted service (`E_ADOPT_DOMAIN_IN_USE`).
+They are stored as `CVCTL_ALIASES_<SVC>` and `CVCTL_REDIRECT_<SVC>` in `cvctl.env`.
+
 ## Edge modes
 
 `EDGE_MODE` in `host.env` (asked by `cvctl init`):
@@ -59,5 +80,5 @@ the effective rules (`ufw status`) to keep clients from bypassing Traefik. Docke
 ports past ufw, so publish another stack's backend on the gateway address
 (`-p 10.203.0.1:3000:3000` with the default subnet), not on `0.0.0.0`. For Cockpit use
 `--target https://host:9090 --insecure-tls`: with an http target Cockpit rejects the WebSocket
-Origin. Domains are exclusive: an instance and an adopted service cannot share one. HTTP only; raw
-TCP or UDP ports stay out.
+Origin. Domains are exclusive: an instance and an adopted service cannot share one,
+counting the instance's aliases and redirect sources. HTTP only; raw TCP or UDP ports stay out.

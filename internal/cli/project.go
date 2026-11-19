@@ -121,18 +121,47 @@ func parseSet(setFlags []string) (map[string]string, error) {
 	return out, nil
 }
 
-func parseDomains(domainFlags []string) (map[string]string, error) {
-	out := make(map[string]string, len(domainFlags))
+// parseDomains takes the first --domain of each service as its primary
+// domain and the rest as aliases.
+func parseDomains(domainFlags []string) (map[string]string, map[string][]string, error) {
+	primary := make(map[string]string, len(domainFlags))
+	var aliases map[string][]string
 	for _, s := range domainFlags {
 		k, v, found := strings.Cut(s, "=")
 		if !found || strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
-			return nil, &output.UsageError{Err: &output.Error{
+			return nil, nil, &output.UsageError{Err: &output.Error{
 				Code:    "E_USAGE_DOMAIN",
 				Message: fmt.Sprintf("invalid --domain flag %q: expected svc=host", s),
 				Hint:    "pass --domain <service>=<hostname>, for example --domain api=api.example.com",
 			}}
 		}
-		out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		svc, host := strings.TrimSpace(k), strings.TrimSpace(v)
+		if _, ok := primary[svc]; !ok {
+			primary[svc] = host
+			continue
+		}
+		if aliases == nil {
+			aliases = map[string][]string{}
+		}
+		aliases[svc] = append(aliases[svc], host)
+	}
+	return primary, aliases, nil
+}
+
+// parseRedirects maps each source domain to its destination; an empty
+// destination asks project update to remove the redirect.
+func parseRedirects(flags []string) (map[string]string, error) {
+	out := make(map[string]string, len(flags))
+	for _, s := range flags {
+		from, to, found := strings.Cut(s, "=")
+		if !found || strings.TrimSpace(from) == "" {
+			return nil, &output.UsageError{Err: &output.Error{
+				Code:    "E_USAGE_REDIRECT",
+				Message: fmt.Sprintf("invalid --redirect flag %q: expected source=destination", s),
+				Hint:    "pass --redirect <source>=<destination>, for example --redirect www.example.com=example.com",
+			}}
+		}
+		out[strings.TrimSpace(from)] = strings.TrimSpace(to)
 	}
 	return out, nil
 }
@@ -191,6 +220,7 @@ func newProjectAddCmd() *cobra.Command {
 		Example: `  cvctl project add git@github.com:myorg/my-infra.git
   cvctl project add https://github.com/myorg/my-infra.git --env prod --branch main
   cvctl project add git@github.com:myorg/my-infra.git --set FOO=bar --domain api=api.example.com --non-interactive
+  cvctl project add git@github.com:myorg/my-infra.git --domain web=example.com --domain web=app.example.com --redirect www.example.com=example.com
   cvctl project add oci://ghcr.io/myorg/my-infra --env dev`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -205,6 +235,7 @@ func newProjectAddCmd() *cobra.Command {
 			asJSON, _ := cmd.Flags().GetBool("json")
 			setFlags, _ := cmd.Flags().GetStringArray("set")
 			domainFlags, _ := cmd.Flags().GetStringArray("domain")
+			redirectFlags, _ := cmd.Flags().GetStringArray("redirect")
 			extFlags, _ := cmd.Flags().GetStringArray("ext")
 			envFile, _ := cmd.Flags().GetString("env-file")
 
@@ -218,7 +249,11 @@ func newProjectAddCmd() *cobra.Command {
 					return err
 				}
 			}
-			domainMap, err := parseDomains(domainFlags)
+			domainMap, aliasMap, err := parseDomains(domainFlags)
+			if err != nil {
+				return err
+			}
+			redirectMap, err := parseRedirects(redirectFlags)
 			if err != nil {
 				return err
 			}
@@ -246,6 +281,8 @@ func newProjectAddCmd() *cobra.Command {
 				Set:       setMap,
 				EnvFile:   envFileVals,
 				Domains:   domainMap,
+				Aliases:   aliasMap,
+				Redirects: redirectMap,
 				Ext:       extMap,
 			})
 			if err != nil {
@@ -289,7 +326,8 @@ func newProjectAddCmd() *cobra.Command {
 	cmd.Flags().Bool("non-interactive", false, "never prompt; use defaults and --set values")
 	cmd.Flags().StringArray("set", nil, "pre-seed app.env values (KEY=VALUE, repeatable)")
 	cmd.Flags().String("env-file", "", "existing .env to take env.spec random and prompt values from (same names; --set wins)")
-	cmd.Flags().StringArray("domain", nil, "domain for exposed service (svc=host, repeatable)")
+	cmd.Flags().StringArray("domain", nil, "domain for exposed service (svc=host, repeatable; after the first, more for one service are aliases)")
+	cmd.Flags().StringArray("redirect", nil, "301 redirect from a domain to a domain or alias of an exposed service (source=destination, repeatable)")
 	cmd.Flags().StringArray("ext", nil, "pre-seed external service configuration (svc.field=value, repeatable)")
 	return cmd
 }
@@ -300,6 +338,8 @@ func newProjectUpdateCmd() *cobra.Command {
 		Short: "Update an existing project instance",
 		Example: `  cvctl project update myapp-dev
   cvctl project update myapp-dev --domain web=www.example.com
+  cvctl project update myapp-prod --redirect www.example.com=example.com
+  cvctl project update myapp-prod --redirect old.example.com=
   cvctl project update myapp-prod --json`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -308,12 +348,17 @@ func newProjectUpdateCmd() *cobra.Command {
 			asJSON, _ := cmd.Flags().GetBool("json")
 			extFlags, _ := cmd.Flags().GetStringArray("ext")
 			domainFlags, _ := cmd.Flags().GetStringArray("domain")
+			redirectFlags, _ := cmd.Flags().GetStringArray("redirect")
 
 			extMap, err := parseExt(extFlags)
 			if err != nil {
 				return err
 			}
-			domainMap, err := parseDomains(domainFlags)
+			domainMap, aliasMap, err := parseDomains(domainFlags)
+			if err != nil {
+				return err
+			}
+			redirectMap, err := parseRedirects(redirectFlags)
 			if err != nil {
 				return err
 			}
@@ -327,7 +372,9 @@ func newProjectUpdateCmd() *cobra.Command {
 				return err
 			}
 
-			res, err := project.Update(cmd.Context(), e, inst, project.UpdateOptions{Ext: extMap, Domains: domainMap})
+			res, err := project.Update(cmd.Context(), e, inst, project.UpdateOptions{
+				Ext: extMap, Domains: domainMap, Aliases: aliasMap, Redirects: redirectMap,
+			})
 			if err != nil {
 				return err
 			}
@@ -361,7 +408,8 @@ func newProjectUpdateCmd() *cobra.Command {
 	}
 	cmd.Flags().Bool("non-interactive", false, "never prompt; use defaults")
 	cmd.Flags().StringArray("ext", nil, "pre-seed external service configuration (svc.field=value, repeatable)")
-	cmd.Flags().StringArray("domain", nil, "change the domain of an exposed service (svc=host, repeatable)")
+	cmd.Flags().StringArray("domain", nil, "change the domains of an exposed service (svc=host, repeatable; the first is the primary, the rest replace its aliases)")
+	cmd.Flags().StringArray("redirect", nil, "add or replace a 301 redirect (source=destination, repeatable); source= removes it")
 	return cmd
 }
 

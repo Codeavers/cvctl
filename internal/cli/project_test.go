@@ -11,6 +11,7 @@ import (
 	"github.com/codeavers/cvctl/internal/sys/systest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -730,5 +731,48 @@ func TestProjectAddEnvFileMissing(t *testing.T) {
 	code, _, errb := run(t, "project", "add", "git@github.com:myorg/my-app-infra.git", "--env-file", filepath.Join(t.TempDir(), "nope.env"))
 	if code != 2 || !strings.Contains(errb, "E_USAGE_ENV_FILE") {
 		t.Fatalf("code %d err=%s, want exit 2 with E_USAGE_ENV_FILE", code, errb)
+	}
+}
+
+func TestParseDomainsRepeated(t *testing.T) {
+	primary, aliases, err := parseDomains([]string{"web=a", "api=x", "web=b", "web=c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if primary["web"] != "a" || primary["api"] != "x" || len(primary) != 2 {
+		t.Fatalf("primary %v", primary)
+	}
+	if !slices.Equal(aliases["web"], []string{"b", "c"}) || len(aliases) != 1 {
+		t.Fatalf("aliases %v", aliases)
+	}
+}
+
+func TestParseRedirects(t *testing.T) {
+	for _, tc := range []struct {
+		flag    string
+		from    string
+		to      string
+		invalid bool
+	}{
+		{flag: "a=b", from: "a", to: "b"},
+		{flag: " a = b ", from: "a", to: "b"},
+		{flag: "a=", from: "a", to: ""},
+		{flag: "=b", invalid: true},
+		{flag: "a", invalid: true},
+	} {
+		got, err := parseRedirects([]string{tc.flag})
+		if tc.invalid {
+			var oe *output.Error
+			if !errors.As(err, &oe) || oe.Code != "E_USAGE_REDIRECT" {
+				t.Fatalf("%q: want E_USAGE_REDIRECT, got %v", tc.flag, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%q: %v", tc.flag, err)
+		}
+		if to, ok := got[tc.from]; !ok || to != tc.to || len(got) != 1 {
+			t.Fatalf("%q: got %v", tc.flag, got)
+		}
 	}
 }

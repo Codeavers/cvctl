@@ -5,7 +5,7 @@
 | [Install and prepare a host](install.md) | binary, `cvctl init`, host configuration, notifier setup |
 | [Project contract](contract.md) | `compose.yml`, `env.spec.yml`, `lint`, `publish`, OCI source, `render` |
 | [Deploy](deploy.md) | `project add/update/list`, `plan`, strategies, timeouts, migrating an existing deploy |
-| [Domains and Traefik](domains.md) | domains, edge modes, Traefik, adopting external services |
+| [Domains and Traefik](domains.md) | domains, aliases and redirects, edge modes, Traefik, adopting external services |
 | [Data services](data.md) | data kinds, `sqlite`, S3 buckets, external mode |
 | [Backups and recovery](backups.md) | backups, dumps, restore, disaster recovery, generations, secrets bundle |
 | [Operations](operations.md) | status, logs, history, deploy notices, `upgrade`, upgrade notes, `images prune` |

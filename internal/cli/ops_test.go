@@ -175,6 +175,7 @@ func setupOpsFixture(t *testing.T, inst string) (string, *OpsEnv) {
 		RepoFactory: func(dir, keyPath string) project.RepoLike {
 			return stubRepo
 		},
+		ProbeRoute: func(context.Context, string, int, string) error { return nil },
 	}
 
 	return tmp, env
