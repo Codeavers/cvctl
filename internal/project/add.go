@@ -1106,7 +1106,11 @@ func Add(ctx context.Context, e *Env, repoURL string, opts AddOptions) (*AddResu
 
 	var warnings []string
 	if _, err := e.fs().Stat(instDir); err == nil {
-		if _, err := e.fs().Stat(cvctlEnvPath); err == nil {
+		// An interrupted add saves state.json only after cvctl.env, so a directory
+		// with state.json is a real instance even if its cvctl.env is gone.
+		_, envErr := e.fs().Stat(cvctlEnvPath)
+		_, stateErr := e.fs().Stat(filepath.Join(e.stateRoot(), inst, "state.json"))
+		if envErr == nil || stateErr == nil {
 			return nil, &output.Error{
 				Code:    "E_PROJECT_EXISTS",
 				Message: fmt.Sprintf("instance %q already exists", inst),

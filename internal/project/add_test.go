@@ -3191,3 +3191,26 @@ func TestAddDeployFailureAfterStateSavedKeepsInstDirAndCvctlEnv(t *testing.T) {
 		t.Fatalf("expected cvctl.env to be kept after state.json was saved: %v", statErr)
 	}
 }
+
+func TestAddKeepsInstanceWithStateButNoCvctlEnv(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{
+		"data_extra_mode": "local",
+		"domain_web":      "web.example.com",
+	})
+	if err := os.Remove(filepath.Join(rig.instDir, "cvctl.env")); err != nil {
+		t.Fatal(err)
+	}
+	if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusOK}); err != nil {
+		t.Fatal(err)
+	}
+	appEnv := filepath.Join(rig.instDir, "app.env")
+	if err := os.WriteFile(appEnv, []byte("SECRET=keep\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Add(context.Background(), rig.env, "git@example.com:org/demo-infra.git", AddOptions{})
+	requireCode(t, err, "E_PROJECT_EXISTS")
+	if _, statErr := os.Stat(appEnv); statErr != nil {
+		t.Fatalf("app.env of a deployed instance must be kept: %v", statErr)
+	}
+}

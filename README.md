@@ -43,8 +43,9 @@ and `main` in prod, the same tags `publish` pushes.
 
 `project add` holds the instance lock from start to its first deploy, so the agent leaves the new
 instance alone until then. An add that stops before saving the instance (an error, Ctrl-C at a
-prompt) removes `/srv/deploy/<inst>`; one killed outright leaves it without `cvctl.env`, and the
-next `project add` removes that leftover with a warning instead of failing with `E_PROJECT_EXISTS`.
+prompt) removes `/srv/deploy/<inst>`. One killed outright usually leaves it without `cvctl.env` or
+`state.json`, and the next `project add` removes that leftover with a warning instead of failing
+with `E_PROJECT_EXISTS`; an instance with `state.json` is never removed.
 
 `publish` runs the `lint` checks, then pushes `compose.yml`, `env.spec.yml` and, if present,
 `deploy/prod.env` (as `prod.env`) and prints the digest (`--json`: `{"ref":...,"digest":...}`).
