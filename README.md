@@ -41,6 +41,11 @@ cvctl project add oci://ghcr.io/<org>/<repo>-infra --env dev
 `project add` takes the repository without a tag or digest: the instance follows `develop` in dev
 and `main` in prod, the same tags `publish` pushes.
 
+`project add` holds the instance lock from start to its first deploy, so the agent leaves the new
+instance alone until then. An add that stops before saving the instance (an error, Ctrl-C at a
+prompt) removes `/srv/deploy/<inst>`; one killed outright leaves it without `cvctl.env`, and the
+next `project add` removes that leftover with a warning instead of failing with `E_PROJECT_EXISTS`.
+
 `publish` runs the `lint` checks, then pushes `compose.yml`, `env.spec.yml` and, if present,
 `deploy/prod.env` (as `prod.env`) and prints the digest (`--json`: `{"ref":...,"digest":...}`).
 Credentials: `CVCTL_PUBLISH_TOKEN` or `GITHUB_TOKEN`, user `CVCTL_PUBLISH_USER` or `GITHUB_ACTOR`;
@@ -235,6 +240,10 @@ init (for example `CVCTL_EDGE_MODE`) applies to its next deploy without a restar
 logged as a `reload` decision. If they fail to load, the agent skips the cycle and logs and
 notifies the error once, instead of deploying with the old values. Routes already written keep the
 old edge mode until the instance is deployed again (`cvctl deploy <inst>`).
+
+An instance locked by another cvctl operation (`project add` or `update`, a manual deploy, a
+backup) is skipped with a `skip` decision and no notice; the agent notifies `E_INSTANCE_LOCKED`
+only if the lock is still held 10 minutes after it first met it.
 
 `cvctl status` checks each instance's Traefik route against the host edge mode and sends `GET /`
 for each domain to the local Traefik (`:443` with SNI in edge mode, `127.0.0.1:CVCTL_PROXY_PORT`
