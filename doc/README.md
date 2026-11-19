@@ -15,9 +15,9 @@ Release history is in [CHANGELOG.md](../CHANGELOG.md).
 
 ## Conventions
 
-- Every command accepts `--json` and then prints exactly one JSON document, except `cvctl agent`,
-  which keeps running and prints one JSON line per decision; with `--once` it prints one document. `secrets export -o -` writes the
-  encrypted bundle to stdout instead, with or without `--json`.
+- Every command accepts `--json` and then prints exactly one JSON document, with two exceptions:
+  `cvctl agent` keeps running and prints one JSON line per decision (with `--once`, one document),
+  and `secrets export -o -` writes the encrypted bundle to stdout, with or without `--json`.
 - Exit codes: `0` ok, `1` validation or business error, `2` usage error.
 - Every error and issue carries a stable code starting with `E_` (such as
   `E_CONTRACT_HOOK_SERVICE` or `E_TIMEOUT`) and a `hint`.
