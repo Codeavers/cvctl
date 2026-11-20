@@ -33,9 +33,11 @@ Steps a release needs beyond `cvctl upgrade` are in
 
 ### Fixed
 
-- S3 provisioning runs `mc` in a one-off container of the service instead of inside the running
-  silo, so a tight memory limit no longer gets both killed; an exit 137 says to raise
-  `deploy.resources.limits.memory`.
+- `cvctl-agent` no longer notifies `E_INSTANCE_LOCKED` while another cvctl operation holds the
+  instance; it notifies only if the lock lasts 10 minutes. `project add` holds the lock until its
+  first deploy.
+- An interrupted `project add` cleans up after itself, and the next add removes a leftover without
+  `cvctl.env` or `state.json` instead of failing with `E_PROJECT_EXISTS`.
 
 ## [0.8.6] - 2026-11-09
 
