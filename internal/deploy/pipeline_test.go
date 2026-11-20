@@ -52,6 +52,7 @@ type fakeCompose struct {
 	}
 	failUp      error
 	failExec    error
+	execExit    int
 	execOutput  []byte
 	execStderr  []byte
 	failLogs    error
@@ -111,13 +112,17 @@ func (b *boundCompose) RunHook(_ context.Context, service, script string) (sys.R
 	return sys.Result{ExitCode: 0, Stdout: []byte("hook ok")}, nil
 }
 
-func (b *boundCompose) ExecScript(_ context.Context, service, script string) (sys.Result, error) {
+func (b *boundCompose) RunScript(_ context.Context, service, script string) (sys.Result, error) {
 	b.fake.mu.Lock()
 	defer b.fake.mu.Unlock()
-	b.fake.calls = append(b.fake.calls, "execscript:"+service)
-	b.fake.invocations = append(b.fake.invocations, composeCall{op: "execscript", override: b.override, envFile: b.envFile, service: service, script: script})
+	b.fake.calls = append(b.fake.calls, "runscript:"+service)
+	b.fake.invocations = append(b.fake.invocations, composeCall{op: "runscript", override: b.override, envFile: b.envFile, service: service, script: script})
 	if b.fake.failExec != nil {
-		return sys.Result{ExitCode: 1, Stderr: b.fake.execStderr}, b.fake.failExec
+		code := b.fake.execExit
+		if code == 0 {
+			code = 1
+		}
+		return sys.Result{ExitCode: code, Stderr: b.fake.execStderr}, b.fake.failExec
 	}
 	return sys.Result{Stdout: b.fake.execOutput}, nil
 }

@@ -16,8 +16,8 @@ var update = flag.Bool("update", false, "rewrite golden files")
 var testBuckets = []contract.Bucket{{Name: "prescriptions"}, {Name: "products", Public: true}}
 
 func TestScriptGolden(t *testing.T) {
-	got := Script(testBuckets, "media-app", "appsecret1234567", PolicyName)
-	if again := Script(testBuckets, "media-app", "appsecret1234567", PolicyName); again != got {
+	got := Script("media", testBuckets, "media-app", "appsecret1234567", PolicyName)
+	if again := Script("media", testBuckets, "media-app", "appsecret1234567", PolicyName); again != got {
 		t.Fatal("Script is not deterministic")
 	}
 	path := filepath.Join("testdata", "script.sh")
@@ -39,11 +39,11 @@ func TestScriptGolden(t *testing.T) {
 }
 
 func TestScriptSortsBucketsAndNeverEmbedsRootKeys(t *testing.T) {
-	s := Script([]contract.Bucket{{Name: "zeta"}, {Name: "alpha", Public: true}}, "media-app", "pw", PolicyName)
+	s := Script("media", []contract.Bucket{{Name: "zeta"}, {Name: "alpha", Public: true}}, "media-app", "pw", PolicyName)
 	if strings.Index(s, "local/alpha") > strings.Index(s, "local/zeta") {
 		t.Fatal("buckets not sorted")
 	}
-	if !strings.Contains(s, `export MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@localhost:9000"`) {
+	if !strings.Contains(s, `export MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@media:9000"`) {
 		t.Fatal("root keys must reach mc through the environment")
 	}
 	for _, line := range strings.Split(s, "\n") {
@@ -60,7 +60,7 @@ func TestScriptSortsBucketsAndNeverEmbedsRootKeys(t *testing.T) {
 }
 
 func TestScriptQuotesPassword(t *testing.T) {
-	s := Script(testBuckets, "media-app", "it's", PolicyName)
+	s := Script("media", testBuckets, "media-app", "it's", PolicyName)
 	if !strings.Contains(s, `printf '%s\n' 'it'\''s' | mc admin user add local 'media-app'`) {
 		t.Fatalf("password not quoted:\n%s", s)
 	}
