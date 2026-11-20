@@ -85,7 +85,7 @@ The host notifier gets `upgraded vA -> vB` (`info`), with a note if the agent wa
 ## Upgrade notes
 
 Steps a release needs beyond `cvctl upgrade`. The full list of changes is in
-[CHANGELOG.md](../CHANGELOG.md).
+[GitHub Releases](https://github.com/Codeavers/cvctl/releases).
 
 ### Upgrading to v0.8.0
 

@@ -1,43 +1,9 @@
 # Changelog
 
-All notable changes to cvctl are documented here. The format is based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
-[Semantic Versioning](https://semver.org/) (still `0.x`: minor versions may need manual steps).
-Steps a release needs beyond `cvctl upgrade` are in
-[doc/operations.md](doc/operations.md#upgrade-notes).
-
-## [Unreleased]
-
-### Added
-
-- Data kinds `mysql`, `mariadb`, `mongodb`, `valkey`, `rabbitmq` and `nats` (see
-  [doc/data.md](doc/data.md)).
-- Domain aliases and redirects: `--domain` repeats per service and `--redirect source=destination`
-  answers with a 301 (see [doc/domains.md](doc/domains.md#aliases-and-redirects)).
-- `cvctl status` checks each instance's Traefik route against the edge mode and probes its domains
-  (`ROUTES` column).
-- `cvctl.ratelimit: "<average>/<burst>"` or `"off"` on an exposed service sets the rate limit of
-  its routes.
-
-### Changed
-
-- `cvctl-agent` re-reads `host.env` and `secrets/` every cycle, so a change made by `cvctl init`
-  applies without restarting it.
-- The default Traefik rate limit is 100 requests/s with a burst of 300 per client IP (was 50/100);
-  re-run `cvctl init` to apply it.
-- `cvctl adopt` records the ufw rule it creates; `cvctl init` reconciles it with the current edge
-  subnet, and `adopt rm` removes only rules cvctl added. `adopt add` warns when cvctl does not
-  manage the firewall.
-- Documentation moved from the README into [doc/](doc/README.md); added this changelog, a code
-  of conduct and issue and pull request templates.
-
-### Fixed
-
-- `cvctl-agent` no longer notifies `E_INSTANCE_LOCKED` while another cvctl operation holds the
-  instance; it notifies only if the lock lasts 10 minutes. `project add` holds the lock until its
-  first deploy.
-- An interrupted `project add` cleans up after itself, and the next add removes a leftover without
-  `cvctl.env` or `state.json` instead of failing with `E_PROJECT_EXISTS`.
+History up to v0.8.6. From the next release on, the notes of each version are in
+[GitHub Releases](https://github.com/Codeavers/cvctl/releases), generated from the titles of the
+merged pull requests; this file is no longer updated. Steps a release needs beyond `cvctl upgrade`
+are in [doc/operations.md](doc/operations.md#upgrade-notes).
 
 ## [0.8.6] - 2026-11-09
 
@@ -165,7 +131,6 @@ verification, `db restore`, `project restore`, the secrets bundle, per-instance 
 Telegram notices. Upgrading an existing host needs the steps in the
 [upgrade notes](doc/operations.md#upgrading-a-host-to-v07).
 
-[Unreleased]: https://github.com/Codeavers/cvctl/compare/v0.8.6...HEAD
 [0.8.6]: https://github.com/Codeavers/cvctl/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/Codeavers/cvctl/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/Codeavers/cvctl/compare/v0.8.3...v0.8.4

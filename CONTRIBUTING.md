@@ -15,8 +15,8 @@ Participation follows the [Code of Conduct](CODE_OF_CONDUCT.md).
 ## Pull requests
 
 - One topic per pull request, with tests for the behaviour it changes.
-- Behaviour changes update the reference in [doc/](doc/README.md) and the `Unreleased` section
-  of [CHANGELOG.md](CHANGELOG.md).
+- Behaviour changes update the reference in [doc/](doc/README.md). The release notes are
+  generated from pull request titles, so write the title for someone reading the release.
 - Commit messages follow Conventional Commits (`feat(deploy): ...`, `fix(init): ...`).
 - Code comments explain why or a constraint, not what the code does.
 - Never put secret values in argv, logs or error messages; tests should assert it.

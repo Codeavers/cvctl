@@ -12,7 +12,7 @@
 [![Go](https://img.shields.io/github/go-mod/go-version/Codeavers/cvctl)](go.mod)
 [![GHCR](https://img.shields.io/badge/ghcr.io-codeavers%2Fcvctl-blue)](https://github.com/Codeavers/cvctl/pkgs/container/cvctl)
 
-[Documentation](doc/README.md) · [Releases](https://github.com/Codeavers/cvctl/releases) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md)
+[Documentation](doc/README.md) · [Releases](https://github.com/Codeavers/cvctl/releases) · [Changelog](https://github.com/Codeavers/cvctl/releases) · [Security](SECURITY.md)
 
 </div>
 
