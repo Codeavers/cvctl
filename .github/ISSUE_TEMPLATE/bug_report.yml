@@ -1,0 +1,51 @@
+name: Bug report
+description: Something in cvctl does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security issues go through private reporting (see SECURITY.md), not here.
+        Remove secrets (tokens, passwords, `app.env` values) from anything you paste.
+  - type: input
+    id: version
+    attributes:
+      label: cvctl version
+      description: Output of `cvctl version`.
+      placeholder: v0.8.6
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Host OS and Docker version
+      placeholder: Ubuntu 24.04, Docker Engine 28.x
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command you ran and what it printed, including the `E_...` error code and hint.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: A minimal contract (`compose.yml`, `env.spec.yml`) helps when the bug is in lint, render or deploy.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant output of `cvctl history <instance>`, `journalctl -u cvctl-agent` or `--json`.
+      render: text
