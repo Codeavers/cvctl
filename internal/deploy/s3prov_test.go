@@ -105,7 +105,7 @@ func TestDeployProvisionsBucketsBeforeHooks(t *testing.T) {
 		}
 	}
 	if !strings.Contains(script, `export MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@media:9000"`) {
-		t.Fatalf("script MC_HOST must point at media:9000:\n%s", script)
+		t.Fatal("script MC_HOST must point at media:9000")
 	}
 	if !strings.Contains(script, "local/products") || !strings.Contains(script, "local/prescriptions") {
 		t.Fatalf("script misses declared buckets:\n%s", script)
@@ -249,6 +249,21 @@ func TestProvisionBucketsFailureHints(t *testing.T) {
 		wantHint := "the provisioning container of media was killed (exit 137), usually out of memory: raise deploy.resources.limits.memory of media"
 		if oe.Hint != wantHint {
 			t.Fatalf("hint = %q, want %q", oe.Hint, wantHint)
+		}
+	})
+
+	t.Run("exit 137 hint reaches the deploy detail", func(t *testing.T) {
+		rig := setupBucketsRig(t)
+		rig.compose.failExec = errors.New("exit 137")
+		rig.compose.execExit = 137
+		rig.compose.execStderr = []byte("Killed\n")
+
+		res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"})
+		if err != nil {
+			t.Fatalf("Deploy: %v", err)
+		}
+		if res.Status != state.StatusFailed || !strings.Contains(res.Detail, "deploy.resources.limits.memory of media") {
+			t.Fatalf("status %v detail %q", res.Status, res.Detail)
 		}
 	})
 

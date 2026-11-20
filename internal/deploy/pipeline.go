@@ -1544,13 +1544,16 @@ func (d *Deployer) provisionBuckets(ctx context.Context, c ComposeAPI, inst stri
 				detail = err.Error()
 			}
 			redacted := lastLines(redact(detail, secrets), 20)
+			msg := ds.Name + ": " + redacted
 			hint := "check the " + ds.Name + " container: cvctl logs " + inst
 			if res.ExitCode == 137 {
 				hint = "the provisioning container of " + ds.Name + " was killed (exit 137), usually out of memory: raise deploy.resources.limits.memory of " + ds.Name
+				// History and notices carry only Error(), not the hint.
+				msg += " (" + hint + ")"
 			}
 			return &output.Error{
 				Code:    "E_S3_PROVISION",
-				Message: ds.Name + ": " + redacted,
+				Message: msg,
 				Hint:    hint,
 			}
 		}
