@@ -15,8 +15,8 @@ http:
         amount: 100
     cvctl-ratelimit:
       rateLimit:
-        average: 50
-        burst: 100
+        average: 100
+        burst: 300
         sourceCriterion:
           ipStrategy:
             depth: 1

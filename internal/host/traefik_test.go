@@ -730,6 +730,9 @@ func TestTraefikBehindProxyItem7Requirements(t *testing.T) {
 	if !ok || rl.RateLimit == nil || rl.RateLimit.SourceCriterion == nil || rl.RateLimit.SourceCriterion.IPStrategy == nil {
 		t.Fatalf("expected cvctl-ratelimit with sourceCriterion.ipStrategy, got %+v", rl)
 	}
+	if rl.RateLimit.Average != 100 || rl.RateLimit.Burst != 300 {
+		t.Fatalf("rateLimit average/burst: got %d/%d, want 100/300", rl.RateLimit.Average, rl.RateLimit.Burst)
+	}
 	if rl.RateLimit.SourceCriterion.IPStrategy.Depth != 1 {
 		t.Fatalf("depth: got %d, want 1", rl.RateLimit.SourceCriterion.IPStrategy.Depth)
 	}
