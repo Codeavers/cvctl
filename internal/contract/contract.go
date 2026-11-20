@@ -175,26 +175,14 @@ func parseRateLimit(val string) (*RateLimit, bool) {
 	if val == "off" {
 		return &RateLimit{Off: true}, true
 	}
-	parts := strings.Split(val, "/")
-	if len(parts) != 2 {
+	a, b, ok := strings.Cut(val, "/")
+	if !ok {
 		return nil, false
 	}
-	for _, p := range parts {
-		if p == "" {
-			return nil, false
-		}
-		for _, c := range p {
-			if c < '0' || c > '9' {
-				return nil, false
-			}
-		}
-	}
-	avg, err1 := strconv.Atoi(parts[0])
-	burst, err2 := strconv.Atoi(parts[1])
-	if err1 != nil || err2 != nil {
-		return nil, false
-	}
-	if strconv.Itoa(avg) != parts[0] || strconv.Itoa(burst) != parts[1] {
+	avg, err1 := strconv.Atoi(a)
+	burst, err2 := strconv.Atoi(b)
+	// The round trip rejects signs, spaces and leading zeros that Atoi accepts.
+	if err1 != nil || err2 != nil || strconv.Itoa(avg) != a || strconv.Itoa(burst) != b {
 		return nil, false
 	}
 	if avg < 1 || burst < avg || burst > 10000 {
