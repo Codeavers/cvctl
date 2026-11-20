@@ -1,5 +1,5 @@
 set -eu
-export MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@localhost:9000"
+export MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@media:9000"
 mc mb --ignore-existing local/prescriptions
 mc mb --ignore-existing local/products
 mc anonymous set none local/prescriptions

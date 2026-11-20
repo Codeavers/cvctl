@@ -121,20 +121,24 @@ func TestRunHookArgs(t *testing.T) {
 	}
 }
 
-func TestExecScriptSendsScriptOnStdin(t *testing.T) {
+func TestRunScriptSendsScriptOnStdin(t *testing.T) {
+	pinHookSuffix(t)
 	runner := &systest.Runner{}
 	p := Project{Run: runner, Instance: "demo-dev", Dir: "/srv/deploy/demo-dev"}
-	expected := p.Cmd("exec", "-T", "media", "sh", "-s")
+	expected := p.Cmd("run", "--rm", "--no-deps", "-T", "--name", "demo-dev-prov-abcd1234", "--entrypoint", "sh", "media", "-s")
 	runner.On(expected.String(), sys.Result{Stdout: []byte("ok\n")})
 
-	res, err := p.ExecScript(context.Background(), "media", "echo s3cr3t-value\n")
+	res, err := p.RunScript(context.Background(), "media", "echo s3cr3t-value\n")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if string(res.Stdout) != "ok\n" {
 		t.Fatalf("stdout = %q", res.Stdout)
 	}
-	if len(runner.Calls) != 1 || string(runner.Calls[0].Stdin) != "echo s3cr3t-value\n" {
+	if len(runner.Calls) != 1 || runner.Calls[0].String() != expected.String() {
+		t.Fatalf("expected call %q, got: %+v", expected.String(), runner.Calls)
+	}
+	if string(runner.Calls[0].Stdin) != "echo s3cr3t-value\n" {
 		t.Fatalf("script not on stdin: %+v", runner.Calls)
 	}
 	if strings.Contains(runner.Calls[0].String(), "s3cr3t-value") {
@@ -142,15 +146,41 @@ func TestExecScriptSendsScriptOnStdin(t *testing.T) {
 	}
 }
 
-func TestExecScriptFailure(t *testing.T) {
+func TestRunScriptFailure(t *testing.T) {
+	pinHookSuffix(t)
 	runner := &systest.Runner{}
 	p := Project{Run: runner, Instance: "demo-dev", Dir: "/srv/deploy/demo-dev"}
-	runner.On(p.Cmd("exec", "-T", "media", "sh", "-s").String(), sys.Result{Stderr: []byte("mc: bad\n"), ExitCode: 1})
+	expected := p.Cmd("run", "--rm", "--no-deps", "-T", "--name", "demo-dev-prov-abcd1234", "--entrypoint", "sh", "media", "-s")
+	runner.On(expected.String(), sys.Result{Stderr: []byte("mc: bad\n"), ExitCode: 1})
 
-	_, err := p.ExecScript(context.Background(), "media", "false\n")
+	res, err := p.RunScript(context.Background(), "media", "false\n")
 	var outErr *output.Error
 	if !errors.As(err, &outErr) || outErr.Code != "E_COMPOSE_FAILED" || !strings.Contains(outErr.Message, "mc: bad") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.ExitCode != 1 || string(res.Stderr) != "mc: bad\n" {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+}
+
+func TestRunScriptTimeoutRemovesContainer(t *testing.T) {
+	pinHookSuffix(t)
+	r := &ctxRunner{}
+	p := Project{Run: r, Instance: "demo-dev", Dir: "/srv/deploy/demo-dev"}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := p.RunScript(ctx, "media", "sleep 99\n"); err == nil {
+		t.Fatal("expected an error on timeout")
+	}
+	if len(r.calls) != 2 {
+		t.Fatalf("expected the script and one docker rm, got %d calls", len(r.calls))
+	}
+	rm := r.calls[1]
+	if rm.Name != "docker" || strings.Join(rm.Args, " ") != "rm -f demo-dev-prov-abcd1234" {
+		t.Fatalf("unexpected cleanup command: %s", rm.String())
+	}
+	if len(rm.Env) == 0 || rm.Env[0] != "DOCKER_CONFIG=/var/lib/cvctl/docker" {
+		t.Fatalf("cleanup must carry DOCKER_CONFIG, got %v", rm.Env)
 	}
 }
 

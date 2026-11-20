@@ -81,7 +81,9 @@ An `s3` service declares its buckets in `x-cvctl.s3.<service>.buckets`, each pub
 Declare the ones the app needs in `env.spec.yml` with `source: service`.
 
 - **Local (silo)**, for dev and tests: every deploy creates the buckets and a user scoped to them
-  (`<service>-app`); the app never receives the silo root keys. Public buckets allow anonymous
+  (`<service>-app`); the app never receives the silo root keys. Provisioning runs `mc` in a
+  one-off container of the service (`docker compose run`), not inside the running server, so it
+  does not share its memory. Public buckets allow anonymous
   `GetObject` only, and `cvctl.expose: "9000"` publishes them through Traefik for `GET`/`HEAD` on
   `/<bucket>/<key>`. A public bucket on local silo is rejected in `prod`.
 - **External (R2, S3)**, for prod: cvctl creates nothing; `project add`/`update` ask for each

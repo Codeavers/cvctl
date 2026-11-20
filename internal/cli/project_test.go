@@ -563,7 +563,7 @@ func (cliNoopCompose) Config(context.Context) error                          { r
 func (cliNoopCompose) Pull(context.Context, ...string) error                 { return nil }
 func (cliNoopCompose) EnsureImage(context.Context, string) error             { return nil }
 func (cliNoopCompose) UpData(context.Context, []string, time.Duration) error { return nil }
-func (cliNoopCompose) ExecScript(context.Context, string, string) (sys.Result, error) {
+func (cliNoopCompose) RunScript(context.Context, string, string) (sys.Result, error) {
 	return sys.Result{}, nil
 }
 func (cliNoopCompose) RunHook(context.Context, string, string) (sys.Result, error) {

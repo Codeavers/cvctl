@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/state"
 )
 
@@ -91,17 +92,20 @@ func TestDeployProvisionsBucketsBeforeHooks(t *testing.T) {
 
 	order := strings.Join(rig.compose.calls, " ")
 	iUp := strings.Index(order, "updata:media")
-	iExec := strings.Index(order, "execscript:media")
+	iRun := strings.Index(order, "runscript:media")
 	iHook := strings.Index(order, "runhook:api:")
-	if iUp < 0 || iExec < 0 || iHook < 0 || !(iUp < iExec && iExec < iHook) {
-		t.Fatalf("want updata -> execscript -> runhook, got %q", order)
+	if iUp < 0 || iRun < 0 || iHook < 0 || !(iUp < iRun && iRun < iHook) {
+		t.Fatalf("want updata -> runscript -> runhook, got %q", order)
 	}
 
 	var script string
 	for _, inv := range rig.compose.invocations {
-		if inv.op == "execscript" {
+		if inv.op == "runscript" {
 			script = inv.script
 		}
+	}
+	if !strings.Contains(script, `export MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@media:9000"`) {
+		t.Fatal("script MC_HOST must point at media:9000")
 	}
 	if !strings.Contains(script, "local/products") || !strings.Contains(script, "local/prescriptions") {
 		t.Fatalf("script misses declared buckets:\n%s", script)
@@ -199,7 +203,7 @@ func TestDeploySkipsProvisioningWithoutBucketServices(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, c := range rig.compose.calls {
-		if strings.HasPrefix(c, "execscript:") {
+		if strings.HasPrefix(c, "runscript:") {
 			t.Fatalf("unexpected %s", c)
 		}
 	}
@@ -223,8 +227,61 @@ func TestRollbackReprovisionsBuckets(t *testing.T) {
 	}
 	order := strings.Join(rig.compose.calls, " ")
 	iUp := strings.Index(order, "up")
-	iExec := strings.Index(order, "execscript:media")
-	if iUp < 0 || iExec < iUp {
+	iRun := strings.Index(order, "runscript:media")
+	if iUp < 0 || iRun < iUp {
 		t.Fatalf("rollback must provision after up, got %q", order)
 	}
+}
+
+func TestProvisionBucketsFailureHints(t *testing.T) {
+	t.Run("exit 137 gives OOM hint", func(t *testing.T) {
+		rig := setupBucketsRig(t)
+		rig.compose.failExec = errors.New("exit 137")
+		rig.compose.execExit = 137
+		rig.compose.execStderr = []byte("Killed\n")
+		want := defaultDesired()
+
+		err := rig.deployer.Reapply(context.Background(), "demo-dev", &want)
+		var oe *output.Error
+		if !errors.As(err, &oe) || oe.Code != "E_S3_PROVISION" {
+			t.Fatalf("expected E_S3_PROVISION, got %v", err)
+		}
+		wantHint := "the provisioning container of media was killed (exit 137), usually out of memory: raise deploy.resources.limits.memory of media"
+		if oe.Hint != wantHint {
+			t.Fatalf("hint = %q, want %q", oe.Hint, wantHint)
+		}
+	})
+
+	t.Run("exit 137 hint reaches the deploy detail", func(t *testing.T) {
+		rig := setupBucketsRig(t)
+		rig.compose.failExec = errors.New("exit 137")
+		rig.compose.execExit = 137
+		rig.compose.execStderr = []byte("Killed\n")
+
+		res, err := rig.deployer.Deploy(context.Background(), "demo-dev", defaultDesired(), Options{Actor: "agent"})
+		if err != nil {
+			t.Fatalf("Deploy: %v", err)
+		}
+		if res.Status != state.StatusFailed || !strings.Contains(res.Detail, "deploy.resources.limits.memory of media") {
+			t.Fatalf("status %v detail %q", res.Status, res.Detail)
+		}
+	})
+
+	t.Run("non-137 failure keeps logs hint", func(t *testing.T) {
+		rig := setupBucketsRig(t)
+		rig.compose.failExec = errors.New("exit 1")
+		rig.compose.execExit = 1
+		rig.compose.execStderr = []byte("mc: unable to connect\n")
+		want := defaultDesired()
+
+		err := rig.deployer.Reapply(context.Background(), "demo-dev", &want)
+		var oe *output.Error
+		if !errors.As(err, &oe) || oe.Code != "E_S3_PROVISION" {
+			t.Fatalf("expected E_S3_PROVISION, got %v", err)
+		}
+		wantHint := "check the media container: cvctl logs demo-dev"
+		if oe.Hint != wantHint {
+			t.Fatalf("hint = %q, want %q", oe.Hint, wantHint)
+		}
+	})
 }

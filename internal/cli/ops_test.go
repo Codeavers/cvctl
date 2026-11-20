@@ -69,7 +69,7 @@ func (c *opsStubCompose) Config(_ context.Context) error                        
 func (c *opsStubCompose) Pull(_ context.Context, _ ...string) error                   { return nil }
 func (c *opsStubCompose) EnsureImage(_ context.Context, _ string) error               { return c.failEnsure }
 func (c *opsStubCompose) UpData(_ context.Context, _ []string, _ time.Duration) error { return nil }
-func (c *opsStubCompose) ExecScript(_ context.Context, _, _ string) (sys.Result, error) {
+func (c *opsStubCompose) RunScript(_ context.Context, _, _ string) (sys.Result, error) {
 	return sys.Result{}, nil
 }
 

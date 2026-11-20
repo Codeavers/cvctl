@@ -1581,7 +1581,7 @@ func (noopCompose) Config(context.Context) error                          { retu
 func (noopCompose) Pull(context.Context, ...string) error                 { return nil }
 func (noopCompose) EnsureImage(context.Context, string) error             { return nil }
 func (noopCompose) UpData(context.Context, []string, time.Duration) error { return nil }
-func (noopCompose) ExecScript(context.Context, string, string) (sys.Result, error) {
+func (noopCompose) RunScript(context.Context, string, string) (sys.Result, error) {
 	return sys.Result{}, nil
 }
 
