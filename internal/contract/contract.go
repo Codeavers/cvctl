@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/compose-spec/compose-go/v2/loader"
@@ -20,15 +21,16 @@ import (
 )
 
 const (
-	LabelRole     = "cvctl.role"
-	LabelKind     = "cvctl.kind"
-	LabelVersion  = "cvctl.version"
-	LabelExpose   = "cvctl.expose"
-	LabelEnv      = "cvctl.env"
-	LabelBackup   = "cvctl.backup"
-	LabelExternal = "cvctl.external"
-	LabelOwner    = "cvctl.owner"
-	LabelUID      = "cvctl.uid"
+	LabelRole      = "cvctl.role"
+	LabelKind      = "cvctl.kind"
+	LabelVersion   = "cvctl.version"
+	LabelExpose    = "cvctl.expose"
+	LabelRateLimit = "cvctl.ratelimit"
+	LabelEnv       = "cvctl.env"
+	LabelBackup    = "cvctl.backup"
+	LabelExternal  = "cvctl.external"
+	LabelOwner     = "cvctl.owner"
+	LabelUID       = "cvctl.uid"
 )
 
 type HealthSpec struct {
@@ -74,11 +76,18 @@ type Ext struct {
 	S3     map[string][]Bucket
 }
 
+type RateLimit struct {
+	Off     bool
+	Average int
+	Burst   int
+}
+
 type AppService struct {
 	Name       string
 	Role       string
 	Image      string
 	ExposePort int
+	RateLimit  *RateLimit
 }
 
 type DataService struct {
@@ -89,6 +98,7 @@ type DataService struct {
 	ExternalAllowed bool
 	Backup          string
 	ExposePort      int
+	RateLimit       *RateLimit
 	// Owner is the app that mounts a kind without a container; UID, when set, is
 	// the user that app runs as and that owns the volume.
 	Owner string
@@ -159,6 +169,26 @@ type rawHook struct {
 	Service string `yaml:"service"`
 	Run     string `yaml:"run"`
 	Timeout string `yaml:"timeout"`
+}
+
+func parseRateLimit(val string) (*RateLimit, bool) {
+	if val == "off" {
+		return &RateLimit{Off: true}, true
+	}
+	a, b, ok := strings.Cut(val, "/")
+	if !ok {
+		return nil, false
+	}
+	avg, err1 := strconv.Atoi(a)
+	burst, err2 := strconv.Atoi(b)
+	// The round trip rejects signs, spaces and leading zeros that Atoi accepts.
+	if err1 != nil || err2 != nil || strconv.Itoa(avg) != a || strconv.Itoa(burst) != b {
+		return nil, false
+	}
+	if avg < 1 || burst < avg || burst > 10000 {
+		return nil, false
+	}
+	return &RateLimit{Average: avg, Burst: burst}, true
 }
 
 func composeErr(msg, hint string) error {
@@ -259,6 +289,9 @@ func Load(dir string, cat kinds.Catalog) (*Project, error) {
 				Owner:           svc.Labels[LabelOwner],
 				UID:             svc.Labels[LabelUID],
 			}
+			if rl, ok := parseRateLimit(svc.Labels[LabelRateLimit]); ok {
+				d.RateLimit = rl
+			}
 			if k, ok := cat[kind]; ok {
 				if d.Version == "" {
 					d.Version = k.DefaultVersion
@@ -276,6 +309,9 @@ func Load(dir string, cat kinds.Catalog) (*Project, error) {
 			a := AppService{Name: n, Role: role, Image: svc.Image}
 			// A non-integer label leaves ExposePort 0; Validate reports it.
 			a.ExposePort, _ = strconv.Atoi(svc.Labels[LabelExpose])
+			if rl, ok := parseRateLimit(svc.Labels[LabelRateLimit]); ok {
+				a.RateLimit = rl
+			}
 			p.Apps = append(p.Apps, a)
 		}
 	}

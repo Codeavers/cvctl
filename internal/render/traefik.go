@@ -24,15 +24,39 @@ func Traefik(p *contract.Project, d *instance.Decisions, o Options) ([]byte, err
 	routers := map[string]any{}
 	services := map[string]any{}
 	middlewares := map[string]any{}
-	addRoutes := func(svc string, port int, rule func(host string) string) {
+	addRoutes := func(svc string, port int, rl *contract.RateLimit, rule func(host string) string) {
 		name := routeName(d, svc)
-		routers[name] = router(rule(d.Domains[svc]), name, []string{"cvctl-default@file"}, o)
+		var baseMws []string
+		switch {
+		case rl == nil:
+			baseMws = []string{"cvctl-default@file"}
+		case rl.Off:
+			baseMws = []string{"cvctl-headers@file", "cvctl-inflight@file"}
+		default:
+			rlName := fmt.Sprintf("%s--ratelimit", name)
+			baseMws = []string{"cvctl-headers@file", rlName, "cvctl-inflight@file"}
+			rlDef := map[string]any{
+				"average": rl.Average,
+				"burst":   rl.Burst,
+			}
+			if o.Edge != "edge" {
+				rlDef["sourceCriterion"] = map[string]any{
+					"ipStrategy": map[string]any{
+						"depth": 1,
+					},
+				}
+			}
+			middlewares[rlName] = map[string]any{"rateLimit": rlDef}
+		}
+
+		routers[name] = router(rule(d.Domains[svc]), name, baseMws, o)
 		for i, h := range instance.SortedAliases(d.Aliases[svc]) {
-			routers[fmt.Sprintf("%s--alias-%d", name, i)] = router(rule(h), name, []string{"cvctl-default@file"}, o)
+			routers[fmt.Sprintf("%s--alias-%d", name, i)] = router(rule(h), name, baseMws, o)
 		}
 		for i, r := range instance.SortedRedirects(d.Redirects[svc]) {
 			rn := fmt.Sprintf("%s--redirect-%d", name, i)
-			routers[rn] = router(hostRule(r.From), "noop@internal", []string{"cvctl-default@file", rn}, o)
+			redirMws := append(slices.Clone(baseMws), rn)
+			routers[rn] = router(hostRule(r.From), "noop@internal", redirMws, o)
 			middlewares[rn] = map[string]any{"redirectRegex": map[string]any{
 				"regex":       `^https?://[^/]+(.*)$`,
 				"replacement": "https://" + r.To + "${1}",
@@ -50,7 +74,7 @@ func Traefik(p *contract.Project, d *instance.Decisions, o Options) ([]byte, err
 		if d.Domains[a.Name] == "" {
 			return nil, missing("domain of " + a.Name)
 		}
-		addRoutes(a.Name, a.ExposePort, hostRule)
+		addRoutes(a.Name, a.ExposePort, a.RateLimit, hostRule)
 	}
 	for _, ds := range p.Data {
 		sd, ok := d.Services[ds.Name]
@@ -73,7 +97,7 @@ func Traefik(p *contract.Project, d *instance.Decisions, o Options) ([]byte, err
 		}
 		slices.Sort(names)
 		pattern := strings.Join(names, "|")
-		addRoutes(ds.Name, ds.ExposePort, func(host string) string {
+		addRoutes(ds.Name, ds.ExposePort, ds.RateLimit, func(host string) string {
 			return fmt.Sprintf("Host(`%s`) && (Method(`GET`) || Method(`HEAD`)) && PathRegexp(`^/(%s)/.+`)", host, pattern)
 		})
 	}

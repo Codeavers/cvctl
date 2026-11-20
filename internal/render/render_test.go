@@ -938,6 +938,15 @@ type traefikDoc struct {
 				Replacement string `yaml:"replacement"`
 				Permanent   bool   `yaml:"permanent"`
 			} `yaml:"redirectRegex"`
+			RateLimit struct {
+				Average         int `yaml:"average"`
+				Burst           int `yaml:"burst"`
+				SourceCriterion struct {
+					IPStrategy struct {
+						Depth int `yaml:"depth"`
+					} `yaml:"ipStrategy"`
+				} `yaml:"sourceCriterion"`
+			} `yaml:"rateLimit"`
 		} `yaml:"middlewares"`
 	} `yaml:"http"`
 }
@@ -1044,5 +1053,84 @@ func TestTraefikNoMiddlewaresWithoutRedirects(t *testing.T) {
 	}
 	if strings.Contains(string(out), "\n    middlewares:") || strings.Contains(string(out), "\n  middlewares:") {
 		t.Fatalf("unexpected middlewares section:\n%s", out)
+	}
+}
+
+func TestTraefikGoldenRateLimitEdge(t *testing.T) {
+	p, d := setupAliases(t)
+	p.Apps[0].RateLimit = &contract.RateLimit{Average: 200, Burst: 400}
+	out, err := Traefik(p, d, Options{Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "traefik-ratelimit-edge.yml", out)
+}
+
+func TestTraefikGoldenRateLimitBehindProxy(t *testing.T) {
+	p, d := setupAliases(t)
+	p.Apps[0].RateLimit = &contract.RateLimit{Average: 200, Burst: 400}
+	out, err := Traefik(p, d, Options{Edge: "behind-proxy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "traefik-ratelimit-behind-proxy.yml", out)
+}
+
+func TestTraefikRateLimitOff(t *testing.T) {
+	p, d := setupAliases(t)
+	p.Apps[0].RateLimit = &contract.RateLimit{Off: true}
+	for _, edge := range []string{"edge", "behind-proxy"} {
+		out, err := Traefik(p, d, Options{Edge: edge})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(out), "ratelimit") || strings.Contains(string(out), "rateLimit") {
+			t.Fatalf("%s: unexpected ratelimit in output:\n%s", edge, out)
+		}
+		doc := parseTraefik(t, out)
+		wantMws := []string{"cvctl-headers@file", "cvctl-inflight@file"}
+		for _, rn := range []string{"proj-dev--api", "proj-dev--api--alias-0"} {
+			if got := doc.HTTP.Routers[rn].Middlewares; !slices.Equal(got, wantMws) {
+				t.Fatalf("%s: router %s middlewares = %v, want %v", edge, rn, got, wantMws)
+			}
+		}
+		wantRedirMws := []string{"cvctl-headers@file", "cvctl-inflight@file", "proj-dev--api--redirect-0"}
+		if got := doc.HTTP.Routers["proj-dev--api--redirect-0"].Middlewares; !slices.Equal(got, wantRedirMws) {
+			t.Fatalf("%s: redirect router middlewares = %v, want %v", edge, got, wantRedirMws)
+		}
+		if _, ok := doc.HTTP.Middlewares["proj-dev--api--ratelimit"]; ok {
+			t.Fatalf("%s: ratelimit middleware must not be defined when Off", edge)
+		}
+	}
+
+	// Without redirects and with RateLimit Off, no top-level http.middlewares key is emitted.
+	d.Redirects = nil
+	out, err := Traefik(p, d, Options{Edge: "edge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "\n  middlewares:") {
+		t.Fatalf("unexpected http.middlewares section when Off and no redirects:\n%s", out)
+	}
+}
+
+func TestTraefikRateLimitBucketService(t *testing.T) {
+	p, d, _ := setupBuckets(t)
+	p.Data[0].RateLimit = &contract.RateLimit{Average: 300, Burst: 600}
+	out, err := Traefik(p, d, Options{Edge: "behind-proxy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := parseTraefik(t, out)
+	if got := doc.HTTP.Routers["proj-dev--api"].Middlewares; !slices.Equal(got, []string{"cvctl-default@file"}) {
+		t.Fatalf("api router middlewares = %v, want [cvctl-default@file]", got)
+	}
+	wantMediaMws := []string{"cvctl-headers@file", "proj-dev--media--ratelimit", "cvctl-inflight@file"}
+	if got := doc.HTTP.Routers["proj-dev--media"].Middlewares; !slices.Equal(got, wantMediaMws) {
+		t.Fatalf("media router middlewares = %v, want %v", got, wantMediaMws)
+	}
+	rl := doc.HTTP.Middlewares["proj-dev--media--ratelimit"].RateLimit
+	if rl.Average != 300 || rl.Burst != 600 || rl.SourceCriterion.IPStrategy.Depth != 1 {
+		t.Fatalf("media ratelimit middleware = %+v", rl)
 	}
 }
