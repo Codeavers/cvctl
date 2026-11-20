@@ -8,7 +8,15 @@ Steps a release needs beyond `cvctl upgrade` are in
 
 ## [Unreleased]
 
+### Added
+
+- `cvctl.ratelimit: "<average>/<burst>"` or `"off"` on an exposed service sets the rate limit of
+  its routes.
+
 ### Changed
+
+- The default Traefik rate limit is 100 requests/s with a burst of 300 per client IP (was 50/100);
+  re-run `cvctl init` to apply it.
 
 - Documentation moved from the README into [doc/](doc/README.md); added this changelog, a code
   of conduct and issue and pull request templates.

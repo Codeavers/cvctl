@@ -50,7 +50,10 @@ the instance through the instance's own `<inst>_edge` network. Traefik itself li
 Traefik's `readTimeout` (how long a request body may take to arrive) is Traefik's default, 60s,
 unless `CVCTL_TRAEFIK_READ_TIMEOUT` sets it (e.g. `15m` for large uploads). It applies to the
 `web` and `websecure` entrypoints; re-run `cvctl init` to apply it. Traefik's access log is JSON
-without `RequestPath`, since paths can carry tokens.
+without `RequestPath`, since paths can carry tokens. The rate limit defaults to 100 requests/s,
+burst 300, per client IP (re-run `cvctl init` to apply). An exposed service overrides it for its
+routes with `cvctl.ratelimit: "<average>/<burst>"` (e.g. `"200/400"`) or `"off"`, which keeps the
+security headers and the in-flight limit; it needs an agent of this release or later.
 
 ## Adopting external services
 

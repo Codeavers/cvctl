@@ -104,6 +104,17 @@ func Validate(p *Project, cat kinds.Catalog, spec *envspec.Spec) []output.Issue 
 			add("E_CONTRACT_BACKUP_INVALID", name, fmt.Sprintf("%s %q is not valid", LabelBackup, b),
 				fmt.Sprintf("set %s to wal-g, dump, volume or none", LabelBackup))
 		}
+		if val, ok := svc.Labels[LabelRateLimit]; ok {
+			if _, exposed := svc.Labels[LabelExpose]; !exposed {
+				add("E_CONTRACT_RATELIMIT_UNEXPOSED", name,
+					fmt.Sprintf("service %s has %s but is not exposed", name, LabelRateLimit),
+					"remove cvctl.ratelimit or expose the service with cvctl.expose")
+			} else if _, valid := parseRateLimit(val); !valid {
+				add("E_CONTRACT_RATELIMIT_INVALID", name,
+					fmt.Sprintf("%s %q is not valid", LabelRateLimit, val),
+					`set cvctl.ratelimit to "<average>/<burst>" requests per second per IP, e.g. "200/400", or "off"`)
+			}
+		}
 		if svc.Labels[LabelRole] == "" && svc.Labels[LabelKind] == "" {
 			add("E_CONTRACT_NO_ROLE", name, "service has neither cvctl.role nor cvctl.kind",
 				fmt.Sprintf("add label %s: app|worker, or %s: <kind>", LabelRole, LabelKind))

@@ -10,6 +10,9 @@ and S3): [compose.yml](../examples/demo/compose.yml), [env.spec.yml](../examples
 cvctl generates the compose file it runs. Unknown or unsafe fields fail with
 `E_CONTRACT_FIELD_FORBIDDEN`. `env.spec.yml` names and values are checked
 (`E_ENVSPEC_NAME`, `E_ENVSPEC_VALUE`). Run `cvctl lint <dir>` before publishing.
+Labels configure services: `cvctl.role`, `cvctl.kind`, `cvctl.version`, `cvctl.expose`,
+`cvctl.ratelimit` (see [domains.md](domains.md#traefik)), `cvctl.env`, `cvctl.backup`,
+`cvctl.external`, `cvctl.owner`, `cvctl.uid`.
 
 Each `env.spec.yml` var has a source: `service` (taken from a data service), `random` (generated
 secret), `fixed`, `template` (e.g. `https://{domain:api}`) or `prompt` (asked when the instance is
