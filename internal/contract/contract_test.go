@@ -468,3 +468,165 @@ func TestVolumeBackupOnQueueKinds(t *testing.T) {
 		}
 	}
 }
+
+func loadS3WithLabels(t *testing.T, apiExtra, mediaExtra, extraServices string) (*Project, kinds.Catalog) {
+	t.Helper()
+	cat, err := kinds.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile("testdata/s3-valid/compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(raw)
+	if apiExtra != "" {
+		s = strings.Replace(s, "      cvctl.expose: \"3000\"\n", "      cvctl.expose: \"3000\"\n      "+apiExtra+"\n", 1)
+	}
+	if mediaExtra != "" {
+		s = strings.Replace(s, "      cvctl.expose: \"9000\"\n", "      cvctl.expose: \"9000\"\n      "+mediaExtra+"\n", 1)
+	}
+	if extraServices != "" {
+		s += extraServices
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yml"), []byte(s), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load(dir, cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p, cat
+}
+
+func TestRateLimitParseAndValidate(t *testing.T) {
+	if LabelRateLimit != "cvctl.ratelimit" {
+		t.Fatalf("LabelRateLimit = %q, want cvctl.ratelimit", LabelRateLimit)
+	}
+	cases := []struct {
+		name  string
+		label string
+		want  *RateLimit
+	}{
+		{"absent", "", nil},
+		{"average and burst", `cvctl.ratelimit: "200/400"`, &RateLimit{Average: 200, Burst: 400}},
+		{"off", `cvctl.ratelimit: "off"`, &RateLimit{Off: true}},
+		{"min boundary", `cvctl.ratelimit: "1/1"`, &RateLimit{Average: 1, Burst: 1}},
+		{"max boundary", `cvctl.ratelimit: "10000/10000"`, &RateLimit{Average: 10000, Burst: 10000}},
+	}
+	for _, tc := range cases {
+		t.Run("app/"+tc.name, func(t *testing.T) {
+			p, cat := loadS3WithLabels(t, tc.label, "", "")
+			if !reflect.DeepEqual(p.Apps[0].RateLimit, tc.want) {
+				t.Fatalf("app RateLimit = %+v, want %+v", p.Apps[0].RateLimit, tc.want)
+			}
+			if issues := Validate(p, cat, nil); len(issues) != 0 {
+				t.Fatalf("unexpected issues: %+v", issues)
+			}
+		})
+		t.Run("bucket/"+tc.name, func(t *testing.T) {
+			p, cat := loadS3WithLabels(t, "", tc.label, "")
+			if !reflect.DeepEqual(p.Data[0].RateLimit, tc.want) {
+				t.Fatalf("data RateLimit = %+v, want %+v", p.Data[0].RateLimit, tc.want)
+			}
+			if issues := Validate(p, cat, nil); len(issues) != 0 {
+				t.Fatalf("unexpected issues: %+v", issues)
+			}
+		})
+	}
+}
+
+func TestRateLimitInvalid(t *testing.T) {
+	const wantHint = `set cvctl.ratelimit to "<average>/<burst>" requests per second per IP, e.g. "200/400", or "off"`
+	for _, val := range []string{"abc", "0/10", "10", "100/50", "10/20/30", "10001/20000", " 10/20"} {
+		t.Run(val, func(t *testing.T) {
+			p, cat := loadS3WithLabels(t, `cvctl.ratelimit: "`+val+`"`, "", "")
+			if p.Apps[0].RateLimit != nil {
+				t.Fatalf("invalid value %q must leave RateLimit nil at parse time, got %+v", val, p.Apps[0].RateLimit)
+			}
+			issues := Validate(p, cat, nil)
+			if len(issues) != 1 {
+				t.Fatalf("val %q: want 1 issue, got %+v", val, issues)
+			}
+			iss := issues[0]
+			if iss.Code != "E_CONTRACT_RATELIMIT_INVALID" || iss.Service != "api" || iss.Hint != wantHint {
+				t.Fatalf("val %q: got %+v, want code E_CONTRACT_RATELIMIT_INVALID service api hint %q", val, iss, wantHint)
+			}
+		})
+	}
+}
+
+func TestRateLimitUnexposed(t *testing.T) {
+	const wantHint = "remove cvctl.ratelimit or expose the service with cvctl.expose"
+
+	t.Run("worker", func(t *testing.T) {
+		worker := `
+  worker:
+    image: ghcr.io/x/api:1
+    labels:
+      cvctl.role: worker
+      cvctl.ratelimit: "200/400"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+`
+		p, cat := loadS3WithLabels(t, "", "", worker)
+		issues := Validate(p, cat, nil)
+		if len(issues) != 1 {
+			t.Fatalf("want 1 issue, got %+v", issues)
+		}
+		iss := issues[0]
+		if iss.Code != "E_CONTRACT_RATELIMIT_UNEXPOSED" || iss.Service != "worker" || iss.Hint != wantHint {
+			t.Fatalf("got %+v, want E_CONTRACT_RATELIMIT_UNEXPOSED on worker with hint %q", iss, wantHint)
+		}
+	})
+
+	t.Run("unexposed app", func(t *testing.T) {
+		cat, err := kinds.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile("testdata/s3-valid/compose.yml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := strings.Replace(string(raw), "      cvctl.expose: \"3000\"\n", "      cvctl.ratelimit: \"200/400\"\n", 1)
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "compose.yml"), []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		p, err := Load(dir, cat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		issues := Validate(p, cat, nil)
+		if len(issues) != 1 {
+			t.Fatalf("want 1 issue, got %+v", issues)
+		}
+		iss := issues[0]
+		if iss.Code != "E_CONTRACT_RATELIMIT_UNEXPOSED" || iss.Service != "api" || iss.Hint != wantHint {
+			t.Fatalf("got %+v, want E_CONTRACT_RATELIMIT_UNEXPOSED on api with hint %q", iss, wantHint)
+		}
+	})
+
+	t.Run("unexposed data service", func(t *testing.T) {
+		db := `
+  db:
+    labels:
+      cvctl.kind: postgres
+      cvctl.env: DB
+      cvctl.ratelimit: "200/400"
+`
+		p, cat := loadS3WithLabels(t, "", "", db)
+		issues := Validate(p, cat, nil)
+		if len(issues) != 1 {
+			t.Fatalf("want 1 issue, got %+v", issues)
+		}
+		iss := issues[0]
+		if iss.Code != "E_CONTRACT_RATELIMIT_UNEXPOSED" || iss.Service != "db" || iss.Hint != wantHint {
+			t.Fatalf("got %+v, want E_CONTRACT_RATELIMIT_UNEXPOSED on db with hint %q", iss, wantHint)
+		}
+	})
+}

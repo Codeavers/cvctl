@@ -310,8 +310,8 @@ func renderTraefikDynamic(cfg *hostcfg.Config) ([]byte, error) {
 	}
 
 	rl := &traefikRateLimitMiddleware{
-		Average: 50,
-		Burst:   100,
+		Average: 100,
+		Burst:   300,
 	}
 	if mode != "edge" {
 		rl.SourceCriterion = &traefikRateLimitSourceCriterion{
