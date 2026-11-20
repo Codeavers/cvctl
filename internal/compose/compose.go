@@ -180,6 +180,8 @@ func (p Project) RunHook(ctx context.Context, service, script string) (sys.Resul
 // RunScript runs script with sh in a one-off container of service. The script
 // goes on stdin so secrets it carries never appear in argv.
 func (p Project) RunScript(ctx context.Context, service, script string) (sys.Result, error) {
+	// Named for the same reason as RunHook: a killed docker CLI leaves the run
+	// container alive.
 	name := p.Instance + "-prov-" + hookSuffix()
 	cmd := p.Cmd("run", "--rm", "--no-deps", "-T", "--name", name, "--entrypoint", "sh", service, "-s")
 	cmd.Stdin = []byte(script)
