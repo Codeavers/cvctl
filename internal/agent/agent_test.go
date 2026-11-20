@@ -16,6 +16,7 @@ import (
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/notify"
+	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/internal/sys/systest"
@@ -779,5 +780,218 @@ func TestAgentRecoversDeployingOnStartup(t *testing.T) {
 		if err != nil || len(hist) != 1 || hist[0].Kind != "interrupted" {
 			t.Fatalf("%s: expected one interrupted history entry, got %v (%v)", inst, hist, err)
 		}
+	}
+}
+
+func TestAgentDeployLockedIsSkippedWithoutNotification(t *testing.T) {
+	store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
+	seedOK(t, store, "demo-dev")
+	notif := &fakeNotifier{}
+	var out bytes.Buffer
+	dep := &fakeDeployer{
+		onDeploy: func(ctx context.Context, inst string, want state.Desired) (deploy.Result, error) {
+			return deploy.Result{}, &output.Error{
+				Code:    "E_INSTANCE_LOCKED",
+				Message: `instance "demo-dev" is locked`,
+				Hint:    "another cvctl operation is running on demo-dev; retry later",
+			}
+		},
+	}
+	cfg := agent.Config{
+		Store: store, Deployer: dep, Notify: notif, Out: &out, Once: true,
+		Load: func(inst string) (*instance.Decisions, *contract.Project, error) {
+			return &instance.Decisions{Instance: inst, Env: "dev"}, &contract.Project{}, nil
+		},
+		Sources: func(d *instance.Decisions) deploy.Source {
+			return &fakeSource{desired: state.Desired{InfraCommit: "commit-2"}}
+		},
+	}
+	if err := agent.Run(context.Background(), cfg); err != nil {
+		t.Fatalf("agent.Run failed: %v", err)
+	}
+	if len(notif.messages) != 0 {
+		t.Fatalf("expected 0 notifications for locked instance, got %+v", notif.messages)
+	}
+	var entry agent.DecisionLog
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &entry); err != nil {
+		t.Fatalf("unmarshal decision log: %v (raw: %q)", err, out.String())
+	}
+	if entry.Instance != "demo-dev" || entry.Action != "skip" || !strings.Contains(strings.ToLower(entry.Reason), "locked") {
+		t.Fatalf("expected skip decision with reason containing locked, got %+v", entry)
+	}
+}
+
+type cancelSource struct {
+	cancel context.CancelFunc
+}
+
+func (c cancelSource) Desired(ctx context.Context, d *instance.Decisions) (state.Desired, error) {
+	c.cancel()
+	return state.Desired{}, ctx.Err()
+}
+
+func TestAgentLockedInstanceNotifiesOnceAfterLockNoticeAfter(t *testing.T) {
+	store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
+	seedOK(t, store, "demo-dev")
+	notif := &fakeNotifier{}
+	var out syncBuffer
+
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tickTimes := []time.Time{
+		t0,
+		t0.Add(agent.LockNoticeAfter - time.Second),
+		t0.Add(agent.LockNoticeAfter),
+		t0.Add(agent.LockNoticeAfter + time.Minute),
+	}
+	lockedErr := &output.Error{
+		Code:    "E_INSTANCE_LOCKED",
+		Message: `instance "demo-dev" is locked`,
+		Hint:    "another cvctl operation is running on demo-dev; retry later",
+	}
+
+	var mu sync.Mutex
+	now := t0
+	tick := 0
+	var countsAfterTick []int
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dep := &fakeDeployer{
+		onDeploy: func(ctx context.Context, inst string, want state.Desired) (deploy.Result, error) {
+			return deploy.Result{}, lockedErr
+		},
+	}
+
+	cfg := agent.Config{
+		Interval: time.Millisecond,
+		Store:    store,
+		Deployer: dep,
+		Notify:   notif,
+		Out:      &out,
+		Once:     false,
+		Now: func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return now
+		},
+		Load: func(inst string) (*instance.Decisions, *contract.Project, error) {
+			return &instance.Decisions{Instance: inst, Env: "dev"}, &contract.Project{}, nil
+		},
+		Sources: func(d *instance.Decisions) deploy.Source {
+			mu.Lock()
+			defer mu.Unlock()
+			if tick > 0 {
+				notif.mu.Lock()
+				countsAfterTick = append(countsAfterTick, len(notif.messages))
+				notif.mu.Unlock()
+			}
+			if tick >= len(tickTimes) {
+				return cancelSource{cancel: cancel}
+			}
+			now = tickTimes[tick]
+			tick++
+			return &fakeSource{desired: state.Desired{InfraCommit: "commit-2"}}
+		},
+	}
+
+	if err := agent.Run(ctx, cfg); err != nil {
+		t.Fatalf("agent.Run failed: %v", err)
+	}
+
+	wantCounts := []int{0, 0, 1, 1}
+	if len(countsAfterTick) != len(wantCounts) {
+		t.Fatalf("expected %d ticks recorded, got %v", len(wantCounts), countsAfterTick)
+	}
+	for i, want := range wantCounts {
+		if countsAfterTick[i] != want {
+			t.Fatalf("after tick %d: notification count = %d, want %d (all: %v)\nlog:\n%s", i, countsAfterTick[i], want, countsAfterTick, out.String())
+		}
+	}
+
+	notif.mu.Lock()
+	msgs := notif.messages
+	notif.mu.Unlock()
+	if len(msgs) != 1 || msgs[0].Level != "error" || msgs[0].Text != lockedErr.Error() {
+		t.Fatalf("expected 1 error notification with text %q, got %+v", lockedErr.Error(), msgs)
+	}
+}
+
+func TestAgentLockedFirstSeenResetsAfterDeploy(t *testing.T) {
+	store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
+	seedOK(t, store, "demo-dev")
+	notif := &fakeNotifier{}
+	var out syncBuffer
+
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tickTimes := []time.Time{
+		t0,
+		t0.Add(time.Minute),
+		t0.Add(agent.LockNoticeAfter),
+	}
+	lockedErr := &output.Error{
+		Code:    "E_INSTANCE_LOCKED",
+		Message: `instance "demo-dev" is locked`,
+		Hint:    "another cvctl operation is running on demo-dev; retry later",
+	}
+
+	var mu sync.Mutex
+	now := t0
+	tick := 0
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dep := &fakeDeployer{
+		onDeploy: func(ctx context.Context, inst string, want state.Desired) (deploy.Result, error) {
+			mu.Lock()
+			curTick := tick - 1
+			mu.Unlock()
+			if curTick == 1 {
+				return deploy.Result{Status: state.StatusOK, ID: "deploy-ok"}, nil
+			}
+			return deploy.Result{}, lockedErr
+		},
+	}
+
+	cfg := agent.Config{
+		Interval: time.Millisecond,
+		Store:    store,
+		Deployer: dep,
+		Notify:   notif,
+		Out:      &out,
+		Once:     false,
+		Now: func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return now
+		},
+		Load: func(inst string) (*instance.Decisions, *contract.Project, error) {
+			return &instance.Decisions{Instance: inst, Env: "dev"}, &contract.Project{}, nil
+		},
+		Sources: func(d *instance.Decisions) deploy.Source {
+			mu.Lock()
+			defer mu.Unlock()
+			if tick >= len(tickTimes) {
+				return cancelSource{cancel: cancel}
+			}
+			now = tickTimes[tick]
+			tick++
+			return &fakeSource{desired: state.Desired{InfraCommit: "commit-2"}}
+		},
+	}
+
+	if err := agent.Run(ctx, cfg); err != nil {
+		t.Fatalf("agent.Run failed: %v", err)
+	}
+
+	notif.mu.Lock()
+	msgs := notif.messages
+	notif.mu.Unlock()
+	if len(msgs) != 0 {
+		t.Fatalf("expected 0 notifications when lock first-seen resets after successful deploy, got %+v", msgs)
+	}
+	if strings.Contains(out.String(), `"action":"error"`) {
+		t.Fatalf("expected no error decision in log, got:\n%s", out.String())
 	}
 }

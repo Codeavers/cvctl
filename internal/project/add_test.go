@@ -237,6 +237,7 @@ func TestAddExisting(t *testing.T) {
 	inst := "my-service-dev"
 	instDir := filepath.Join(deployRoot, inst)
 	_ = fsys.MkdirAll(instDir, 0o2775, sys.Owner{User: "deployer", Group: "deploy"})
+	_ = fsys.WriteFile(filepath.Join(instDir, "cvctl.env"), []byte("CVCTL_INSTANCE=my-service-dev\n"), 0o640, sys.Owner{User: "deployer", Group: "deploy"})
 
 	e := &Env{
 		FS:         fsys,
@@ -1507,6 +1508,10 @@ func (r *recordParentRepo) Clone(ctx context.Context, url, branch string) error 
 }
 
 func TestProjectAddInitialStateSavedBeforeDeploy(t *testing.T) {
+	oldLock := sys.LockFile
+	t.Cleanup(func() { sys.LockFile = oldLock })
+	sys.LockFile = systest.NewFakeLocker().LockFile
+
 	tmp := t.TempDir()
 	fsys := systest.NewFS()
 	cat := testCatalog(t)
@@ -3053,5 +3058,159 @@ func TestAddWithAliasAndRedirect(t *testing.T) {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("missing %q:\n%s", want, raw)
 		}
+	}
+}
+
+func TestAddHoldsInstanceLockDuringDeploy(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{
+		"data_extra_mode": "local",
+		"domain_web":      "web.example.com",
+	})
+	if err := os.RemoveAll(rig.instDir); err != nil {
+		t.Fatal(err)
+	}
+	lockedDuringFetch := false
+	rig.stub.onFetch = func() {
+		if unlock, err := rig.store.Lock("demo-dev"); err == nil {
+			unlock()
+			t.Error("instance lock must be held while Add deploys")
+		} else {
+			lockedDuringFetch = true
+		}
+	}
+	if _, err := Add(context.Background(), rig.env, "git@example.com:org/demo-infra.git", AddOptions{}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if !lockedDuringFetch {
+		t.Fatal("expected Add to hold the instance lock while deploying")
+	}
+	unlock, err := rig.store.Lock("demo-dev")
+	if err != nil {
+		t.Fatalf("lock must be released after Add: %v", err)
+	}
+	unlock()
+}
+
+func TestAddFailsWhenInstanceLocked(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{
+		"data_extra_mode": "local",
+		"domain_web":      "web.example.com",
+	})
+	if err := os.RemoveAll(rig.instDir); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := rig.store.Lock("demo-dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	_, err = Add(context.Background(), rig.env, "git@example.com:org/demo-infra.git", AddOptions{})
+	requireCode(t, err, "E_INSTANCE_LOCKED")
+	if _, statErr := os.Stat(rig.instDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected instDir %s not to exist when instance lock is held, stat err: %v", rig.instDir, statErr)
+	}
+}
+
+func TestAddRemovesInterruptedLeftoverWithoutCvctlEnv(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{
+		"data_extra_mode": "local",
+		"domain_web":      "web.example.com",
+	})
+	if err := os.Remove(filepath.Join(rig.instDir, "cvctl.env")); err != nil {
+		t.Fatal(err)
+	}
+	leftoverFile := filepath.Join(rig.infraDir, "leftover.txt")
+	if err := os.WriteFile(leftoverFile, []byte("interrupted"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Add(context.Background(), rig.env, "git@example.com:org/demo-infra.git", AddOptions{})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	wantWarn := fmt.Sprintf("removed the leftover of an interrupted project add in %s", rig.instDir)
+	if !slices.Contains(res.Warnings, wantWarn) {
+		t.Fatalf("expected warning %q in %v", wantWarn, res.Warnings)
+	}
+	if _, statErr := os.Stat(leftoverFile); !os.IsNotExist(statErr) {
+		t.Fatalf("expected leftover file %s to be removed, stat err: %v", leftoverFile, statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(rig.instDir, "cvctl.env")); statErr != nil {
+		t.Fatalf("expected cvctl.env to be created: %v", statErr)
+	}
+}
+
+type failingPrompter struct {
+	err error
+}
+
+func (f failingPrompter) Ask(hostcfg.Question, string) (string, error) {
+	return "", f.err
+}
+
+func TestAddPromptErrorAfterCloneRemovesInstDirKeepsDeployKey(t *testing.T) {
+	rig := newUpdateRig(t, nil)
+	if err := os.RemoveAll(rig.instDir); err != nil {
+		t.Fatal(err)
+	}
+	promptErr := errors.New("prompt interrupted")
+	rig.env.Prompt = failingPrompter{err: promptErr}
+
+	_, err := Add(context.Background(), rig.env, "git@example.com:org/demo-infra.git", AddOptions{})
+	if !errors.Is(err, promptErr) {
+		t.Fatalf("expected prompt error %v, got %v", promptErr, err)
+	}
+	if _, statErr := os.Stat(rig.instDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected instDir %s to be removed on prompt error, stat err: %v", rig.instDir, statErr)
+	}
+	keyPath := filepath.Join(rig.env.StateRoot, "demo-dev", "deploy_key")
+	if _, statErr := os.Stat(keyPath); statErr != nil {
+		t.Fatalf("expected deploy_key %s to be kept, stat err: %v", keyPath, statErr)
+	}
+}
+
+func TestAddDeployFailureAfterStateSavedKeepsInstDirAndCvctlEnv(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{
+		"data_extra_mode": "local",
+		"domain_web":      "web.example.com",
+	})
+	if err := os.RemoveAll(rig.instDir); err != nil {
+		t.Fatal(err)
+	}
+	rig.env.Deployer.Compose = nil
+
+	_, err := Add(context.Background(), rig.env, "git@example.com:org/demo-infra.git", AddOptions{})
+	if err == nil {
+		t.Fatal("expected deploy error, got nil")
+	}
+	if _, statErr := os.Stat(rig.instDir); statErr != nil {
+		t.Fatalf("expected instDir %s to be kept after state.json was saved: %v", rig.instDir, statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(rig.instDir, "cvctl.env")); statErr != nil {
+		t.Fatalf("expected cvctl.env to be kept after state.json was saved: %v", statErr)
+	}
+}
+
+func TestAddKeepsInstanceWithStateButNoCvctlEnv(t *testing.T) {
+	rig := newUpdateRig(t, map[string]string{
+		"data_extra_mode": "local",
+		"domain_web":      "web.example.com",
+	})
+	if err := os.Remove(filepath.Join(rig.instDir, "cvctl.env")); err != nil {
+		t.Fatal(err)
+	}
+	if err := rig.store.Save(&state.State{Instance: "demo-dev", Status: state.StatusOK}); err != nil {
+		t.Fatal(err)
+	}
+	appEnv := filepath.Join(rig.instDir, "app.env")
+	if err := os.WriteFile(appEnv, []byte("SECRET=keep\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Add(context.Background(), rig.env, "git@example.com:org/demo-infra.git", AddOptions{})
+	requireCode(t, err, "E_PROJECT_EXISTS")
+	if _, statErr := os.Stat(appEnv); statErr != nil {
+		t.Fatalf("app.env of a deployed instance must be kept: %v", statErr)
 	}
 }

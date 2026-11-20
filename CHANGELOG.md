@@ -31,6 +31,14 @@ Steps a release needs beyond `cvctl upgrade` are in
 - Documentation moved from the README into [doc/](doc/README.md); added this changelog, a code
   of conduct and issue and pull request templates.
 
+### Fixed
+
+- `cvctl-agent` no longer notifies `E_INSTANCE_LOCKED` while another cvctl operation holds the
+  instance; it notifies only if the lock lasts 10 minutes. `project add` holds the lock until its
+  first deploy.
+- An interrupted `project add` cleans up after itself, and the next add removes a leftover without
+  `cvctl.env` or `state.json` instead of failing with `E_PROJECT_EXISTS`.
+
 ## [0.8.6] - 2026-11-09
 
 ### Added

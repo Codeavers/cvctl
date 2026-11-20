@@ -100,6 +100,10 @@ logged as a `reload` decision. If they fail to load, the agent skips the cycle a
 notifies the error once, instead of deploying with the old values. Routes already written keep the
 old edge mode until the instance is deployed again (`cvctl deploy <inst>`).
 
+An instance locked by another cvctl operation (`project add` or `update`, a manual deploy, a
+backup) is skipped with a `skip` decision and no notice; the agent notifies `E_INSTANCE_LOCKED`
+only if the lock is still held 10 minutes after it first met it.
+
 The Telegram chat ID is numeric (groups and channels are negative) or a public `@channelname`. From
 a topic link `t.me/c/<id>/<thread>` the chat ID is `-100<id>` and the optional thread ID is
 `<thread>`.
