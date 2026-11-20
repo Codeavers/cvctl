@@ -15,10 +15,15 @@ import (
 	"github.com/codeavers/cvctl/internal/hostcfg"
 	"github.com/codeavers/cvctl/internal/instance"
 	"github.com/codeavers/cvctl/internal/notify"
+	"github.com/codeavers/cvctl/internal/output"
 	"github.com/codeavers/cvctl/internal/state"
 	"github.com/codeavers/cvctl/internal/sys"
 	"github.com/codeavers/cvctl/kinds"
 )
+
+// LockNoticeAfter is the duration an instance can remain locked before the agent
+// reports an error notification.
+var LockNoticeAfter = 10 * time.Minute
 
 // Store abstracts state operations for instances.
 type Store interface {
@@ -66,6 +71,7 @@ type Config struct {
 	StateRoot  string
 	FS         sys.FS
 	Catalog    kinds.Catalog
+	Now        func() time.Time
 	// ReloadHost, when set, runs at the start of every tick and returns the
 	// host config, secrets and notifier to use for that tick. A long-running
 	// agent must not deploy with a host.env older than the one on disk: a
@@ -161,6 +167,11 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	nowFn := cfg.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+
 	sourcesFn := cfg.Sources
 	if sourcesFn == nil {
 		sourcesFn = func(d *instance.Decisions) deploy.Source {
@@ -171,7 +182,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	logDecision := func(inst, action, reason string) {
 		entry := DecisionLog{
-			TS:       time.Now().UTC().Format(time.RFC3339),
+			TS:       nowFn().UTC().Format(time.RFC3339),
 			Instance: inst,
 			Action:   action,
 			Reason:   reason,
@@ -181,6 +192,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	lastErrors := make(map[string]string)
 	lastWarnings := make(map[string]string)
+	lockedFirstSeen := make(map[string]time.Time)
 
 	recordWarning := func(inst, reason string) {
 		if lastWarnings[inst] != reason {
@@ -214,7 +226,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}); ok {
 		if instances, err := cfg.Store.Instances(); err == nil {
 			for _, inst := range instances {
-				switch recovered, err := rec.RecoverInterrupted(inst, time.Now().UTC()); {
+				switch recovered, err := rec.RecoverInterrupted(inst, nowFn().UTC()); {
 				case err != nil:
 					logDecision(inst, "error", fmt.Sprintf("cannot recover interrupted deploy: %v", err))
 				case recovered:
@@ -272,6 +284,13 @@ func Run(ctx context.Context, cfg Config) error {
 			}
 
 			func(inst string) {
+				locked := false
+				defer func() {
+					if !locked {
+						delete(lockedFirstSeen, inst)
+					}
+				}()
+
 				defer func() {
 					if r := recover(); r != nil {
 						recordError(inst, fmt.Sprintf("panic: %v", r))
@@ -351,6 +370,22 @@ func Run(ctx context.Context, cfg Config) error {
 					}
 					deployCancel()
 					if ctx.Err() == nil {
+						var outErr *output.Error
+						if errors.As(err, &outErr) && outErr.Code == "E_INSTANCE_LOCKED" {
+							locked = true
+							firstSeen, ok := lockedFirstSeen[inst]
+							if !ok {
+								firstSeen = nowFn()
+								lockedFirstSeen[inst] = firstSeen
+							}
+							if !nowFn().Before(firstSeen.Add(LockNoticeAfter)) {
+								recordError(inst, err.Error())
+							} else {
+								delete(lastErrors, inst)
+								logDecision(inst, "skip", "instance is locked")
+							}
+							return
+						}
 						recordError(inst, err.Error())
 					}
 					return

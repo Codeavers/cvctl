@@ -27,6 +27,12 @@ sudo cvctl project add oci://ghcr.io/<org>/<repo>-infra --env dev --domain web=a
 | `--env-file <path>` | take values from an existing `.env`, see [Migrating an existing deploy](#migrating-an-existing-deploy) |
 | `--non-interactive` | never prompt; use defaults and `--set` values |
 
+`project add` holds the instance lock from start to its first deploy, so the agent leaves the new
+instance alone until then. An add that stops before saving the instance (an error, Ctrl-C at a
+prompt) removes `/srv/deploy/<inst>`. One killed outright usually leaves it without `cvctl.env` or
+`state.json`, and the next `project add` removes that leftover with a warning instead of failing
+with `E_PROJECT_EXISTS`; an instance with `state.json` is never removed.
+
 ## project update
 
 `cvctl project update <instance>` refreshes an existing instance (networks, backup keys, generated
