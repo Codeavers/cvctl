@@ -11,7 +11,8 @@
 | [Operations](operations.md) | status, logs, history, deploy notices, `upgrade`, upgrade notes, `images prune` |
 | [Security model](security.md) | who runs what, contract allowlist, isolation, secrets, hardening |
 
-Release history is in [CHANGELOG.md](../CHANGELOG.md).
+Release history is in [GitHub Releases](https://github.com/Codeavers/cvctl/releases); notes up to
+v0.8.6 are also in [CHANGELOG.md](../CHANGELOG.md).
 
 ## Conventions
 
