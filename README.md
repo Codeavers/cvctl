@@ -180,9 +180,10 @@ cycle; a hook timeout fails that desired state until it changes.
 Traefik's `readTimeout` (how long a request body may take to arrive) is Traefik's default, 60s,
 unless `CVCTL_TRAEFIK_READ_TIMEOUT` sets it (e.g. `15m` for large uploads). It applies to the
 `web` and `websecure` entrypoints; re-run `cvctl init` to apply it. Traefik's access log is JSON
-without `RequestPath`, since paths can carry tokens. The rate limit defaults to 100/s, burst 300
-per IP (re-run `cvctl init` to apply); an exposed service overrides it with `cvctl.ratelimit`
-(e.g. `cvctl.ratelimit: "200/400"`, or `"off"`).
+without `RequestPath`, since paths can carry tokens. The rate limit defaults to 100 requests/s,
+burst 300, per client IP (re-run `cvctl init` to apply). An exposed service overrides it for its
+routes with `cvctl.ratelimit: "<average>/<burst>"` (e.g. `"200/400"`) or `"off"`, which keeps the
+security headers and the in-flight limit; it needs an agent of this release or later.
 
 ## Upgrading a host to v0.7
 
