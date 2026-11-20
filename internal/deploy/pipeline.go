@@ -41,7 +41,7 @@ type ComposeAPI interface {
 	EnsureImage(ctx context.Context, ref string) error
 	UpData(ctx context.Context, services []string, waitTimeout time.Duration) error
 	RunHook(ctx context.Context, service, script string) (sys.Result, error)
-	ExecScript(ctx context.Context, service, script string) (sys.Result, error)
+	RunScript(ctx context.Context, service, script string) (sys.Result, error)
 	Up(ctx context.Context) error
 	Logs(ctx context.Context, service string, tail int) (string, error)
 }
@@ -1536,18 +1536,22 @@ func (d *Deployer) provisionBuckets(ctx context.Context, c ComposeAPI, inst stri
 		if len(buckets) == 0 {
 			buckets = []contract.Bucket{{Name: sd.Creds.DB}}
 		}
-		script := s3prov.Script(buckets, sd.Creds.AppUser, sd.Creds.AppPassword, s3prov.PolicyName)
-		res, err := c.ExecScript(ctx, ds.Name, script)
+		script := s3prov.Script(ds.Name, buckets, sd.Creds.AppUser, sd.Creds.AppPassword, s3prov.PolicyName)
+		res, err := c.RunScript(ctx, ds.Name, script)
 		if err != nil {
 			detail := strings.TrimSpace(string(res.Stderr))
 			if detail == "" {
 				detail = err.Error()
 			}
 			redacted := lastLines(redact(detail, secrets), 20)
+			hint := "check the " + ds.Name + " container: cvctl logs " + inst
+			if res.ExitCode == 137 {
+				hint = "the provisioning container of " + ds.Name + " was killed (exit 137), usually out of memory: raise deploy.resources.limits.memory of " + ds.Name
+			}
 			return &output.Error{
 				Code:    "E_S3_PROVISION",
 				Message: ds.Name + ": " + redacted,
-				Hint:    "check the " + ds.Name + " container: cvctl logs " + inst,
+				Hint:    hint,
 			}
 		}
 		if o := s3prov.Orphans(res.Stdout, buckets); len(o) > 0 {

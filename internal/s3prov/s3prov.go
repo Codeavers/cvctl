@@ -19,11 +19,11 @@ const PolicyName = "cvctl-app"
 const listMarker = "@@buckets"
 
 // Script returns the POSIX sh script that provisions buckets and the app user.
-// It runs inside the silo container on stdin: the root keys come from the
-// container's own MINIO_ROOT_USER/MINIO_ROOT_PASSWORD, so they never leave it,
-// and the app password travels in the script, never in argv. Every step is
-// idempotent, so the script runs on every deploy.
-func Script(buckets []contract.Bucket, appUser, appPassword, policyName string) string {
+// It runs in a one-off container of the service on stdin: the root keys come
+// from the container's own MINIO_ROOT_USER/MINIO_ROOT_PASSWORD, so they never
+// leave it, and the app password travels in the script, never in argv. Every
+// step is idempotent, so the script runs on every deploy.
+func Script(host string, buckets []contract.Bucket, appUser, appPassword, policyName string) string {
 	bs := append([]contract.Bucket(nil), buckets...)
 	sort.Slice(bs, func(i, j int) bool { return bs[i].Name < bs[j].Name })
 
@@ -32,7 +32,7 @@ func Script(buckets []contract.Bucket, appUser, appPassword, policyName string) 
 	// The root keys reach mc through the environment and the app secret through
 	// stdin: container processes show up in the host's process table, so
 	// neither may be an mc argument.
-	b.WriteString(`export MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@localhost:9000"` + "\n")
+	fmt.Fprintf(&b, "export MC_HOST_local=\"http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@%s:9000\"\n", host)
 	for _, bk := range bs {
 		fmt.Fprintf(&b, "mc mb --ignore-existing local/%s\n", bk.Name)
 	}

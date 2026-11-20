@@ -177,12 +177,19 @@ func (p Project) RunHook(ctx context.Context, service, script string) (sys.Resul
 	return res, nil
 }
 
-// ExecScript runs script with sh inside the running container of service. The
-// script goes on stdin so secrets it carries never appear in argv.
-func (p Project) ExecScript(ctx context.Context, service, script string) (sys.Result, error) {
-	cmd := p.Cmd("exec", "-T", service, "sh", "-s")
+// RunScript runs script with sh in a one-off container of service. The script
+// goes on stdin so secrets it carries never appear in argv.
+func (p Project) RunScript(ctx context.Context, service, script string) (sys.Result, error) {
+	name := p.Instance + "-prov-" + hookSuffix()
+	cmd := p.Cmd("run", "--rm", "--no-deps", "-T", "--name", name, "--entrypoint", "sh", service, "-s")
 	cmd.Stdin = []byte(script)
 	res, err := p.Run.Run(ctx, cmd)
+	if ctx.Err() != nil {
+		rmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		rm := sys.Cmd{Name: "docker", Args: []string{"rm", "-f", name}, Env: cmd.Env}
+		_, _ = p.Run.Run(rmCtx, rm)
+	}
 	if err != nil || res.ExitCode != 0 {
 		return res, p.composeErr(cmd, res, err)
 	}
