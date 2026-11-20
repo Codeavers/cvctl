@@ -25,6 +25,9 @@ Steps a release needs beyond `cvctl upgrade` are in
   applies without restarting it.
 - The default Traefik rate limit is 100 requests/s with a burst of 300 per client IP (was 50/100);
   re-run `cvctl init` to apply it.
+- `cvctl adopt` records the ufw rule it creates; `cvctl init` reconciles it with the current edge
+  subnet, and `adopt rm` removes only rules cvctl added. `adopt add` warns when cvctl does not
+  manage the firewall.
 - Documentation moved from the README into [doc/](doc/README.md); added this changelog, a code
   of conduct and issue and pull request templates.
 
