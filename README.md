@@ -23,6 +23,8 @@ first with the host token. `cvctl version` prints the embedded tag.
 cvctl generates the compose file it runs. Unknown or unsafe fields fail with
 `E_CONTRACT_FIELD_FORBIDDEN`. `env.spec.yml` names and values are checked
 (`E_ENVSPEC_NAME`, `E_ENVSPEC_VALUE`). Run `cvctl lint <dir>` before publishing.
+Labels configure services: `cvctl.role`, `cvctl.kind`, `cvctl.version`, `cvctl.expose`,
+`cvctl.ratelimit`, `cvctl.env`, `cvctl.backup`, `cvctl.external`, `cvctl.owner`, `cvctl.uid`.
 
 Each instance gets its own networks, `<inst>_edge` (Traefik) and `<inst>_backup` (WAL-G and the
 backup user `bk-<inst>` with policy `cvctl-bk-<inst>`), so instances cannot reach each other.
@@ -178,7 +180,9 @@ cycle; a hook timeout fails that desired state until it changes.
 Traefik's `readTimeout` (how long a request body may take to arrive) is Traefik's default, 60s,
 unless `CVCTL_TRAEFIK_READ_TIMEOUT` sets it (e.g. `15m` for large uploads). It applies to the
 `web` and `websecure` entrypoints; re-run `cvctl init` to apply it. Traefik's access log is JSON
-without `RequestPath`, since paths can carry tokens.
+without `RequestPath`, since paths can carry tokens. The rate limit defaults to 100/s, burst 300
+per IP (re-run `cvctl init` to apply); an exposed service overrides it with `cvctl.ratelimit`
+(e.g. `cvctl.ratelimit: "200/400"`, or `"off"`).
 
 ## Upgrading a host to v0.7
 
