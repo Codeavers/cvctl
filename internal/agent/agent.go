@@ -290,6 +290,7 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 
 		regFailedThisTick := make(map[string]bool)
+		regAttemptedThisTick := make(map[string]bool)
 		for _, inst := range instances {
 			if ctx.Err() != nil {
 				return
@@ -330,14 +331,19 @@ func Run(ctx context.Context, cfg Config) error {
 							firstSeen = nowFn()
 							regFirstSeen[host] = firstSeen
 						}
-						if !nowFn().Before(firstSeen.Add(FetchErrorNoticeAfter)) && !regNotified[host] {
-							regNotified[host] = true
-							_ = notif.Send(ctx, notify.Message{
+						// Cap failed send attempts to one per host per tick so multiple
+						// instances sharing a registry don't hammer a failing notifier, while
+						// leaving regNotified unset so the next tick retries.
+						if !nowFn().Before(firstSeen.Add(FetchErrorNoticeAfter)) && !regNotified[host] && !regAttemptedThisTick[host] {
+							regAttemptedThisTick[host] = true
+							if sendErr := notif.Send(ctx, notify.Message{
 								Host:  hostName,
 								Level: "error",
 								Title: fmt.Sprintf("registry %s unreachable", host),
 								Text:  reason,
-							})
+							}); sendErr == nil {
+								regNotified[host] = true
+							}
 						}
 						return
 					}
@@ -348,13 +354,14 @@ func Run(ctx context.Context, cfg Config) error {
 					}
 					if !nowFn().Before(firstSeen.Add(FetchErrorNoticeAfter)) {
 						if lastErrors[inst] != reason {
-							lastErrors[inst] = reason
-							_ = notif.Send(ctx, notify.Message{
+							if sendErr := notif.Send(ctx, notify.Message{
 								Host:  hostName,
 								Level: "error",
 								Title: fmt.Sprintf("%s agent error", inst),
 								Text:  reason,
-							})
+							}); sendErr == nil {
+								lastErrors[inst] = reason
+							}
 						}
 					}
 				}

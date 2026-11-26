@@ -52,12 +52,20 @@ func (f *fakeSource) Desired(ctx context.Context, d *instance.Decisions) (state.
 
 type fakeNotifier struct {
 	mu       sync.Mutex
+	attempts int
 	messages []notify.Message
+	onSend   func(notify.Message) error
 }
 
 func (f *fakeNotifier) Send(ctx context.Context, msg notify.Message) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.attempts++
+	if f.onSend != nil {
+		if err := f.onSend(msg); err != nil {
+			return err
+		}
+	}
 	f.messages = append(f.messages, msg)
 	return nil
 }
@@ -1437,4 +1445,103 @@ func TestAgentFetchTimeoutNotifiesOnceAfterFetchErrorNoticeAfter(t *testing.T) {
 			t.Fatalf("expected 0 notifications when fetch timeout resets after clean tick, got %+v", msgs)
 		}
 	})
+}
+
+func TestAgentTransientRegistryErrorRetriesNotifyAfterSendFailure(t *testing.T) {
+	store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
+	seedOK(t, store, "app-a")
+	seedOK(t, store, "app-b")
+
+	sendCalls := 0
+	notif := &fakeNotifier{
+		onSend: func(notify.Message) error {
+			sendCalls++
+			if sendCalls == 1 {
+				return errors.New("telegram unreachable")
+			}
+			return nil
+		},
+	}
+	var out syncBuffer
+
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tickTimes := []time.Time{
+		t0,
+		t0.Add(agent.FetchErrorNoticeAfter),
+		t0.Add(agent.FetchErrorNoticeAfter + time.Minute),
+		t0.Add(agent.FetchErrorNoticeAfter + 2*time.Minute),
+	}
+	regErr := &output.Error{
+		Code:    "E_REGISTRY_RESOLVE",
+		Message: "cannot reach registry ghcr.io",
+		Hint:    "check registry connectivity and credentials",
+	}
+
+	var mu sync.Mutex
+	now := t0
+	tick := 0
+	type tickStat struct {
+		attempts  int
+		delivered int
+	}
+	var statsAfterTick []tickStat
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := agent.Config{
+		Interval: time.Millisecond,
+		Store:    store,
+		Deployer: &fakeDeployer{},
+		Notify:   notif,
+		Out:      &out,
+		Once:     false,
+		Now: func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return now
+		},
+		Load: func(inst string) (*instance.Decisions, *contract.Project, error) {
+			return &instance.Decisions{Instance: inst, Env: "dev"}, &contract.Project{}, nil
+		},
+		Sources: func(d *instance.Decisions) deploy.Source {
+			mu.Lock()
+			defer mu.Unlock()
+			if d.Instance == "app-a" {
+				if tick > 0 {
+					notif.mu.Lock()
+					statsAfterTick = append(statsAfterTick, tickStat{
+						attempts:  notif.attempts,
+						delivered: len(notif.messages),
+					})
+					notif.mu.Unlock()
+				}
+				if tick >= len(tickTimes) {
+					return cancelSource{cancel: cancel}
+				}
+				now = tickTimes[tick]
+				tick++
+			}
+			return &fakeSource{err: regErr}
+		},
+	}
+
+	if err := agent.Run(ctx, cfg); err != nil {
+		t.Fatalf("agent.Run failed: %v", err)
+	}
+
+	wantStats := []tickStat{
+		{attempts: 0, delivered: 0},
+		{attempts: 1, delivered: 0},
+		{attempts: 2, delivered: 1},
+		{attempts: 2, delivered: 1},
+	}
+	if len(statsAfterTick) != len(wantStats) {
+		t.Fatalf("expected %d ticks recorded, got %+v", len(wantStats), statsAfterTick)
+	}
+	for i, want := range wantStats {
+		if statsAfterTick[i] != want {
+			t.Fatalf("after tick %d: got %+v, want %+v (all: %+v)", i, statsAfterTick[i], want, statsAfterTick)
+		}
+	}
 }
