@@ -104,6 +104,11 @@ An instance locked by another cvctl operation (`project add` or `update`, a manu
 backup) is skipped with a `skip` decision and no notice; the agent notifies `E_INSTANCE_LOCKED`
 only if the lock is still held 10 minutes after it first met it.
 
+Transient fetch errors (unreachable registry, HTTP 429/5xx, fetch timeout) are logged to the
+journal on first occurrence and notify only if they persist for 10 minutes; failures against the
+same registry host coalesce into one notice across instances. Auth (`401`/`403`), not-found
+(`404`), and contract errors still notify immediately.
+
 The Telegram chat ID is numeric (groups and channels are negative) or a public `@channelname`. From
 a topic link `t.me/c/<id>/<thread>` the chat ID is `-100<id>` and the optional thread ID is
 `<thread>`.

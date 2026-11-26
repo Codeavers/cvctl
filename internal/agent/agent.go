@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/codeavers/cvctl/internal/contract"
@@ -24,6 +26,11 @@ import (
 // LockNoticeAfter is the duration an instance can remain locked before the agent
 // reports an error notification.
 var LockNoticeAfter = 10 * time.Minute
+
+// FetchErrorNoticeAfter is how long a transient fetch error (unreachable
+// registry, HTTP 429/5xx, fetch timeout) must persist before the agent sends
+// an error notification.
+var FetchErrorNoticeAfter = 10 * time.Minute
 
 // Store abstracts state operations for instances.
 type Store interface {
@@ -193,6 +200,10 @@ func Run(ctx context.Context, cfg Config) error {
 	lastErrors := make(map[string]string)
 	lastWarnings := make(map[string]string)
 	lockedFirstSeen := make(map[string]time.Time)
+	fetchFirstSeen := make(map[string]time.Time)
+	fetchLastLogged := make(map[string]string)
+	regFirstSeen := make(map[string]time.Time)
+	regNotified := make(map[string]bool)
 
 	recordWarning := func(inst, reason string) {
 		if lastWarnings[inst] != reason {
@@ -278,6 +289,7 @@ func Run(ctx context.Context, cfg Config) error {
 			return
 		}
 
+		regFailedThisTick := make(map[string]bool)
 		for _, inst := range instances {
 			if ctx.Err() != nil {
 				return
@@ -290,6 +302,62 @@ func Run(ctx context.Context, cfg Config) error {
 						delete(lockedFirstSeen, inst)
 					}
 				}()
+
+				transientFetch := false
+				defer func() {
+					if !transientFetch {
+						delete(fetchFirstSeen, inst)
+						delete(fetchLastLogged, inst)
+					}
+				}()
+
+				handleFetchError := func(err error) {
+					reason := err.Error()
+					transient, host := classifyFetchError(err)
+					if !transient {
+						recordError(inst, reason)
+						return
+					}
+					transientFetch = true
+					if fetchLastLogged[inst] != reason {
+						fetchLastLogged[inst] = reason
+						logDecision(inst, "error", reason)
+					}
+					if host != "" {
+						regFailedThisTick[host] = true
+						firstSeen, ok := regFirstSeen[host]
+						if !ok {
+							firstSeen = nowFn()
+							regFirstSeen[host] = firstSeen
+						}
+						if !nowFn().Before(firstSeen.Add(FetchErrorNoticeAfter)) && !regNotified[host] {
+							regNotified[host] = true
+							_ = notif.Send(ctx, notify.Message{
+								Host:  hostName,
+								Level: "error",
+								Title: fmt.Sprintf("registry %s unreachable", host),
+								Text:  reason,
+							})
+						}
+						return
+					}
+					firstSeen, ok := fetchFirstSeen[inst]
+					if !ok {
+						firstSeen = nowFn()
+						fetchFirstSeen[inst] = firstSeen
+					}
+					if !nowFn().Before(firstSeen.Add(FetchErrorNoticeAfter)) {
+						if lastErrors[inst] != reason {
+							lastErrors[inst] = reason
+							_ = notif.Send(ctx, notify.Message{
+								Host:  hostName,
+								Level: "error",
+								Title: fmt.Sprintf("%s agent error", inst),
+								Text:  reason,
+							})
+						}
+					}
+				}
 
 				defer func() {
 					if r := recover(); r != nil {
@@ -315,14 +383,14 @@ func Run(ctx context.Context, cfg Config) error {
 					te := deploy.TimeoutError(fetchCtx)
 					fetchCancel()
 					if te != nil {
-						recordError(inst, te.Error())
+						handleFetchError(te)
 						return
 					}
 					// A restart cancels the fetch in progress; that is not a failure to report.
 					if ctx.Err() != nil {
 						return
 					}
-					recordError(inst, err.Error())
+					handleFetchError(err)
 					return
 				}
 				fetchCancel()
@@ -400,6 +468,14 @@ func Run(ctx context.Context, cfg Config) error {
 				logDecision(inst, "deploy", status)
 			}(inst)
 		}
+		if ctx.Err() == nil {
+			for h := range regFirstSeen {
+				if !regFailedThisTick[h] {
+					delete(regFirstSeen, h)
+					delete(regNotified, h)
+				}
+			}
+		}
 	}
 
 	runTick()
@@ -418,4 +494,81 @@ func Run(ctx context.Context, cfg Config) error {
 			runTick()
 		}
 	}
+}
+
+// classifyFetchError reports whether a Desired fetch error is transient
+// (network hiccup, rate limit, 5xx, timeout) and, when scoped to a registry,
+// returns its host so failures coalesce across instances.
+func classifyFetchError(err error) (transient bool, host string) {
+	var oe *output.Error
+	if !errors.As(err, &oe) {
+		return false, ""
+	}
+	switch oe.Code {
+	case "E_TIMEOUT":
+		return true, ""
+	case "E_REGISTRY_RESOLVE":
+		if strings.HasPrefix(oe.Message, "cannot reach registry ") {
+			if strings.Contains(oe.Hint, "syntax") {
+				return false, ""
+			}
+			return true, strings.TrimSpace(strings.TrimPrefix(oe.Message, "cannot reach registry "))
+		}
+		if code, rest, ok := parseHTTPStatus(oe.Message); ok {
+			if code == 429 || (code >= 500 && code <= 599) {
+				return true, extractRegistryHost(rest)
+			}
+		}
+		return false, ""
+	case "E_INFRA_ARTIFACT":
+		if code, rest, ok := parseHTTPStatus(oe.Message); ok {
+			if code == 429 || (code >= 500 && code <= 599) {
+				return true, extractRegistryHost(rest)
+			}
+			return false, ""
+		}
+		if strings.HasPrefix(oe.Message, "resolving ") || strings.HasPrefix(oe.Message, "pulling ") {
+			return true, extractRegistryHost(oe.Message)
+		}
+		return false, ""
+	default:
+		return false, ""
+	}
+}
+
+func parseHTTPStatus(msg string) (code int, rest string, ok bool) {
+	s, found := strings.CutPrefix(msg, "HTTP ")
+	if !found {
+		return 0, "", false
+	}
+	codeStr, after, hasSpace := strings.Cut(s, " ")
+	n, err := strconv.Atoi(codeStr)
+	if err != nil || n < 100 || n > 599 {
+		return 0, "", false
+	}
+	if hasSpace {
+		rest = after
+	}
+	return n, rest, true
+}
+
+func extractRegistryHost(s string) string {
+	s = strings.TrimPrefix(s, "resolving ")
+	s = strings.TrimPrefix(s, "pulling ")
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return ""
+	}
+	ref := strings.TrimSuffix(fields[0], ":")
+	if idx := strings.IndexByte(ref, '@'); idx >= 0 {
+		ref = ref[:idx]
+	}
+	host, _, ok := strings.Cut(ref, "/")
+	if !ok {
+		return ""
+	}
+	if host == "localhost" || strings.ContainsAny(host, ".:") {
+		return host
+	}
+	return ""
 }

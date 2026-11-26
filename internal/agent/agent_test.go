@@ -995,3 +995,446 @@ func TestAgentLockedFirstSeenResetsAfterDeploy(t *testing.T) {
 		t.Fatalf("expected no error decision in log, got:\n%s", out.String())
 	}
 }
+
+func TestAgentTransientRegistryErrorNotifiesOnceAfterFetchErrorNoticeAfter(t *testing.T) {
+	store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
+	seedOK(t, store, "demo-dev")
+	notif := &fakeNotifier{}
+	var out syncBuffer
+
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tickTimes := []time.Time{
+		t0,
+		t0.Add(agent.FetchErrorNoticeAfter - time.Second),
+		t0.Add(agent.FetchErrorNoticeAfter),
+		t0.Add(agent.FetchErrorNoticeAfter + time.Minute),
+	}
+	regErr := &output.Error{
+		Code:    "E_REGISTRY_RESOLVE",
+		Message: "cannot reach registry ghcr.io",
+		Hint:    "check registry connectivity and credentials",
+	}
+
+	var mu sync.Mutex
+	now := t0
+	tick := 0
+	var countsAfterTick []int
+	var loggedOnTick0 bool
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := agent.Config{
+		Interval: time.Millisecond,
+		Store:    store,
+		Deployer: &fakeDeployer{},
+		Notify:   notif,
+		Out:      &out,
+		Once:     false,
+		Now: func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return now
+		},
+		Load: func(inst string) (*instance.Decisions, *contract.Project, error) {
+			return &instance.Decisions{Instance: inst, Env: "dev"}, &contract.Project{}, nil
+		},
+		Sources: func(d *instance.Decisions) deploy.Source {
+			mu.Lock()
+			defer mu.Unlock()
+			if tick == 1 {
+				loggedOnTick0 = strings.Contains(out.String(), "E_REGISTRY_RESOLVE: cannot reach registry ghcr.io")
+			}
+			if tick > 0 {
+				notif.mu.Lock()
+				countsAfterTick = append(countsAfterTick, len(notif.messages))
+				notif.mu.Unlock()
+			}
+			if tick >= len(tickTimes) {
+				return cancelSource{cancel: cancel}
+			}
+			now = tickTimes[tick]
+			tick++
+			return &fakeSource{err: regErr}
+		},
+	}
+
+	if err := agent.Run(ctx, cfg); err != nil {
+		t.Fatalf("agent.Run failed: %v", err)
+	}
+
+	if !loggedOnTick0 {
+		t.Fatalf("expected error logged to journal on tick 0, got:\n%s", out.String())
+	}
+	wantCounts := []int{0, 0, 1, 1}
+	if len(countsAfterTick) != len(wantCounts) {
+		t.Fatalf("expected %d ticks recorded, got %v", len(wantCounts), countsAfterTick)
+	}
+	for i, want := range wantCounts {
+		if countsAfterTick[i] != want {
+			t.Fatalf("after tick %d: notification count = %d, want %d (all: %v)\nlog:\n%s", i, countsAfterTick[i], want, countsAfterTick, out.String())
+		}
+	}
+
+	notif.mu.Lock()
+	msgs := notif.messages
+	notif.mu.Unlock()
+	if len(msgs) != 1 || msgs[0].Level != "error" || msgs[0].Title != "registry ghcr.io unreachable" || msgs[0].Text != regErr.Error() {
+		t.Fatalf("unexpected notifications: %+v", msgs)
+	}
+}
+
+func TestAgentTransientRegistryErrorCoalescesAcrossInstances(t *testing.T) {
+	store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
+	seedOK(t, store, "app-a")
+	seedOK(t, store, "app-b")
+	notif := &fakeNotifier{}
+	var out syncBuffer
+
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tickTimes := []time.Time{
+		t0,
+		t0.Add(agent.FetchErrorNoticeAfter),
+		t0.Add(agent.FetchErrorNoticeAfter + time.Minute),
+	}
+	errA := &output.Error{
+		Code:    "E_REGISTRY_RESOLVE",
+		Message: "cannot reach registry ghcr.io",
+		Hint:    "check registry connectivity and credentials",
+	}
+	errB := &output.Error{
+		Code:    "E_INFRA_ARTIFACT",
+		Message: "HTTP 503 resolving ghcr.io/org/infra:dev",
+		Hint:    "check the artifact reference and registry credentials",
+	}
+
+	var mu sync.Mutex
+	now := t0
+	tick := 0
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := agent.Config{
+		Interval: time.Millisecond,
+		Store:    store,
+		Deployer: &fakeDeployer{},
+		Notify:   notif,
+		Out:      &out,
+		Once:     false,
+		Now: func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return now
+		},
+		Load: func(inst string) (*instance.Decisions, *contract.Project, error) {
+			return &instance.Decisions{Instance: inst, Env: "dev"}, &contract.Project{}, nil
+		},
+		Sources: func(d *instance.Decisions) deploy.Source {
+			mu.Lock()
+			defer mu.Unlock()
+			if d.Instance == "app-a" {
+				if tick >= len(tickTimes) {
+					return cancelSource{cancel: cancel}
+				}
+				now = tickTimes[tick]
+				tick++
+				return &fakeSource{err: errA}
+			}
+			return &fakeSource{err: errB}
+		},
+	}
+
+	if err := agent.Run(ctx, cfg); err != nil {
+		t.Fatalf("agent.Run failed: %v", err)
+	}
+
+	notif.mu.Lock()
+	msgs := notif.messages
+	notif.mu.Unlock()
+	if len(msgs) != 1 || msgs[0].Title != "registry ghcr.io unreachable" {
+		t.Fatalf("expected exactly 1 coalesced notification for ghcr.io, got %+v", msgs)
+	}
+}
+
+func TestAgentTransientRegistryErrorResetsOnCleanTick(t *testing.T) {
+	store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
+	seedOK(t, store, "demo-dev")
+	notif := &fakeNotifier{}
+	var out syncBuffer
+
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tickTimes := []time.Time{
+		t0,
+		t0.Add(time.Minute),
+		t0.Add(agent.FetchErrorNoticeAfter),
+	}
+	regErr := &output.Error{
+		Code:    "E_REGISTRY_RESOLVE",
+		Message: "cannot reach registry ghcr.io",
+		Hint:    "check registry connectivity and credentials",
+	}
+
+	var mu sync.Mutex
+	now := t0
+	tick := 0
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := agent.Config{
+		Interval: time.Millisecond,
+		Store:    store,
+		Deployer: &fakeDeployer{},
+		Notify:   notif,
+		Out:      &out,
+		Once:     false,
+		Now: func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return now
+		},
+		Load: func(inst string) (*instance.Decisions, *contract.Project, error) {
+			return &instance.Decisions{Instance: inst, Env: "dev"}, &contract.Project{}, nil
+		},
+		Sources: func(d *instance.Decisions) deploy.Source {
+			mu.Lock()
+			defer mu.Unlock()
+			if tick >= len(tickTimes) {
+				return cancelSource{cancel: cancel}
+			}
+			curTick := tick
+			now = tickTimes[tick]
+			tick++
+			if curTick == 1 {
+				return &fakeSource{desired: state.Desired{InfraCommit: "commit-1"}}
+			}
+			return &fakeSource{err: regErr}
+		},
+	}
+
+	if err := agent.Run(ctx, cfg); err != nil {
+		t.Fatalf("agent.Run failed: %v", err)
+	}
+
+	notif.mu.Lock()
+	msgs := notif.messages
+	notif.mu.Unlock()
+	if len(msgs) != 0 {
+		t.Fatalf("expected 0 notifications when registry outage resets on clean tick, got %+v", msgs)
+	}
+}
+
+func TestAgentPermanentFetchErrorsNotifyImmediately(t *testing.T) {
+	cases := []struct {
+		name string
+		err  *output.Error
+	}{
+		{
+			name: "registry 401",
+			err:  &output.Error{Code: "E_REGISTRY_RESOLVE", Message: "HTTP 401 resolving ghcr.io/org/app:dev", Hint: "check token"},
+		},
+		{
+			name: "registry 403",
+			err:  &output.Error{Code: "E_REGISTRY_RESOLVE", Message: "HTTP 403 resolving ghcr.io/org/app:dev", Hint: "check token"},
+		},
+		{
+			name: "registry 404",
+			err:  &output.Error{Code: "E_REGISTRY_RESOLVE", Message: "HTTP 404 resolving ghcr.io/org/app:dev", Hint: "verify tag"},
+		},
+		{
+			name: "registry syntax",
+			err:  &output.Error{Code: "E_REGISTRY_RESOLVE", Message: "cannot reach registry ghcr.io", Hint: "check image and tag syntax"},
+		},
+		{
+			name: "artifact 401",
+			err:  &output.Error{Code: "E_INFRA_ARTIFACT", Message: "HTTP 401 resolving ghcr.io/org/infra:dev", Hint: "check credentials"},
+		},
+		{
+			name: "artifact not contract",
+			err:  &output.Error{Code: "E_INFRA_ARTIFACT", Message: "artifact is not a cvctl contract", Hint: "publish it with cvctl publish"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
+			seedOK(t, store, "demo-dev")
+			notif := &fakeNotifier{}
+			var out syncBuffer
+
+			cfg := agent.Config{
+				Store: store, Deployer: &fakeDeployer{}, Notify: notif, Out: &out, Once: true,
+				Load: func(inst string) (*instance.Decisions, *contract.Project, error) {
+					return &instance.Decisions{Instance: inst, Env: "dev"}, &contract.Project{}, nil
+				},
+				Sources: func(d *instance.Decisions) deploy.Source {
+					return &fakeSource{err: tc.err}
+				},
+			}
+			if err := agent.Run(context.Background(), cfg); err != nil {
+				t.Fatalf("agent.Run failed: %v", err)
+			}
+			if len(notif.messages) != 1 || notif.messages[0].Level != "error" || notif.messages[0].Text != tc.err.Error() {
+				t.Fatalf("expected 1 immediate error notification, got %+v", notif.messages)
+			}
+		})
+	}
+}
+
+func TestAgentFetchTimeoutNotifiesOnceAfterFetchErrorNoticeAfter(t *testing.T) {
+	t.Run("notifies once after threshold", func(t *testing.T) {
+		store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
+		seedOK(t, store, "demo-dev")
+		notif := &fakeNotifier{}
+		var out syncBuffer
+
+		t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+		tickTimes := []time.Time{
+			t0,
+			t0.Add(agent.FetchErrorNoticeAfter - time.Second),
+			t0.Add(agent.FetchErrorNoticeAfter),
+			t0.Add(agent.FetchErrorNoticeAfter + time.Minute),
+		}
+		timeoutErr := &output.Error{
+			Code:    "E_TIMEOUT",
+			Message: "fetch timed out after 50ms",
+			Hint:    "increase CVCTL_TIMEOUT_FETCH in /etc/cvctl/host.env",
+		}
+
+		var mu sync.Mutex
+		now := t0
+		tick := 0
+		var countsAfterTick []int
+		var loggedOnTick0 bool
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		cfg := agent.Config{
+			Interval: time.Millisecond,
+			Store:    store,
+			Deployer: &fakeDeployer{},
+			Notify:   notif,
+			Out:      &out,
+			Once:     false,
+			Now: func() time.Time {
+				mu.Lock()
+				defer mu.Unlock()
+				return now
+			},
+			Load: func(inst string) (*instance.Decisions, *contract.Project, error) {
+				return &instance.Decisions{Instance: inst, Env: "dev"}, &contract.Project{}, nil
+			},
+			Sources: func(d *instance.Decisions) deploy.Source {
+				mu.Lock()
+				defer mu.Unlock()
+				if tick == 1 {
+					loggedOnTick0 = strings.Contains(out.String(), "E_TIMEOUT: fetch timed out after 50ms")
+				}
+				if tick > 0 {
+					notif.mu.Lock()
+					countsAfterTick = append(countsAfterTick, len(notif.messages))
+					notif.mu.Unlock()
+				}
+				if tick >= len(tickTimes) {
+					return cancelSource{cancel: cancel}
+				}
+				now = tickTimes[tick]
+				tick++
+				return &fakeSource{err: timeoutErr}
+			},
+		}
+
+		if err := agent.Run(ctx, cfg); err != nil {
+			t.Fatalf("agent.Run failed: %v", err)
+		}
+
+		if !loggedOnTick0 {
+			t.Fatalf("expected timeout logged to journal on tick 0, got:\n%s", out.String())
+		}
+		wantCounts := []int{0, 0, 1, 1}
+		if len(countsAfterTick) != len(wantCounts) {
+			t.Fatalf("expected %d ticks recorded, got %v", len(wantCounts), countsAfterTick)
+		}
+		for i, want := range wantCounts {
+			if countsAfterTick[i] != want {
+				t.Fatalf("after tick %d: notification count = %d, want %d (all: %v)", i, countsAfterTick[i], want, countsAfterTick)
+			}
+		}
+
+		notif.mu.Lock()
+		msgs := notif.messages
+		notif.mu.Unlock()
+		if len(msgs) != 1 || msgs[0].Level != "error" || msgs[0].Title != "demo-dev agent error" || msgs[0].Text != timeoutErr.Error() {
+			t.Fatalf("unexpected notifications: %+v", msgs)
+		}
+	})
+
+	t.Run("recovery resets timer", func(t *testing.T) {
+		store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
+		seedOK(t, store, "demo-dev")
+		notif := &fakeNotifier{}
+		var out syncBuffer
+
+		t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+		tickTimes := []time.Time{
+			t0,
+			t0.Add(time.Minute),
+			t0.Add(agent.FetchErrorNoticeAfter),
+		}
+		timeoutErr := &output.Error{
+			Code:    "E_TIMEOUT",
+			Message: "fetch timed out after 50ms",
+		}
+
+		var mu sync.Mutex
+		now := t0
+		tick := 0
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		cfg := agent.Config{
+			Interval: time.Millisecond,
+			Store:    store,
+			Deployer: &fakeDeployer{},
+			Notify:   notif,
+			Out:      &out,
+			Once:     false,
+			Now: func() time.Time {
+				mu.Lock()
+				defer mu.Unlock()
+				return now
+			},
+			Load: func(inst string) (*instance.Decisions, *contract.Project, error) {
+				return &instance.Decisions{Instance: inst, Env: "dev"}, &contract.Project{}, nil
+			},
+			Sources: func(d *instance.Decisions) deploy.Source {
+				mu.Lock()
+				defer mu.Unlock()
+				if tick >= len(tickTimes) {
+					return cancelSource{cancel: cancel}
+				}
+				curTick := tick
+				now = tickTimes[tick]
+				tick++
+				if curTick == 1 {
+					return &fakeSource{desired: state.Desired{InfraCommit: "commit-1"}}
+				}
+				return &fakeSource{err: timeoutErr}
+			},
+		}
+
+		if err := agent.Run(ctx, cfg); err != nil {
+			t.Fatalf("agent.Run failed: %v", err)
+		}
+
+		notif.mu.Lock()
+		msgs := notif.messages
+		notif.mu.Unlock()
+		if len(msgs) != 0 {
+			t.Fatalf("expected 0 notifications when fetch timeout resets after clean tick, got %+v", msgs)
+		}
+	})
+}
