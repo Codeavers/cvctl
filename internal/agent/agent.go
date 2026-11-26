@@ -534,8 +534,17 @@ func classifyFetchError(err error) (transient bool, host string) {
 			}
 			return false, ""
 		}
-		if strings.HasPrefix(oe.Message, "resolving ") || strings.HasPrefix(oe.Message, "pulling ") {
-			return true, extractRegistryHost(oe.Message)
+		for _, p := range []string{
+			"resolving ",
+			"pulling ",
+			"reading artifact ",
+			"reading manifest ",
+			"locating layer ",
+			"reading layer ",
+		} {
+			if strings.HasPrefix(oe.Message, p) {
+				return true, extractRegistryHost(oe.Message)
+			}
 		}
 		return false, ""
 	default:
@@ -560,22 +569,19 @@ func parseHTTPStatus(msg string) (code int, rest string, ok bool) {
 }
 
 func extractRegistryHost(s string) string {
-	s = strings.TrimPrefix(s, "resolving ")
-	s = strings.TrimPrefix(s, "pulling ")
-	fields := strings.Fields(s)
-	if len(fields) == 0 {
-		return ""
-	}
-	ref := strings.TrimSuffix(fields[0], ":")
-	if idx := strings.IndexByte(ref, '@'); idx >= 0 {
-		ref = ref[:idx]
-	}
-	host, _, ok := strings.Cut(ref, "/")
-	if !ok {
-		return ""
-	}
-	if host == "localhost" || strings.ContainsAny(host, ".:") {
-		return host
+	what, _, _ := strings.Cut(s, ": ")
+	for _, tok := range strings.Fields(what) {
+		ref := strings.TrimSuffix(tok, ":")
+		if idx := strings.IndexByte(ref, '@'); idx >= 0 {
+			ref = ref[:idx]
+		}
+		host, _, ok := strings.Cut(ref, "/")
+		if !ok {
+			continue
+		}
+		if host == "localhost" || strings.ContainsAny(host, ".:") {
+			return host
+		}
 	}
 	return ""
 }

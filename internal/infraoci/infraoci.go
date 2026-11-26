@@ -128,11 +128,11 @@ func Fetch(ctx context.Context, a Auth, ref, digest string) (*Contract, error) {
 	}
 	img, err := desc.Image()
 	if err != nil {
-		return nil, fail("E_INFRA_ARTIFACT", a.transportMsg(err, "reading artifact"), "check the artifact reference")
+		return nil, fail("E_INFRA_ARTIFACT", a.transportMsg(err, "reading artifact "+ref), "check the artifact reference")
 	}
 	m, err := img.Manifest()
 	if err != nil {
-		return nil, fail("E_INFRA_ARTIFACT", a.transportMsg(err, "reading manifest"), "check the artifact reference")
+		return nil, fail("E_INFRA_ARTIFACT", a.transportMsg(err, "reading manifest "+ref), "check the artifact reference")
 	}
 	if m.MediaType != types.OCIManifestSchema1 {
 		return nil, fail("E_INFRA_ARTIFACT", fmt.Sprintf("artifact manifest has media type %q, want %q", m.MediaType, types.OCIManifestSchema1), "publish it with `cvctl publish`")
@@ -159,16 +159,16 @@ func Fetch(ctx context.Context, a Auth, ref, digest string) (*Contract, error) {
 		}
 		l, err := img.LayerByDigest(d.Digest)
 		if err != nil {
-			return nil, fail("E_INFRA_ARTIFACT", a.transportMsg(err, "locating layer "+file), "republish the artifact")
+			return nil, fail("E_INFRA_ARTIFACT", a.transportMsg(err, "locating layer "+file+" of "+ref), "republish the artifact")
 		}
 		rc, err := l.Compressed()
 		if err != nil {
-			return nil, fail("E_INFRA_ARTIFACT", a.transportMsg(err, "pulling layer "+file), "check registry connectivity")
+			return nil, fail("E_INFRA_ARTIFACT", a.transportMsg(err, "pulling layer "+file+" of "+ref), "check registry connectivity")
 		}
 		data, err := io.ReadAll(io.LimitReader(rc, MaxLayerSize+1))
 		_ = rc.Close()
 		if err != nil {
-			return nil, fail("E_INFRA_ARTIFACT", a.transportMsg(err, "reading layer "+file), "check registry connectivity")
+			return nil, fail("E_INFRA_ARTIFACT", a.transportMsg(err, "reading layer "+file+" of "+ref), "check registry connectivity")
 		}
 		if len(data) > MaxLayerSize {
 			return nil, fail("E_INFRA_ARTIFACT", fmt.Sprintf("layer %q exceeds 1 MiB", file), "keep contract files under 1 MiB")

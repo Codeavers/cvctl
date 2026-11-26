@@ -1259,6 +1259,10 @@ func TestAgentPermanentFetchErrorsNotifyImmediately(t *testing.T) {
 			err:  &output.Error{Code: "E_INFRA_ARTIFACT", Message: "HTTP 401 resolving ghcr.io/org/infra:dev", Hint: "check credentials"},
 		},
 		{
+			name: "artifact manifest 401",
+			err:  &output.Error{Code: "E_INFRA_ARTIFACT", Message: "HTTP 401 reading manifest ghcr.io/org/infra", Hint: "check credentials"},
+		},
+		{
 			name: "artifact not contract",
 			err:  &output.Error{Code: "E_INFRA_ARTIFACT", Message: "artifact is not a cvctl contract", Hint: "publish it with cvctl publish"},
 		},
@@ -1543,5 +1547,85 @@ func TestAgentTransientRegistryErrorRetriesNotifyAfterSendFailure(t *testing.T) 
 		if statsAfterTick[i] != want {
 			t.Fatalf("after tick %d: got %+v, want %+v (all: %+v)", i, statsAfterTick[i], want, statsAfterTick)
 		}
+	}
+}
+
+func TestAgentTransientFetchLayerAndManifestErrorsCoalesceByHost(t *testing.T) {
+	store := state.NewStore(systest.NewFS(), "/var/lib/cvctl")
+	seedOK(t, store, "app-a")
+	seedOK(t, store, "app-b")
+	seedOK(t, store, "app-c")
+	notif := &fakeNotifier{}
+	var out syncBuffer
+
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tickTimes := []time.Time{
+		t0,
+		t0.Add(agent.FetchErrorNoticeAfter),
+		t0.Add(agent.FetchErrorNoticeAfter + time.Minute),
+	}
+	errByInst := map[string]*output.Error{
+		"app-a": {
+			Code:    "E_INFRA_ARTIFACT",
+			Message: "HTTP 503 pulling layer compose.yml of ghcr.io/org/infra",
+			Hint:    "check registry connectivity",
+		},
+		"app-b": {
+			Code:    "E_INFRA_ARTIFACT",
+			Message: "HTTP 503 reading manifest ghcr.io/org/infra",
+			Hint:    "check the artifact reference",
+		},
+		"app-c": {
+			Code:    "E_INFRA_ARTIFACT",
+			Message: "reading layer compose.yml of ghcr.io/org/infra: unexpected EOF",
+			Hint:    "check registry connectivity",
+		},
+	}
+
+	var mu sync.Mutex
+	now := t0
+	tick := 0
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := agent.Config{
+		Interval: time.Millisecond,
+		Store:    store,
+		Deployer: &fakeDeployer{},
+		Notify:   notif,
+		Out:      &out,
+		Once:     false,
+		Now: func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return now
+		},
+		Load: func(inst string) (*instance.Decisions, *contract.Project, error) {
+			return &instance.Decisions{Instance: inst, Env: "dev"}, &contract.Project{}, nil
+		},
+		Sources: func(d *instance.Decisions) deploy.Source {
+			mu.Lock()
+			defer mu.Unlock()
+			if d.Instance == "app-a" {
+				if tick >= len(tickTimes) {
+					return cancelSource{cancel: cancel}
+				}
+				now = tickTimes[tick]
+				tick++
+			}
+			return &fakeSource{err: errByInst[d.Instance]}
+		},
+	}
+
+	if err := agent.Run(ctx, cfg); err != nil {
+		t.Fatalf("agent.Run failed: %v", err)
+	}
+
+	notif.mu.Lock()
+	msgs := notif.messages
+	notif.mu.Unlock()
+	if len(msgs) != 1 || msgs[0].Title != "registry ghcr.io unreachable" {
+		t.Fatalf("expected exactly 1 coalesced notification for ghcr.io, got %+v", msgs)
 	}
 }
